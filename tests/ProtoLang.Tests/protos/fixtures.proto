@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package protolang.tests;
+
+// Test fixtures for name mapping and literal emission. Deliberately exercises the shapes that
+// naive backends get wrong: nested enums, repeated enums, and float vs double fields.
+
+enum TopLevelStatus {
+  TOP_LEVEL_STATUS_UNKNOWN = 0;
+  TOP_LEVEL_STATUS_OK = 1;
+}
+
+message Outer {
+  enum Nested {
+    NESTED_NONE = 0;
+    NESTED_SOME = 1;
+  }
+
+  message Inner {
+    enum Deep {
+      DEEP_NONE = 0;
+    }
+
+    Deep deep = 1;
+  }
+
+  TopLevelStatus status = 1;
+  Nested nested = 2;
+  Inner inner = 3;
+  repeated Nested nested_values = 4;
+  string label = 5;
+  float ratio = 6;
+  double amount = 7;
+  int64 count = 8;
+}

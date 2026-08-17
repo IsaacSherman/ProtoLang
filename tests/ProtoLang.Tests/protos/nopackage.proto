@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+// No package declaration. Exercises the empty-namespace path, where a backend that blindly
+// concatenates namespace and type name emits "global::.Name".
+
+enum BareStatus {
+  BARE_STATUS_NONE = 0;
+}
+
+message BareMessage {
+  BareStatus status = 1;
+  int64 value = 2;
+}

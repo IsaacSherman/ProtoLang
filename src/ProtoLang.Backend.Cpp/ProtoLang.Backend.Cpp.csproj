@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>ProtoLang.Backend.Cpp</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ProtoLang.Core\ProtoLang.Core.csproj" />
+  </ItemGroup>
+
+</Project>

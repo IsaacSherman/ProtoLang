@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>ProtoLang.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+  </ItemGroup>
+
+  <!--
+    The descriptor and backend tests need a real protoc. Referencing Grpc.Tools restores its
+    bundled protoc into whichever package cache this build is using, so ProtocLocator finds it
+    without depending on what happens to be in the current user's profile.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Grpc.Tools" Version="2.80.0" PrivateAssets="all" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ProtoLang.Core\ProtoLang.Core.csproj" />
+    <ProjectReference Include="..\..\src\ProtoLang.Backend.CSharp\ProtoLang.Backend.CSharp.csproj" />
+    <ProjectReference Include="..\..\src\ProtoLang.Backend.Cpp\ProtoLang.Backend.Cpp.csproj" />
+  </ItemGroup>
+
+</Project>

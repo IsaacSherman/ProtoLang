@@ -179,7 +179,9 @@ Open Question:
 
 ### 6.4 Keywords
 
-Reserved keywords, candidate list:
+Reserved keywords, candidate list. Note this list is missing `import`, `proto`, `double`, `float`,
+and `bytes`, all of which the language already uses elsewhere in this document; the implementation
+reserves them too, along with `on_zero` and `fail` (10.2.1).
 
 ```text
 and
@@ -404,17 +406,43 @@ Numeric behavior is one of the highest-risk portability areas.
 
 ### 10.1 Integer Overflow
 
-The spec must choose one:
+**Decided: wrapping is the default.**
 
-- Checked overflow: overflow produces an error result.
-- Wrapping overflow: overflow wraps according to fixed-width integer rules.
-- Saturating overflow.
-- Arbitrary precision intermediate arithmetic.
-- Implementation-defined overflow.
+Normative Requirements:
+
+- When the mathematical result of an integer operation falls outside the range of its type, the
+  result is reduced modulo 2^N, where N is the bit width of the operand type.
+- Operands of a binary arithmetic operator must already have the same type. ProtoLang applies no
+  implicit numeric conversion, so overflow is always evaluated in a single, stated width.
+- Backends **must** emit each arithmetic operation explicitly rather than relying on the target
+  language's default behavior, **even where the target default already matches**. A default is a
+  property of the consumer's build; ProtoLang semantics must be a property of the generated code.
+
+The rationale for the third rule is that all three initial targets disagree, and two of them
+disagree in ways that are silent:
+
+| Target | Native `int64` overflow | Why the default is not enough |
+|---|---|---|
+| C# | Wraps. Integer arithmetic is unchecked unless opted in. | A consumer setting `CheckForOverflowUnderflow` in their `.csproj` silently converts wrapping into `OverflowException`. |
+| C++ | **Undefined behavior** for signed types. | Not "wraps on most compilers": the optimizer may assume overflow never occurs and delete dependent code. |
+| Python | Cannot overflow; integers are arbitrary precision. | Wrapping must be reconstructed by masking and sign-correcting. |
+
+Backend obligations:
+
+- **C#** emits `unchecked(...)` around `+`, `-`, `*`, and unary `-`.
+- **C++** routes all integer arithmetic through helpers that perform the operation in the unsigned
+  domain, where modular behavior is well-defined, and convert back. Requires C++20, where the
+  conversion back to the signed type is defined as two's complement.
+- **Python** must mask to the operand width and sign-correct.
+
+Note that `unchecked` in C# does **not** cover division: `long.MinValue / -1` traps at the hardware
+level regardless of context. `/` and `%` therefore require helpers in C# as well as in C++.
 
 Open Question:
 
-- Which overflow model best matches ProtoLang's portability goals?
+- The syntax for declaring a non-default arithmetic behavior per file, per method, or per
+  expression is not yet designed. The typed IR already carries a per-operation behavior
+  annotation, so adding `Checked` or `Saturate` is a front-end and backend change only.
 
 ### 10.2 Division
 
@@ -425,16 +453,77 @@ The spec must define:
 - Signed division edge cases.
 - Floating-point division by zero.
 
-Candidate:
+**Decided:**
 
 - Integer division truncates toward zero.
-- Integer division by zero returns an error result.
-- Floating-point division follows IEEE 754.
+- Floating-point division follows IEEE 754: `x / 0.0` is `±inf`, `0.0 / 0.0` is `NaN`. No
+  declaration is required, because the operation cannot fail.
+- Signed division overflow (`MIN / -1`, `MIN % -1`) wraps per 10.1: the results are `MIN` and `0`.
+- **Integer division by zero is not left to the target. The author must state what happens.**
+
+### 10.2.1 The `on_zero` clause
+
+Integer `/` and `%` require an `on_zero` clause. It takes one of two forms: a fallback value, or
+`fail`.
+
+```protolang
+// A zero divisor has a sensible answer here.
+fn mean_item_cents() -> int64 {
+    return total_cents() / item_count() on_zero 0;
+}
+
+// A zero divisor means the caller handed us something impossible. Stop.
+fn strict_rate() -> int64 {
+    return counts / live_time on_zero fail;
+}
+```
+
+Normative Requirements:
+
+- Integer `/` and `%` are a compile error (`PL0054`) without an `on_zero` clause, unless the divisor
+  is a literal that is provably non-zero.
+- `on_zero <expression>` substitutes that value. It must already have the type the division
+  produces; no implicit conversion is applied (10.3).
+- `on_zero fail` terminates the program deterministically, with a diagnostic naming the operation.
+  It is not catchable and not recoverable. Backends map it to `Environment.FailFast` in C# and
+  `std::abort` in C++.
+- The clause binds to the single division it follows: `x + a / b on_zero 0` means
+  `x + (a / b on_zero 0)`. The fallback parses at unary precedence, so anything more involved than a
+  literal, name, or call must be parenthesized.
+- `on_zero` is rejected on any other operator, and on floating-point division, where it is
+  meaningless (`PL0015`).
+- Backends emit a runtime zero check for every integer division except the proven-literal case.
+
+`fail` is deliberately blunt. A catchable exception would let a consumer resume from a state the
+author explicitly said has no valid result, and C++ has no equivalent construct under the
+free-function design in 24.2. Termination is the only failure mode that means the same thing in
+every target, which is the whole point of the section.
+
+This is also why ProtoLang does not need `Result` in order to ship. `Result` remains the better
+long-term answer for recoverable failure, but it forces propagation syntax into every expression
+containing a division, and that cost multiplies with each new backend rather than amortizing. The
+two `on_zero` forms cover the cases that actually arise: there is a sensible substitute, or there
+is not.
+
+Rationale: leaving this to the target is not a portability compromise, it is three different
+programs. The same source produces a `DivideByZeroException` in C#, a `SIGFPE` crash on x86 in C++,
+and a **silent zero** on ARM, where `SDIV`/`UDIV` by zero returns 0 rather than trapping. Requiring
+the author to state the behavior costs one clause and removes the divergence entirely.
+
+The literal exception exists so that `count / 2` does not demand a fallback for a branch that can
+never be taken; no runtime check is emitted in that case.
 
 Open Questions:
 
-- Should division by zero be a compile-time error when statically known?
-- Should runtime division by zero be represented through explicit error returns?
+- Should division by zero be a compile-time error when the divisor is a statically known zero
+  expression rather than a literal? Today only literal `0` is caught, and only because it fails the
+  proven-non-zero test rather than by any dedicated analysis.
+- `on_zero fail` gives generated library code the ability to terminate the host process. That is
+  intentional, but it is a larger capability than anything else the language permits (20), and a
+  server embedding ProtoLang behavior has no way to opt out.
+- Python's `/` produces a float and `//` floors, so neither maps to truncating division, and Python
+  raises on float division by zero rather than yielding `inf`. The Python backend will need explicit
+  helpers for both.
 
 ### 10.3 Numeric Conversions
 
@@ -450,6 +539,21 @@ Recommendation:
 
 - Keep implicit conversions minimal.
 - Require explicit conversion where precision, sign, or range may change.
+
+Decided:
+
+- There are **no** implicit numeric conversions. Both operands of a binary arithmetic or comparison
+  operator must already have the same type, and a returned value must already have the declared
+  return type. This is what makes the overflow rule in 10.1 well-defined: the width the result wraps
+  to is never the product of a promotion the author did not write.
+- Integer literals are the single exception: a literal adopts the expected type at its use site when
+  the value fits, so `var total: int64 = 0;` needs no suffix or cast.
+
+Open Question:
+
+- Explicit cast syntax is not yet designed. Until it exists, mixed-width arithmetic cannot be
+  written at all, which is a real gap: `int32 * int64` is currently a compile error with no
+  workaround.
 
 ## 11. Strings
 
@@ -778,6 +882,8 @@ Open Questions:
 
 - Does ProtoLang define a built-in `Result` type? `I think we should- it doesn't have to be used, but it should be there for ease of use. ~IS`
 - Are arithmetic errors expressible in the type system? `Yes, it should be a fairly expansive enum. ~IS`
+  Note: overflow is no longer one of them. Since 10.1 defines overflow as wrapping, it is a defined
+  result rather than a failure, and nothing about it needs to reach the type system.
 - Can methods be declared as total, meaning they cannot fail at runtime? `I lean toward no, but this might be a nice optimization at some point. ~IS`
 - How do target backends map error results idiomatically while preserving semantics?  `Error handling is heavily on the user to define; we'll provide the Result type with primitive error enums for primitive "exceptions" such as dividing by zero. More advanced stuff?  Users can (and should!) tailor that to their specific needs. ~IS`
 
@@ -882,16 +988,26 @@ A backend is conforming if it:
 
 Template:
 
+Status as of the first working compiler. "No" means the backend rejects the feature at compile
+time rather than emitting something whose semantics differ.
+
 | Feature | C# | C++ | Python | Notes |
 |---|---:|---:|---:|---|
-| Attached methods | TBD | TBD | TBD |  |
-| Mutable methods | TBD | TBD | TBD |  |
-| Virtual methods | TBD | TBD | TBD |  |
-| Repeated iteration | TBD | TBD | TBD |  |
-| Maps | TBD | TBD | TBD |  |
-| Result/error returns | TBD | TBD | TBD |  |
-| Proto2 presence | TBD | TBD | TBD |  |
-| Proto3 optional | TBD | TBD | TBD |  |
+| Attached methods | Yes | Yes | — | C#: extension methods. C++: free functions. |
+| Wrapping integer arithmetic | Yes | Yes | — | `unchecked(...)` / unsigned round-trip helpers. |
+| Checked division (`on_zero`) | Yes | Yes | — | Runtime zero check in both; see 10.2.1. |
+| `on_zero fail` | Yes | Yes | — | `Environment.FailFast` / `std::abort`. |
+| IEEE 754 float division | Yes | Yes | — | Native in both. Python will need a helper. |
+| Repeated iteration | Yes | Yes | — | `foreach` / range-`for` over the protobuf container. |
+| Cross-message method calls | Yes | Yes | — | C++ emits all declarations before any definition. |
+| Mutable methods | No | No | — | Blocked on the open question in 16.1. |
+| Virtual methods | No | No | — | Blocked on 17; both backends reject. |
+| Maps | No | No | — | Blocked on 14.2. |
+| Result/error returns | No | No | — | Blocked on 19. |
+| Explicit casts | No | No | — | Blocked on 10.3; no syntax yet. |
+| Conditionals and `while` | No | No | — | Parsed keywords are reserved but unimplemented. |
+| Proto2 presence | No | No | — | Blocked on 21.3. |
+| Proto3 optional | No | No | — | Blocked on 21.3. |
 
 ## 24. Generated API Strategy
 
@@ -906,10 +1022,18 @@ Potential strategies:
 - Generated companion classes.
 - Wrapper/adaptor classes.
 
+**Decided for the current implementation: extension methods**, in a
+`{Message}ProtoLangExtensions` static class per receiver. This imposes nothing on the protobuf
+codegen: the generated messages may live in a different assembly, and nothing depends on their
+being partial. Method names are PascalCased to match the C# protobuf generator, so
+`line_total_cents` becomes `LineTotalCents` and reads the same as a hand-written member.
+
+This choice may need revisiting if mutation (18) is allowed, since extension methods cannot access
+anything the public surface does not already expose.
+
 Questions:
 
 - Are generated protobuf C# classes safe to extend directly?
-- Should read-only methods become extension methods?
 - Should mutable methods require partial class integration?
 - How should virtual behavior be represented?
 
@@ -923,11 +1047,20 @@ Potential strategies:
 - Wrapper/adaptor classes.
 - Policy-based override hooks.
 
+**Decided for the current implementation: header-only free functions** in the message's own
+protobuf namespace, taking the receiver as `const T&`. This subclasses nothing, needs no protoc
+insertion points, and behaves the same whether the protobuf codegen is regenerated or vendored.
+All declarations are emitted before any definition so methods may call one another in any order.
+
+Const-correctness follows from the read-only method model: every receiver is `const T&` and every
+message-typed parameter is `const T&`. If mutation (18) is allowed, that decision has to be
+revisited along with the free-function shape.
+
 Questions:
 
 - Should generated methods be added to message classes when insertion points are available?
-- How should const-correctness be represented?
-- What is the ABI compatibility strategy?
+- What is the ABI compatibility strategy? Header-only inline functions sidestep this for now, at
+  the cost of recompiling consumers on every regeneration.
 
 ### 24.3 Python
 
@@ -1118,7 +1251,7 @@ extend Invoice {
 
 Expected semantic behavior:
 
-- `line_total_cents` returns `quantity * unit_price_cents` under the selected integer overflow policy.
+- `line_total_cents` returns `quantity * unit_price_cents` with wrapping overflow (10.1).
 - `total_cents` iterates over `items` in protobuf repeated-field order.
 - The method performs no I/O and uses no target-language-specific collection helpers.
 
@@ -1138,7 +1271,10 @@ This section should be maintained as the authoritative list of open decisions.
 - Boolean operator spelling.
 - Assignment expression vs statement.
 - Evaluation order details.
-- Integer overflow model.
+- ~~Integer overflow model.~~ Decided: wrapping (10.1).
+- ~~Division and modulo by zero.~~ Decided: mandatory `on_zero` clause, with `fail` for the case
+  where no substitute value is correct (10.2.1). `Result` (19) is explicitly deferred, not blocked.
+- Explicit cast syntax, needed before mixed-width arithmetic is expressible (10.3).
 - Division by zero model.
 - Numeric conversion rules.
 - String indexing and comparison semantics.

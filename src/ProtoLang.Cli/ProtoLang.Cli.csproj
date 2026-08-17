@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>ProtoLang.Cli</RootNamespace>
+    <AssemblyName>protolangc</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ProtoLang.Core\ProtoLang.Core.csproj" />
+    <ProjectReference Include="..\ProtoLang.Backend.CSharp\ProtoLang.Backend.CSharp.csproj" />
+    <ProjectReference Include="..\ProtoLang.Backend.Cpp\ProtoLang.Backend.Cpp.csproj" />
+  </ItemGroup>
+
+</Project>

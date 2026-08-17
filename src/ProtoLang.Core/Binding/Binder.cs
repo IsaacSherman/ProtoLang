@@ -1,0 +1,1047 @@
+using Google.Protobuf.Reflection;
+using ProtoLang.Diagnostics;
+using ProtoLang.Ir;
+using ProtoLang.Syntax;
+using ProtoLang.Types;
+
+namespace ProtoLang.Binding;
+
+/// <summary>
+/// Resolves names against protobuf descriptors, type-checks the AST, and lowers it to the typed
+/// IR. Runs in two passes so a method may call another method declared later in the file, or in a
+/// different extend block.
+/// </summary>
+public sealed class Binder
+{
+    private readonly DiagnosticBag _diagnostics;
+    private readonly Dictionary<string, MessageDescriptor> _messagesByFullName = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<MessageDescriptor>> _messagesBySimpleName = new(StringComparer.Ordinal);
+    private readonly Dictionary<(string Receiver, string Method), IrMethodSignature> _methods = new();
+
+    public Binder(IReadOnlyList<FileDescriptor> files, DiagnosticBag diagnostics)
+    {
+        _diagnostics = diagnostics;
+
+        foreach (var file in files)
+        {
+            foreach (var message in file.MessageTypes)
+            {
+                IndexMessage(message);
+            }
+        }
+    }
+
+    private void IndexMessage(MessageDescriptor message)
+    {
+        _messagesByFullName[message.FullName] = message;
+
+        if (!_messagesBySimpleName.TryGetValue(message.Name, out var list))
+        {
+            list = [];
+            _messagesBySimpleName[message.Name] = list;
+        }
+
+        list.Add(message);
+
+        foreach (var nested in message.NestedTypes)
+        {
+            IndexMessage(nested);
+        }
+    }
+
+    public IrModule Bind(CompilationUnit unit)
+    {
+        // Pass 1: resolve extend targets and collect signatures.
+        var resolvedExtends = new List<(ExtendDeclaration Declaration, MessageDescriptor Receiver)>();
+
+        foreach (var extend in unit.Extends)
+        {
+            var receiver = ResolveMessage(extend.MessageName, extend.Span);
+            if (receiver is null)
+            {
+                continue;
+            }
+
+            resolvedExtends.Add((extend, receiver));
+
+            foreach (var method in extend.Methods)
+            {
+                DeclareMethod(receiver, method);
+            }
+        }
+
+        // Pass 2: bind bodies now that every signature is visible.
+        var methods = new List<IrMethod>();
+
+        foreach (var (declaration, receiver) in resolvedExtends)
+        {
+            foreach (var method in declaration.Methods)
+            {
+                var bound = BindMethod(receiver, method);
+                if (bound is not null)
+                {
+                    methods.Add(bound);
+                }
+            }
+        }
+
+        return new IrModule(methods);
+    }
+
+    private MessageDescriptor? ResolveMessage(string name, SourceSpan span)
+    {
+        if (_messagesByFullName.TryGetValue(name, out var byFullName))
+        {
+            return byFullName;
+        }
+
+        if (_messagesBySimpleName.TryGetValue(name, out var candidates))
+        {
+            if (candidates.Count == 1)
+            {
+                return candidates[0];
+            }
+
+            _diagnostics.Error(
+                "PL0020",
+                "ambiguous message name",
+                $"'{name}' matches {candidates.Count} messages: "
+                + string.Join(", ", candidates.Select(c => c.FullName)) + ".",
+                span,
+                "Qualify the name with its protobuf package.");
+            return null;
+        }
+
+        _diagnostics.Error(
+            "PL0021",
+            "unknown message type",
+            $"No protobuf message named '{name}' was found in the imported schemas.",
+            span,
+            "Check the 'import proto' declarations and the --proto_path include directories.");
+        return null;
+    }
+
+    private void DeclareMethod(MessageDescriptor receiver, MethodDeclaration method)
+    {
+        var key = (receiver.FullName, method.Name);
+
+        if (_methods.ContainsKey(key))
+        {
+            _diagnostics.Error(
+                "PL0022",
+                "duplicate method",
+                $"'{receiver.FullName}' already defines a method named '{method.Name}'.",
+                method.Span,
+                "Overloading is not supported; give the method a distinct name.");
+            return;
+        }
+
+        if (receiver.FindFieldByName(method.Name) is not null)
+        {
+            _diagnostics.Error(
+                "PL0023",
+                "method name collides with a field",
+                $"'{receiver.FullName}' has a field named '{method.Name}'.",
+                method.Span,
+                "Methods and protobuf fields share one name space on a message.");
+            return;
+        }
+
+        var returnType = method.ReturnType is null
+            ? VoidType.Instance
+            : ResolveTypeReference(method.ReturnType);
+
+        var parameterTypes = new List<PlType>();
+        foreach (var parameter in method.Parameters)
+        {
+            var type = ResolveTypeReference(parameter.Type);
+            if (type is VoidType)
+            {
+                _diagnostics.Error(
+                    "PL0024",
+                    "void is not a value type",
+                    $"Parameter '{parameter.Name}' cannot be declared void.",
+                    parameter.Span,
+                    "void is a return marker only (spec 8.1).");
+                type = ErrorType.Instance;
+            }
+
+            parameterTypes.Add(type);
+        }
+
+        _methods[key] = new IrMethodSignature(receiver, method.Name, returnType, parameterTypes);
+    }
+
+    private PlType ResolveTypeReference(TypeReference reference)
+    {
+        if (reference.Name == "void")
+        {
+            return VoidType.Instance;
+        }
+
+        var scalar = TypeFactory.TryGetScalar(reference.Name);
+        if (scalar is not null)
+        {
+            return scalar;
+        }
+
+        if (_messagesByFullName.TryGetValue(reference.Name, out var byFullName))
+        {
+            return new MessageType(byFullName);
+        }
+
+        if (_messagesBySimpleName.TryGetValue(reference.Name, out var candidates) && candidates.Count == 1)
+        {
+            return new MessageType(candidates[0]);
+        }
+
+        _diagnostics.Error(
+            "PL0025",
+            "unknown type",
+            $"'{reference.Name}' is not a protobuf scalar, message, or enum type.",
+            reference.Span,
+            "ProtoLang types come only from the protobuf type universe (spec 8.1).");
+        return ErrorType.Instance;
+    }
+
+    private IrMethod? BindMethod(MessageDescriptor receiver, MethodDeclaration method)
+    {
+        if (!_methods.TryGetValue((receiver.FullName, method.Name), out var signature))
+        {
+            // Pass 1 already reported why this method was rejected.
+            return null;
+        }
+
+        var parameters = new List<IrParameter>();
+        var scope = new Scope(null);
+
+        for (var i = 0; i < method.Parameters.Count; i++)
+        {
+            var parameter = new IrParameter(method.Parameters[i].Name, signature.ParameterTypes[i]);
+            parameters.Add(parameter);
+
+            if (!scope.TryDeclareParameter(parameter))
+            {
+                _diagnostics.Error(
+                    "PL0026",
+                    "duplicate parameter",
+                    $"A parameter named '{parameter.Name}' is already declared.",
+                    method.Parameters[i].Span);
+            }
+        }
+
+        var context = new MethodContext(receiver, signature.ReturnType, parameters);
+        var body = BindBlock(method.Body, scope, context);
+
+        if (signature.ReturnType is not VoidType && !AlwaysReturns(body))
+        {
+            _diagnostics.Error(
+                "PL0027",
+                "missing return statement",
+                $"'{method.Name}' declares a return type of "
+                + $"'{signature.ReturnType.DisplayName}' but not all paths return a value.",
+                method.Span);
+        }
+
+        return new IrMethod(signature, parameters, body, method.IsVirtual, method.Span);
+    }
+
+    /// <summary>
+    /// Conservative all-paths-return check. The current statement set has no branching, so a
+    /// trailing return (or a trailing block that returns) is both necessary and sufficient.
+    /// </summary>
+    private static bool AlwaysReturns(IrBlock block)
+    {
+        if (block.Statements.Count == 0)
+        {
+            return false;
+        }
+
+        return block.Statements[^1] switch
+        {
+            IrReturn => true,
+            IrBlock nested => AlwaysReturns(nested),
+            _ => false,
+        };
+    }
+
+    private IrBlock BindBlock(BlockStatement block, Scope parent, MethodContext context)
+    {
+        var scope = new Scope(parent);
+        var statements = new List<IrStatement>();
+
+        foreach (var statement in block.Statements)
+        {
+            statements.Add(BindStatement(statement, scope, context));
+        }
+
+        return new IrBlock(statements, block.Span);
+    }
+
+    private IrStatement BindStatement(Statement statement, Scope scope, MethodContext context) => statement switch
+    {
+        BlockStatement block => BindBlock(block, scope, context),
+        VariableDeclarationStatement declaration => BindVariableDeclaration(declaration, scope, context),
+        ReturnStatement returnStatement => BindReturn(returnStatement, scope, context),
+        ForInStatement forIn => BindForIn(forIn, scope, context),
+        AssignmentStatement assignment => BindAssignment(assignment, scope, context),
+        ExpressionStatement expression => new IrExpressionStatement(
+            BindExpression(expression.Expression, scope, context, null),
+            expression.Span),
+        _ => throw new ArgumentOutOfRangeException(nameof(statement), statement, "Unhandled statement."),
+    };
+
+    private IrStatement BindVariableDeclaration(
+        VariableDeclarationStatement declaration,
+        Scope scope,
+        MethodContext context)
+    {
+        PlType? declaredType = declaration.DeclaredType is null
+            ? null
+            : ResolveTypeReference(declaration.DeclaredType);
+
+        if (declaredType is VoidType)
+        {
+            _diagnostics.Error(
+                "PL0024",
+                "void is not a value type",
+                $"Variable '{declaration.Name}' cannot be declared void.",
+                declaration.Span,
+                "void is a return marker only (spec 8.1).");
+            declaredType = ErrorType.Instance;
+        }
+
+        var initializer = BindExpression(declaration.Initializer, scope, context, declaredType);
+
+        if (declaredType is not null
+            && declaredType is not ErrorType
+            && initializer.Type is not ErrorType
+            && !TypesMatch(declaredType, initializer.Type))
+        {
+            _diagnostics.Error(
+                "PL0028",
+                "type mismatch in variable initializer",
+                $"Cannot initialize '{declaration.Name}' of type '{declaredType.DisplayName}' "
+                + $"with a value of type '{initializer.Type.DisplayName}'.",
+                declaration.Span,
+                "ProtoLang does not apply implicit numeric conversions.");
+        }
+
+        var local = new IrLocal(declaration.Name, declaredType ?? initializer.Type);
+
+        if (!scope.TryDeclareLocal(local))
+        {
+            _diagnostics.Error(
+                "PL0029",
+                "duplicate variable",
+                $"A variable named '{declaration.Name}' is already in scope.",
+                declaration.Span);
+        }
+
+        return new IrVariableDeclaration(local, initializer, declaration.Span);
+    }
+
+    private IrStatement BindReturn(ReturnStatement statement, Scope scope, MethodContext context)
+    {
+        if (statement.Value is null)
+        {
+            if (context.ReturnType is not VoidType)
+            {
+                _diagnostics.Error(
+                    "PL0030",
+                    "missing return value",
+                    $"This method must return a value of type '{context.ReturnType.DisplayName}'.",
+                    statement.Span);
+            }
+
+            return new IrReturn(null, statement.Span);
+        }
+
+        var value = BindExpression(statement.Value, scope, context, context.ReturnType);
+
+        if (context.ReturnType is VoidType)
+        {
+            _diagnostics.Error(
+                "PL0031",
+                "unexpected return value",
+                "This method does not declare a return type.",
+                statement.Span);
+        }
+        else if (value.Type is not ErrorType && !TypesMatch(context.ReturnType, value.Type))
+        {
+            _diagnostics.Error(
+                "PL0032",
+                "return type mismatch",
+                $"Cannot return a value of type '{value.Type.DisplayName}' from a method "
+                + $"declared '{context.ReturnType.DisplayName}'.",
+                statement.Span,
+                "ProtoLang does not apply implicit numeric conversions.");
+        }
+
+        return new IrReturn(value, statement.Span);
+    }
+
+    private IrStatement BindForIn(ForInStatement statement, Scope scope, MethodContext context)
+    {
+        var collection = BindExpression(statement.Collection, scope, context, null);
+
+        PlType elementType;
+        if (collection.Type is RepeatedType repeated)
+        {
+            elementType = repeated.ElementType;
+        }
+        else
+        {
+            if (collection.Type is not ErrorType)
+            {
+                _diagnostics.Error(
+                    "PL0033",
+                    "not iterable",
+                    $"Cannot iterate a value of type '{collection.Type.DisplayName}'.",
+                    statement.Collection.Span,
+                    "'for' iterates protobuf repeated fields (spec 14).");
+            }
+
+            elementType = ErrorType.Instance;
+        }
+
+        var loopScope = new Scope(scope);
+        var loop = new IrLocal(statement.VariableName, elementType);
+
+        if (!loopScope.TryDeclareLocal(loop))
+        {
+            _diagnostics.Error(
+                "PL0029",
+                "duplicate variable",
+                $"A variable named '{statement.VariableName}' is already in scope.",
+                statement.Span);
+        }
+
+        var body = BindBlock(statement.Body, loopScope, context);
+        return new IrForEach(loop, collection, body, statement.Span);
+    }
+
+    private IrStatement BindAssignment(AssignmentStatement statement, Scope scope, MethodContext context)
+    {
+        if (statement.Target is not NameExpression name || scope.LookupLocal(name.Name) is not { } local)
+        {
+            _diagnostics.Error(
+                "PL0034",
+                "invalid assignment target",
+                "Only local variables can be assigned.",
+                statement.Target.Span,
+                "Whether methods may mutate the receiver is still an open question (spec 16.1).");
+
+            var boundValue = BindExpression(statement.Value, scope, context, null);
+            return new IrExpressionStatement(boundValue, statement.Span);
+        }
+
+        var value = BindExpression(statement.Value, scope, context, local.Type);
+
+        if (value.Type is not ErrorType && local.Type is not ErrorType && !TypesMatch(local.Type, value.Type))
+        {
+            _diagnostics.Error(
+                "PL0035",
+                "type mismatch in assignment",
+                $"Cannot assign a value of type '{value.Type.DisplayName}' to '{local.Name}' "
+                + $"of type '{local.Type.DisplayName}'.",
+                statement.Span,
+                "ProtoLang does not apply implicit numeric conversions.");
+        }
+
+        return new IrAssignment(local, value, statement.Span);
+    }
+
+    private IrExpression BindExpression(
+        Expression expression,
+        Scope scope,
+        MethodContext context,
+        PlType? expectedType) => expression switch
+        {
+            IntegerLiteralExpression literal => BindIntegerLiteral(literal, expectedType),
+            FloatLiteralExpression literal => new IrLiteral(
+                literal.Value,
+                expectedType is ScalarType { Kind: ScalarKind.Float } ? ScalarType.FloatType : ScalarType.DoubleType,
+                literal.Span),
+            BooleanLiteralExpression literal => new IrLiteral(literal.Value, ScalarType.BoolType, literal.Span),
+            StringLiteralExpression literal => new IrLiteral(literal.Value, ScalarType.StringType, literal.Span),
+            NameExpression name => BindName(name, scope, context),
+            MemberAccessExpression member => BindMemberAccess(member, scope, context),
+            InvocationExpression invocation => BindInvocation(invocation, scope, context),
+            BinaryExpression binary => BindBinary(binary, scope, context, expectedType),
+            UnaryExpression unary => BindUnary(unary, scope, context, expectedType),
+            ErrorExpression error => new IrLiteral(null, ErrorType.Instance, error.Span),
+            _ => throw new ArgumentOutOfRangeException(nameof(expression), expression, "Unhandled expression."),
+        };
+
+    /// <summary>
+    /// Integer literals adopt the expected integer type when the value fits, so
+    /// <c>var total: int64 = 0;</c> does not require a suffix or a cast.
+    /// </summary>
+    private IrExpression BindIntegerLiteral(IntegerLiteralExpression literal, PlType? expectedType)
+    {
+        if (expectedType is ScalarType scalar)
+        {
+            if (scalar.IsFloatingPoint)
+            {
+                return new IrLiteral((double)literal.Value, scalar, literal.Span);
+            }
+
+            if (scalar.IsInteger && FitsIn(literal.Value, scalar))
+            {
+                return new IrLiteral(literal.Value, scalar, literal.Span);
+            }
+
+            if (scalar.IsInteger)
+            {
+                _diagnostics.Error(
+                    "PL0036",
+                    "integer literal out of range",
+                    $"{literal.Value} is outside the range of '{scalar.DisplayName}'.",
+                    literal.Span);
+                return new IrLiteral(literal.Value, scalar, literal.Span);
+            }
+        }
+
+        return new IrLiteral(literal.Value, ScalarType.Int64Type, literal.Span);
+    }
+
+    private static bool FitsIn(long value, ScalarType scalar) => scalar.Kind switch
+    {
+        ScalarKind.Int32 => value is >= int.MinValue and <= int.MaxValue,
+        ScalarKind.Int64 => true,
+        ScalarKind.UInt32 => value is >= 0 and <= uint.MaxValue,
+        ScalarKind.UInt64 => value >= 0,
+        _ => false,
+    };
+
+    private IrExpression BindName(NameExpression name, Scope scope, MethodContext context)
+    {
+        if (scope.LookupLocal(name.Name) is { } local)
+        {
+            return new IrLocalReference(local, name.Span);
+        }
+
+        if (scope.LookupParameter(name.Name) is { } parameter)
+        {
+            return new IrParameterReference(parameter, name.Span);
+        }
+
+        // A bare identifier may be a field of the implicit receiver, as in `quantity`.
+        var field = context.Receiver.FindFieldByName(name.Name);
+        if (field is not null)
+        {
+            return BindFieldAccess(new IrThis(new MessageType(context.Receiver), name.Span), field, name.Span);
+        }
+
+        _diagnostics.Error(
+            "PL0037",
+            "unknown name",
+            $"'{name.Name}' is not a variable, parameter, or field of "
+            + $"'{context.Receiver.FullName}'.",
+            name.Span);
+        return new IrLiteral(null, ErrorType.Instance, name.Span);
+    }
+
+    private IrExpression BindFieldAccess(IrExpression receiver, FieldDescriptor field, SourceSpan span)
+    {
+        if (field.IsMap)
+        {
+            _diagnostics.Error(
+                "PL0038",
+                "maps are not supported",
+                $"Field '{field.Name}' is a map, which this compiler version does not support.",
+                span);
+            return new IrLiteral(null, ErrorType.Instance, span);
+        }
+
+        return new IrFieldAccess(receiver, field, TypeFactory.FromField(field), span);
+    }
+
+    private IrExpression BindMemberAccess(MemberAccessExpression member, Scope scope, MethodContext context)
+    {
+        var receiver = BindExpression(member.Receiver, scope, context, null);
+
+        if (receiver.Type is ErrorType)
+        {
+            return new IrLiteral(null, ErrorType.Instance, member.Span);
+        }
+
+        if (receiver.Type is not MessageType messageType)
+        {
+            _diagnostics.Error(
+                "PL0039",
+                "member access on a non-message value",
+                $"Type '{receiver.Type.DisplayName}' has no members.",
+                member.Span);
+            return new IrLiteral(null, ErrorType.Instance, member.Span);
+        }
+
+        var field = messageType.Descriptor.FindFieldByName(member.Name);
+        if (field is not null)
+        {
+            return BindFieldAccess(receiver, field, member.Span);
+        }
+
+        if (_methods.ContainsKey((messageType.Descriptor.FullName, member.Name)))
+        {
+            _diagnostics.Error(
+                "PL0040",
+                "method used as a value",
+                $"'{member.Name}' is a method and must be called.",
+                member.Span,
+                $"Write '{member.Name}()'.");
+            return new IrLiteral(null, ErrorType.Instance, member.Span);
+        }
+
+        _diagnostics.Error(
+            "PL0041",
+            "unknown field",
+            $"'{messageType.Descriptor.FullName}' has no field named '{member.Name}'.",
+            member.Span);
+        return new IrLiteral(null, ErrorType.Instance, member.Span);
+    }
+
+    private IrExpression BindInvocation(InvocationExpression invocation, Scope scope, MethodContext context)
+    {
+        IrExpression receiver;
+        string methodName;
+        MessageDescriptor receiverDescriptor;
+
+        switch (invocation.Callee)
+        {
+            case MemberAccessExpression member:
+            {
+                var boundReceiver = BindExpression(member.Receiver, scope, context, null);
+                if (boundReceiver.Type is ErrorType)
+                {
+                    return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+                }
+
+                if (boundReceiver.Type is not MessageType messageType)
+                {
+                    _diagnostics.Error(
+                        "PL0042",
+                        "method call on a non-message value",
+                        $"Type '{boundReceiver.Type.DisplayName}' has no methods.",
+                        invocation.Span);
+                    return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+                }
+
+                receiver = boundReceiver;
+                methodName = member.Name;
+                receiverDescriptor = messageType.Descriptor;
+                break;
+            }
+
+            case NameExpression name:
+                receiver = new IrThis(new MessageType(context.Receiver), name.Span);
+                methodName = name.Name;
+                receiverDescriptor = context.Receiver;
+                break;
+
+            default:
+                _diagnostics.Error(
+                    "PL0043",
+                    "expression is not callable",
+                    "Only ProtoLang methods can be called.",
+                    invocation.Span,
+                    "Calling target-language functions is not permitted (spec 20).");
+                return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+        }
+
+        if (!_methods.TryGetValue((receiverDescriptor.FullName, methodName), out var signature))
+        {
+            _diagnostics.Error(
+                "PL0044",
+                "unknown method",
+                $"'{receiverDescriptor.FullName}' has no ProtoLang method named '{methodName}'.",
+                invocation.Span,
+                "Methods must be defined in an extend block for that message.");
+            return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+        }
+
+        var arguments = new List<IrExpression>();
+        for (var i = 0; i < invocation.Arguments.Count; i++)
+        {
+            var expected = i < signature.ParameterTypes.Count ? signature.ParameterTypes[i] : null;
+            arguments.Add(BindExpression(invocation.Arguments[i], scope, context, expected));
+        }
+
+        if (arguments.Count != signature.ParameterTypes.Count)
+        {
+            _diagnostics.Error(
+                "PL0045",
+                "wrong number of arguments",
+                $"'{methodName}' takes {signature.ParameterTypes.Count} argument(s) "
+                + $"but {arguments.Count} were supplied.",
+                invocation.Span);
+            return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+        }
+
+        for (var i = 0; i < arguments.Count; i++)
+        {
+            if (arguments[i].Type is ErrorType)
+            {
+                continue;
+            }
+
+            if (!TypesMatch(signature.ParameterTypes[i], arguments[i].Type))
+            {
+                _diagnostics.Error(
+                    "PL0046",
+                    "argument type mismatch",
+                    $"Argument {i + 1} of '{methodName}' expects "
+                    + $"'{signature.ParameterTypes[i].DisplayName}' but got "
+                    + $"'{arguments[i].Type.DisplayName}'.",
+                    invocation.Arguments[i].Span);
+            }
+        }
+
+        return new IrMethodCall(receiver, signature, arguments, invocation.Span);
+    }
+
+    private IrExpression BindBinary(
+        BinaryExpression binary,
+        Scope scope,
+        MethodContext context,
+        PlType? expectedType)
+    {
+        var isComparison = binary.Operator
+            is BinaryOperatorKind.Equal or BinaryOperatorKind.NotEqual
+            or BinaryOperatorKind.LessThan or BinaryOperatorKind.LessThanOrEqual
+            or BinaryOperatorKind.GreaterThan or BinaryOperatorKind.GreaterThanOrEqual;
+
+        var isLogical = binary.Operator is BinaryOperatorKind.LogicalAnd or BinaryOperatorKind.LogicalOr;
+
+        // Comparisons and logical operators produce bool, so the outer expectation says nothing
+        // about the operands.
+        var operandHint = isComparison || isLogical ? null : expectedType;
+
+        var left = BindExpression(binary.Left, scope, context, operandHint);
+        var right = BindExpression(binary.Right, scope, context, left.Type is ErrorType ? operandHint : left.Type);
+
+        // An untyped integer literal on the left should take its type from the right operand.
+        if (binary.Left is IntegerLiteralExpression && right.Type is ScalarType && !TypesMatch(left.Type, right.Type))
+        {
+            left = BindExpression(binary.Left, scope, context, right.Type);
+        }
+
+        if (left.Type is ErrorType || right.Type is ErrorType)
+        {
+            return new IrBinary(
+                ToIrOperator(binary.Operator),
+                left,
+                right,
+                ErrorType.Instance,
+                ArithmeticBehavior.Wrap,
+                binary.Span);
+        }
+
+        var op = ToIrOperator(binary.Operator);
+
+        if (isLogical)
+        {
+            if (!TypesMatch(left.Type, ScalarType.BoolType) || !TypesMatch(right.Type, ScalarType.BoolType))
+            {
+                _diagnostics.Error(
+                    "PL0047",
+                    "logical operator requires bool operands",
+                    $"Cannot apply '{Describe(binary.Operator)}' to "
+                    + $"'{left.Type.DisplayName}' and '{right.Type.DisplayName}'.",
+                    binary.Span);
+            }
+
+            return new IrBinary(op, left, right, ScalarType.BoolType, ArithmeticBehavior.Wrap, binary.Span);
+        }
+
+        if (!TypesMatch(left.Type, right.Type))
+        {
+            _diagnostics.Error(
+                "PL0048",
+                "operand type mismatch",
+                $"Cannot apply '{Describe(binary.Operator)}' to "
+                + $"'{left.Type.DisplayName}' and '{right.Type.DisplayName}'.",
+                binary.Span,
+                "ProtoLang does not apply implicit numeric conversions; both operands must "
+                + "already have the same type.");
+            return new IrBinary(op, left, right, ErrorType.Instance, ArithmeticBehavior.Wrap, binary.Span);
+        }
+
+        if (isComparison)
+        {
+            var ordered = binary.Operator is not (BinaryOperatorKind.Equal or BinaryOperatorKind.NotEqual);
+            if (ordered && left.Type is not ScalarType { IsNumeric: true })
+            {
+                _diagnostics.Error(
+                    "PL0049",
+                    "operands are not ordered",
+                    $"'{Describe(binary.Operator)}' requires numeric operands, "
+                    + $"but both are '{left.Type.DisplayName}'.",
+                    binary.Span);
+            }
+
+            return new IrBinary(op, left, right, ScalarType.BoolType, ArithmeticBehavior.Wrap, binary.Span);
+        }
+
+        if (left.Type is not ScalarType { IsNumeric: true } resultType)
+        {
+            _diagnostics.Error(
+                "PL0050",
+                "arithmetic on a non-numeric type",
+                $"Cannot apply '{Describe(binary.Operator)}' to '{left.Type.DisplayName}'.",
+                binary.Span);
+            return new IrBinary(op, left, right, ErrorType.Instance, ArithmeticBehavior.Wrap, binary.Span);
+        }
+
+        // Integer division is the only operation that can fail on a value rather than overflow, so
+        // it takes a different path. Floating-point division follows IEEE 754 and yields inf or
+        // NaN, which needs no declaration.
+        if (op is (IrBinaryOperator.Divide or IrBinaryOperator.Modulo) && resultType.IsInteger)
+        {
+            return BindIntegerDivision(binary, op, left, right, resultType, scope, context);
+        }
+
+        if (binary.OnZero is not null)
+        {
+            _diagnostics.Error(
+                "PL0015",
+                "on_zero is only valid on integer division",
+                $"'{resultType.DisplayName}' division follows IEEE 754 and yields infinity or NaN "
+                + "rather than failing.",
+                binary.OnZero.Span);
+        }
+
+        return new IrBinary(op, left, right, resultType, ArithmeticBehavior.Wrap, binary.Span);
+    }
+
+    /// <summary>
+    /// Binds integer <c>/</c> or <c>%</c>. The divisor must either be a literal that is provably
+    /// non-zero, or be accompanied by an <c>on_zero</c> clause naming the result to use instead.
+    /// There is no third option: leaving it to the target would mean an exception in C#, a crash on
+    /// x86 in C++, and a silent zero on ARM, all from one source file.
+    /// </summary>
+    private IrExpression BindIntegerDivision(
+        BinaryExpression binary,
+        IrBinaryOperator op,
+        IrExpression left,
+        IrExpression right,
+        ScalarType resultType,
+        Scope scope,
+        MethodContext context)
+    {
+        var divisorIsProvenNonZero = right is IrLiteral { Value: long literal } && literal != 0;
+
+        if (divisorIsProvenNonZero)
+        {
+            if (binary.OnZero is not null)
+            {
+                _diagnostics.Warning(
+                    "PL0056",
+                    "unnecessary on_zero clause",
+                    "The divisor is a non-zero literal, so this clause is unreachable.",
+                    binary.OnZero.Span);
+            }
+
+            return new IrIntegerDivision(
+                op, left, right, ZeroDivisorBehavior.Unreachable, null, resultType,
+                ArithmeticBehavior.Wrap, binary.Span);
+        }
+
+        if (binary.OnZero is null)
+        {
+            _diagnostics.Error(
+                "PL0054",
+                "integer division requires an on_zero clause",
+                $"'{Describe(binary.Operator)}' on '{resultType.DisplayName}' must state what to "
+                + "produce when the divisor is zero.",
+                binary.Span,
+                $"Write '{Describe(binary.Operator)} <divisor> on_zero <fallback>', or "
+                + $"'{Describe(binary.Operator)} <divisor> on_zero fail' if no value is correct.");
+
+            return new IrIntegerDivision(
+                op, left, right, ZeroDivisorBehavior.Fallback, null, ErrorType.Instance,
+                ArithmeticBehavior.Wrap, binary.Span);
+        }
+
+        if (binary.OnZero.IsFail)
+        {
+            return new IrIntegerDivision(
+                op, left, right, ZeroDivisorBehavior.Fail, null, resultType,
+                ArithmeticBehavior.Wrap, binary.Span);
+        }
+
+        var onZero = BindExpression(binary.OnZero.Fallback!, scope, context, resultType);
+
+        if (onZero.Type is not ErrorType && !TypesMatch(resultType, onZero.Type))
+        {
+            _diagnostics.Error(
+                "PL0055",
+                "on_zero type mismatch",
+                $"The fallback has type '{onZero.Type.DisplayName}' but the division produces "
+                + $"'{resultType.DisplayName}'.",
+                binary.OnZero.Span,
+                "ProtoLang does not apply implicit numeric conversions.");
+        }
+
+        return new IrIntegerDivision(
+            op, left, right, ZeroDivisorBehavior.Fallback, onZero, resultType,
+            ArithmeticBehavior.Wrap, binary.Span);
+    }
+
+    private IrExpression BindUnary(
+        UnaryExpression unary,
+        Scope scope,
+        MethodContext context,
+        PlType? expectedType)
+    {
+        var operand = BindExpression(unary.Operand, scope, context, expectedType);
+
+        if (operand.Type is ErrorType)
+        {
+            return new IrUnary(
+                unary.Operator == UnaryOperatorKind.Negate ? IrUnaryOperator.Negate : IrUnaryOperator.LogicalNot,
+                operand,
+                ErrorType.Instance,
+                ArithmeticBehavior.Wrap,
+                unary.Span);
+        }
+
+        if (unary.Operator == UnaryOperatorKind.Negate)
+        {
+            if (operand.Type is not ScalarType { IsNumeric: true } scalar)
+            {
+                _diagnostics.Error(
+                    "PL0051",
+                    "negation requires a numeric operand",
+                    $"Cannot negate a value of type '{operand.Type.DisplayName}'.",
+                    unary.Span);
+                return new IrUnary(
+                    IrUnaryOperator.Negate, operand, ErrorType.Instance, ArithmeticBehavior.Wrap, unary.Span);
+            }
+
+            if (scalar.IsInteger && !scalar.IsSigned)
+            {
+                _diagnostics.Error(
+                    "PL0052",
+                    "negation of an unsigned type",
+                    $"'{scalar.DisplayName}' is unsigned and cannot be negated.",
+                    unary.Span);
+            }
+
+            return new IrUnary(IrUnaryOperator.Negate, operand, scalar, ArithmeticBehavior.Wrap, unary.Span);
+        }
+
+        if (!TypesMatch(operand.Type, ScalarType.BoolType))
+        {
+            _diagnostics.Error(
+                "PL0053",
+                "logical not requires a bool operand",
+                $"Cannot apply 'not' to a value of type '{operand.Type.DisplayName}'.",
+                unary.Span);
+        }
+
+        return new IrUnary(
+            IrUnaryOperator.LogicalNot, operand, ScalarType.BoolType, ArithmeticBehavior.Wrap, unary.Span);
+    }
+
+    private static IrBinaryOperator ToIrOperator(BinaryOperatorKind kind) => kind switch
+    {
+        BinaryOperatorKind.Add => IrBinaryOperator.Add,
+        BinaryOperatorKind.Subtract => IrBinaryOperator.Subtract,
+        BinaryOperatorKind.Multiply => IrBinaryOperator.Multiply,
+        BinaryOperatorKind.Divide => IrBinaryOperator.Divide,
+        BinaryOperatorKind.Modulo => IrBinaryOperator.Modulo,
+        BinaryOperatorKind.Equal => IrBinaryOperator.Equal,
+        BinaryOperatorKind.NotEqual => IrBinaryOperator.NotEqual,
+        BinaryOperatorKind.LessThan => IrBinaryOperator.LessThan,
+        BinaryOperatorKind.LessThanOrEqual => IrBinaryOperator.LessThanOrEqual,
+        BinaryOperatorKind.GreaterThan => IrBinaryOperator.GreaterThan,
+        BinaryOperatorKind.GreaterThanOrEqual => IrBinaryOperator.GreaterThanOrEqual,
+        BinaryOperatorKind.LogicalAnd => IrBinaryOperator.LogicalAnd,
+        BinaryOperatorKind.LogicalOr => IrBinaryOperator.LogicalOr,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unhandled operator."),
+    };
+
+    private static string Describe(BinaryOperatorKind kind) => kind switch
+    {
+        BinaryOperatorKind.Add => "+",
+        BinaryOperatorKind.Subtract => "-",
+        BinaryOperatorKind.Multiply => "*",
+        BinaryOperatorKind.Divide => "/",
+        BinaryOperatorKind.Modulo => "%",
+        BinaryOperatorKind.Equal => "==",
+        BinaryOperatorKind.NotEqual => "!=",
+        BinaryOperatorKind.LessThan => "<",
+        BinaryOperatorKind.LessThanOrEqual => "<=",
+        BinaryOperatorKind.GreaterThan => ">",
+        BinaryOperatorKind.GreaterThanOrEqual => ">=",
+        BinaryOperatorKind.LogicalAnd => "and",
+        BinaryOperatorKind.LogicalOr => "or",
+        _ => kind.ToString(),
+    };
+
+    private static bool TypesMatch(PlType left, PlType right) => left.Equals(right);
+
+    private sealed record MethodContext(
+        MessageDescriptor Receiver,
+        PlType ReturnType,
+        IReadOnlyList<IrParameter> Parameters);
+
+    private sealed class Scope
+    {
+        private readonly Scope? _parent;
+        private readonly Dictionary<string, IrLocal> _locals = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, IrParameter> _parameters = new(StringComparer.Ordinal);
+
+        public Scope(Scope? parent) => _parent = parent;
+
+        public bool TryDeclareLocal(IrLocal local)
+        {
+            if (LookupLocal(local.Name) is not null || LookupParameter(local.Name) is not null)
+            {
+                return false;
+            }
+
+            _locals[local.Name] = local;
+            return true;
+        }
+
+        public bool TryDeclareParameter(IrParameter parameter)
+        {
+            if (LookupParameter(parameter.Name) is not null)
+            {
+                return false;
+            }
+
+            _parameters[parameter.Name] = parameter;
+            return true;
+        }
+
+        public IrLocal? LookupLocal(string name)
+        {
+            for (var scope = this; scope is not null; scope = scope._parent)
+            {
+                if (scope._locals.TryGetValue(name, out var local))
+                {
+                    return local;
+                }
+            }
+
+            return null;
+        }
+
+        public IrParameter? LookupParameter(string name)
+        {
+            for (var scope = this; scope is not null; scope = scope._parent)
+            {
+                if (scope._parameters.TryGetValue(name, out var parameter))
+                {
+                    return parameter;
+                }
+            }
+
+            return null;
+        }
+    }
+}

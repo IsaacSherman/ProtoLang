@@ -104,5 +104,48 @@ The project is still early, so the spec intentionally captures unresolved decisi
 
 ## Status
 
-ProtoLang is currently a concept and specification effort. The immediate work is to define the language boundary clearly enough to build a parser, typed IR, and initial backend experiments.
+There is now a working compiler for a small slice of the language. It takes the example in
+[examples/simpleScript.protolang](examples/simpleScript.protolang) all the way to C# and C++ source.
+
+Implemented:
+
+- Lexer and recursive-descent parser
+- Protobuf descriptor binding via `protoc`
+- Name resolution and type checking against real descriptors
+- Typed IR carrying resolved types, source locations, and per-operation arithmetic behavior
+- C# backend (extension methods) and C++ backend (header-only free functions)
+
+Not implemented: conditionals and loops other than `for`-`in`, maps, presence, explicit casts,
+mutation, virtual methods, `Result` types, and the Python backend. Backends reject these rather
+than emitting something whose semantics differ from the spec.
+
+### Building
+
+```bash
+dotnet test ProtoLang.slnx
+```
+
+### Running the compiler
+
+```bash
+dotnet run --project src/ProtoLang.Cli -- examples/simpleScript.protolang -I examples/protos -o generated
+```
+
+That writes `generated/csharp/` and `generated/cpp/`. Pass `-t csharp` or `-t cpp` for one target.
+
+The compiler needs a `protoc` executable, because it consumes protobuf descriptors rather than
+reparsing `.proto` files itself (spec 21.1). It looks at `PROTOLANG_PROTOC`, then `PATH`, then a
+restored `Grpc.Tools` NuGet package, so a separate protoc install is usually unnecessary.
+
+### Architecture
+
+| Project | Role |
+|---|---|
+| `src/ProtoLang.Core` | Lexer, parser, descriptor binding, type checker, typed IR |
+| `src/ProtoLang.Backend.CSharp` | C# code generation |
+| `src/ProtoLang.Backend.Cpp` | C++ code generation |
+| `src/ProtoLang.Cli` | `protolangc` command-line driver |
+| `tests/ProtoLang.Tests` | Lexer, parser, binder, and backend tests |
+
+Backends depend only on the IR, never on the AST.
 

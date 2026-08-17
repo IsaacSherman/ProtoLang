@@ -1,0 +1,19 @@
+import proto "invoice.proto";
+
+extend InvoiceItem {
+    fn line_total_cents() -> int64 {
+        return quantity * unit_price_cents;
+    }
+}
+
+extend Invoice {
+    fn total_cents() -> int64 {
+        var total: int64 = 0;
+
+        for item in items {
+            total = total + item.line_total_cents();
+        }
+
+        return total;
+    }
+}

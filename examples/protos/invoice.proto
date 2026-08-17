@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package protolang.examples;
+
+// Minimal message used by the ProtoLang examples.
+// Behavior for this message lives in simpleScript.protolang.
+message InvoiceItem {
+  // Items in the invoice
+  int64 quantity = 1;
+
+  // cost in cents of each item
+  int64 unit_price_cents = 2;
+
+  // name of the item.
+  string name = 3;
+}
+
+message Invoice{
+repeated InvoiceItem items = 1;
+}
