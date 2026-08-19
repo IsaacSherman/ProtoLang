@@ -27,6 +27,8 @@ public class NameMappingTests
 
     private const string FixturePrelude = "import proto \"fixtures.proto\";\n";
     private const string BarePrelude = "import proto \"nopackage.proto\";\n";
+    private const string CrossNamespacePrelude =
+        "import proto \"cross_target.proto\";\nimport proto \"cross_caller.proto\";\n";
 
     [Fact]
     public void CSharpQualifiesTopLevelAndNestedEnums()
@@ -202,5 +204,73 @@ public class NameMappingTests
             "test.g.cs");
 
         Assert.Contains("public static long Class(", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CSharpQualifiesCrossNamespaceMethodCalls()
+    {
+        var source = Emit(
+            new CSharpBackend(),
+            CrossNamespacePrelude +
+            """
+            extend protolang.target.Target {
+                fn adjusted_value() -> int64 { return value + 1; }
+            }
+
+            extend protolang.caller.Caller {
+                fn total() -> int64 { return target.adjusted_value(); }
+            }
+            """,
+            "test.g.cs");
+
+        Assert.Contains(
+            "return global::ProtoLang.Target.TargetProtoLangExtensions.AdjustedValue(self.Target);",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(".Target.AdjustedValue()", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CSharpIncludesContainingMessagesInNestedReceiverExtensionClassNames()
+    {
+        var source = Emit(
+            new CSharpBackend(),
+            FixturePrelude +
+            """
+            extend protolang.tests.Outer.Inner {
+                fn f() -> int64 { return 1; }
+            }
+            """,
+            "test.g.cs");
+
+        Assert.Contains(
+            "public static class Outer_InnerProtoLangExtensions",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "this global::Protolang.Tests.Outer.Types.Inner self",
+            source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CSharpMethodCallsDoNotBindToProtobufInstanceMembers()
+    {
+        var source = Emit(
+            new CSharpBackend(),
+            FixturePrelude +
+            """
+            extend Outer {
+                fn clone() -> int64 { return count; }
+                fn caller() -> int64 { return clone(); }
+            }
+            """,
+            "test.g.cs");
+
+        Assert.Contains(
+            "return global::Protolang.Tests.OuterProtoLangExtensions.Clone(self);",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("return self.Clone();", source, StringComparison.Ordinal);
     }
 }

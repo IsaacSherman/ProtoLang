@@ -430,3 +430,6 @@ FodyWeavers.xsd
 
 # ProtoLang compiler output
 generated/
+
+# vcpkg manifest-mode native dependencies
+vcpkg_installed/

@@ -137,6 +137,57 @@ The compiler needs a `protoc` executable, because it consumes protobuf descripto
 reparsing `.proto` files itself (spec 21.1). It looks at `PROTOLANG_PROTOC`, then `PATH`, then a
 restored `Grpc.Tools` NuGet package, so a separate protoc install is usually unnecessary.
 
+### Optional C++ Smoke Test Dependencies
+
+The test suite includes optional C++ smoke tests for generated code:
+
+- a syntax-only test that parses generated ProtoLang headers with generated protobuf headers
+- a link-and-run test that builds a tiny executable and verifies generated behavior
+
+They need:
+
+- a C++20 compiler: `clang++`, `g++`, or Visual Studio C++ Build Tools
+- protobuf C++ runtime headers containing `google/protobuf/message.h`
+- protobuf C++ libraries, for the link-and-run test
+
+The repo includes a vcpkg manifest for the native dependency:
+
+```powershell
+vcpkg install
+```
+
+If `vcpkg` is not on `PATH`, run it by full path instead, for example:
+
+```powershell
+C:\vcpkg\vcpkg.exe install --triplet x64-windows
+```
+
+When using vcpkg manifest mode from the repository root, the test looks under
+`vcpkg_installed/<triplet>/include`. It also checks `VCPKG_ROOT`, `VCPKG_INSTALLED_DIR`, common
+system install paths, and the explicit override:
+
+```powershell
+$env:PROTOLANG_PROTOBUF_CPP_INCLUDE = "C:\path\to\protobuf\include"
+```
+
+To run only the C++ smoke tests:
+
+```powershell
+dotnet test tests\ProtoLang.Tests\ProtoLang.Tests.csproj --filter "FullyQualifiedName~CppSyntaxSmokeTests" --logger "console;verbosity=normal"
+```
+
+To run the full suite, including the C++ smoke test when its native prerequisites are available:
+
+```powershell
+dotnet test tests\ProtoLang.Tests\ProtoLang.Tests.csproj
+```
+
+On Windows, the test can find Visual Studio C++ Build Tools even when `cl.exe` is not already on
+`PATH`; it runs MSVC through `VsDevCmd.bat`. The link-and-run test currently targets MSVC with
+vcpkg's `x64-windows` protobuf package, using vcpkg's matching `protoc.exe`, headers, import
+library, and DLLs. If the C++ compiler or protobuf C++ install is not available, the relevant test
+is skipped with a message. A fully active local run should report zero skipped tests.
+
 ### Architecture
 
 | Project | Role |
@@ -148,4 +199,3 @@ restored `Grpc.Tools` NuGet package, so a separate protoc install is usually unn
 | `tests/ProtoLang.Tests` | Lexer, parser, binder, and backend tests |
 
 Backends depend only on the IR, never on the AST.
-

@@ -47,7 +47,10 @@ public class BackendTests
         // C# already wraps by default, but a consumer setting CheckForOverflowUnderflow would
         // change that silently. The generated code must not depend on their build settings.
         Assert.Contains("unchecked(self.Quantity * self.UnitPriceCents)", source, StringComparison.Ordinal);
-        Assert.Contains("unchecked(total + item.LineTotalCents())", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "unchecked(total + global::Protolang.Examples.InvoiceItemProtoLangExtensions.LineTotalCents(item))",
+            source,
+            StringComparison.Ordinal);
     }
 
     [Fact]

@@ -122,7 +122,7 @@ public sealed class CSharpBackend : IBackend
         MessageDescriptor receiver,
         IReadOnlyList<IrMethod> methods)
     {
-        var className = NameConventions.ToPascalCase(receiver.Name) + "ProtoLangExtensions";
+        var className = ExtensionClassName(receiver);
 
         writer.WriteLine($"/// <summary>ProtoLang behavior for <c>{receiver.FullName}</c>.</summary>");
         using var classScope = writer.Block($"public static class {className}");
@@ -225,9 +225,29 @@ public sealed class CSharpBackend : IBackend
 
     private static string EmitCall(IrMethodCall call)
     {
-        var arguments = call.Arguments.Select(Expression);
+        var arguments = new List<string> { Expression(call.Receiver) };
+        arguments.AddRange(call.Arguments.Select(Expression));
+
         var methodName = NameConventions.ToPascalCase(call.Target.Name);
-        return $"{Expression(call.Receiver)}.{methodName}({string.Join(", ", arguments)})";
+        return $"{QualifiedExtensionClassName(call.Target.Receiver)}.{methodName}({string.Join(", ", arguments)})";
+    }
+
+    private static string QualifiedExtensionClassName(MessageDescriptor receiver)
+    {
+        var ns = NameConventions.GetCSharpNamespace(receiver.File);
+        var className = ExtensionClassName(receiver);
+        return string.IsNullOrEmpty(ns) ? $"global::{className}" : $"global::{ns}.{className}";
+    }
+
+    private static string ExtensionClassName(MessageDescriptor receiver)
+    {
+        var parts = new List<string>();
+        for (var current = receiver; current is not null; current = current.ContainingType)
+        {
+            parts.Insert(0, NameConventions.ToPascalCase(current.Name));
+        }
+
+        return string.Join('_', parts) + "ProtoLangExtensions";
     }
 
     private static string EmitBinary(IrBinary binary)

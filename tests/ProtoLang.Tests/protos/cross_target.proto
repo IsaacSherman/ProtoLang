@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package protolang.target;
+
+option csharp_namespace = "ProtoLang.Target";
+
+message Target {
+  int64 value = 1;
+}
