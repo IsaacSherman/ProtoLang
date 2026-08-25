@@ -18,6 +18,34 @@ internal sealed record ProtobufCppInstall(
 {
     /// <summary>Whether this install has everything needed to link and run, not just to parse.</summary>
     public bool CanLink => ProtocPath is not null && LibraryDirectory is not null && BinaryDirectory is not null;
+
+    /// <summary>
+    /// What is missing when <see cref="CanLink"/> is false, named so the skip says which piece of a
+    /// real install was not found rather than restating the requirement in general.
+    /// </summary>
+    public string DescribeMissingLinkInputs()
+    {
+        var missing = new List<string>();
+
+        if (ProtocPath is null)
+        {
+            missing.Add("a matching protoc");
+        }
+
+        if (LibraryDirectory is null)
+        {
+            missing.Add("import libraries");
+        }
+
+        if (BinaryDirectory is null)
+        {
+            missing.Add("runtime binaries");
+        }
+
+        return $"The protobuf C++ headers at '{IncludeDirectory}' have no {string.Join(", ", missing)} "
+            + "beside them. A vcpkg install provides all of them; set PROTOLANG_PROTOBUF_CPP_INCLUDE "
+            + "to the include directory of one to point the tests at it.";
+    }
 }
 
 internal sealed record CppCompiler(
@@ -87,12 +115,22 @@ internal static class Toolchain
         return null;
     }
 
-    public static ProtobufCppInstall? LocateProtobufCpp()
+    /// <param name="configuredInclude">
+    /// Stands in for <c>PROTOLANG_PROTOBUF_CPP_INCLUDE</c>. A parameter rather than a variable the
+    /// test mutates, because the rest of the suite reads that variable concurrently.
+    /// </param>
+    public static ProtobufCppInstall? LocateProtobufCpp(string? configuredInclude = null)
     {
-        var configured = Environment.GetEnvironmentVariable("PROTOLANG_PROTOBUF_CPP_INCLUDE");
+        var configured = configuredInclude
+            ?? Environment.GetEnvironmentVariable("PROTOLANG_PROTOBUF_CPP_INCLUDE");
+
         if (!string.IsNullOrWhiteSpace(configured) && ContainsProtobufCppHeaders(configured))
         {
-            return new ProtobufCppInstall(configured, null, null, null);
+            // Derived the same way as a discovered directory, deliberately. Returning the headers
+            // alone would make setting the documented override *worse* than setting nothing: the
+            // link-and-run and conformance suites would skip on a machine that is fully equipped,
+            // because they need the libraries and protoc that sit beside those headers.
+            return CreateProtobufCppInstall(configured);
         }
 
         IReadOnlyList<string> candidates = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)

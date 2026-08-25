@@ -75,8 +75,8 @@ public class CppSyntaxSmokeTests
         if (!protobuf.CanLink)
         {
             Assert.Skip(
-                "The link-and-run C++ smoke test requires a vcpkg protobuf install with "
-                + "include, lib, bin, and tools/protobuf/protoc.exe directories.");
+                "The link-and-run C++ smoke test needs more than headers. "
+                + protobuf.DescribeMissingLinkInputs());
         }
 
         var workspace = PrepareSmokeWorkspace(protobuf.ProtocPath!, out var driver);

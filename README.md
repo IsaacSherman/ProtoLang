@@ -322,6 +322,11 @@ system install paths, and the explicit override:
 $env:PROTOLANG_PROTOBUF_CPP_INCLUDE = "C:\path\to\protobuf\include"
 ```
 
+Point that at the `include` directory of a complete install rather than at a bare copy of the
+headers. The libraries, runtime binaries, and matching `protoc` are located beside it, and the tests
+that build and execute generated C++ need all four. Given headers alone, those tests skip and say
+which pieces were missing.
+
 To run only the C++ smoke tests:
 
 ```powershell

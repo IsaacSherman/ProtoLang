@@ -138,8 +138,8 @@ public sealed class ConformanceFixture
         {
             return ConformanceRun.Skipped(
                 Backend,
-                "Running the conformance vectors needs a protobuf C++ install with include, lib, "
-                + "bin, and tools/protobuf/protoc directories.");
+                "Building the conformance vectors needs more than headers. "
+                + protobuf.DescribeMissingLinkInputs());
         }
 
         var backend = new CppBackend();
