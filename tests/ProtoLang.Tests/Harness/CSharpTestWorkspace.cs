@@ -67,12 +67,31 @@ internal sealed class CSharpTestWorkspace
         File.WriteAllText(Path.Combine(Directory, "Directory.Build.targets"), "<Project />" + Environment.NewLine);
 
         // Take the repository's central package versions rather than restating them here, so the
-        // generated project cannot drift from what the repository actually builds against. This
-        // also keeps the test working offline: those versions are the ones already restored.
+        // generated project cannot drift from what the repository actually builds against.
         File.Copy(
             TestPaths.DirectoryPackagesProps,
             Path.Combine(Directory, "Directory.Packages.props"),
             overwrite: true);
+
+        // No package sources at all. Every package this project references is one the repository
+        // already references at the same version, so the global packages folder has all of them and
+        // restore has nothing to fetch. Clearing the sources makes that a guarantee rather than a
+        // hope: the restore cannot reach the network, so it cannot fail because a machine is
+        // offline, behind a proxy, or in a sandbox, and it cannot be slowed by nuget.org.
+        //
+        // Without this, restore contacts the configured source for vulnerability data, which fails
+        // in a restricted environment. TreatWarningsAsErrors below then turns that NU1900 warning
+        // into a hard error and the whole conformance run reads as a branch failure.
+        File.WriteAllText(
+            Path.Combine(Directory, "nuget.config"),
+            """
+            <?xml version="1.0" encoding="utf-8"?>
+            <configuration>
+              <packageSources>
+                <clear />
+              </packageSources>
+            </configuration>
+            """);
 
         File.WriteAllText(
             Path.Combine(Directory, ProjectFileName),
@@ -93,9 +112,16 @@ internal sealed class CSharpTestWorkspace
                 <CheckForOverflowUnderflow>true</CheckForOverflowUnderflow>
                 <!--
                   Hostile in the other direction too: generated code has to be droppable into a
-                  project that treats warnings as errors, which this repository does.
+                  project that treats warnings as errors, which this repository does. This escalates
+                  NuGet warnings as well, which is why nuget.config clears the package sources:
+                  otherwise an unreachable source turns an audit warning into a build failure.
                 -->
                 <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+                <!--
+                  Nothing to audit against with no sources configured, and the repository already
+                  audits these same packages at these same versions.
+                -->
+                <NuGetAudit>false</NuGetAudit>
               </PropertyGroup>
 
               <ItemGroup>
