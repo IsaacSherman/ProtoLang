@@ -112,4 +112,6 @@ The harness is written so a third backend is a small addition, not a third copy:
   non-zero divisor and confirming it fails with "the method returned instead of terminating the
   process". Covering it automatically means building a deliberately wrong corpus alongside the real
   one, which is a second full build of everything; what the suite asserts today is that both
-  backends emit the rejection paths. Worth revisiting if the mechanism changes.
+  backends emit the rejection paths. The half of the check that is machine-verified every run is
+  strict: the verdict is an equality test against the failure exit code 70, so a child that fell
+  over for an unrelated reason fails rather than passing.

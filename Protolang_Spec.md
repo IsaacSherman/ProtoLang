@@ -484,9 +484,16 @@ Normative Requirements:
   is a literal that is provably non-zero.
 - `on_zero <expression>` substitutes that value. It must already have the type the division
   produces; no implicit conversion is applied (10.3).
-- `on_zero fail` terminates the program deterministically, with a diagnostic naming the operation.
-  It is not catchable and not recoverable. Backends map it to `Environment.FailFast` in C# and
-  `std::abort` in C++.
+- `on_zero fail` terminates the program deterministically, with a diagnostic naming the operation
+  written to standard error. It is not catchable and not recoverable. The process exit code is
+  **70** (`EX_SOFTWARE`) in every backend.
+- A backend must terminate with a primitive that cannot be intercepted and does not engage the
+  platform's crash reporting: `Environment.Exit` in C#, `std::_Exit` in C++. `Environment.FailFast`
+  and `std::abort` are the wrong tools even though they look like the obvious ones. Both are
+  crash-reporting primitives, so on Windows they hand the process to Windows Error Reporting and to
+  any postmortem debugger registered under `AeDebug`; generated library code must not be able to put
+  a dialog on a user's screen or stall a batch run waiting for one. `abort` is also weaker than it
+  appears: it raises `SIGABRT`, which a program may catch and resume from, defeating the clause.
 - The clause binds to the single division it follows: `x + a / b on_zero 0` means
   `x + (a / b on_zero 0)`. The fallback parses at unary precedence, so anything more involved than a
   literal, name, or call must be parenthesized.
@@ -1019,7 +1026,7 @@ time rather than emitting something whose semantics differ.
 | Attached methods | Yes | Yes | — | C#: extension methods. C++: free functions. |
 | Wrapping integer arithmetic | Yes | Yes | — | `unchecked(...)` / unsigned round-trip helpers. |
 | Checked division (`on_zero`) | Yes | Yes | — | Runtime zero check in both; see 10.2.1. |
-| `on_zero fail` | Yes | Yes | — | `Environment.FailFast` / `std::abort`. |
+| `on_zero fail` | Yes | Yes | — | `Environment.Exit(70)` / `std::_Exit(70)`, after a diagnostic on stderr (10.2.1). |
 | IEEE 754 float division | Yes | Yes | — | Native in both. Python will need a helper. |
 | Repeated iteration | Yes | Yes | — | `foreach` / range-`for` over the protobuf container. |
 | Cross-message method calls | Yes | Yes | — | C++ emits all declarations before any definition. |
@@ -1306,14 +1313,13 @@ Open Questions:
 
 Decided: `expect fail` runs out of process. A terminal failure cannot be observed from inside the
 process it ends, so a backend generates such a test as a driver that relaunches itself for that one
-test and inspects what the child did.
+test and inspects how the child ended.
 
-The verdict must come from what the child reported, not from waiting for it to exit. A backend
-whose failure mapping hands the process to a host crash reporter can leave it parked indefinitely:
-on Windows, a registered postmortem debugger under `AeDebug` -- which installing Visual Studio does
--- blocks a .NET `FailFast` on a prompt no automated run will answer. A conforming backend
-therefore writes a diagnostic on the failure path before terminating, and the generated test treats
-that line, plus the absence of any "the call returned" marker, as the proof.
+The verdict is the child's exit code, and it is an equality check against the failure code 10.2.1
+fixes at 70, not a test for "died somehow". That distinction matters: a child that crashed for an
+unrelated reason, or that fell through to an ordinary test run and merely reported failures, must
+not be mistaken for a method that terminated. Requiring one exact code across every backend is only
+possible because 10.2.1 rules out crash primitives, whose exit codes the host chooses.
 
 ## 26. Diagnostics
 
@@ -1503,5 +1509,6 @@ Use this table to record decisions as the language stabilizes.
 | 2026-08-25 | Type system | Enum types can be named wherever a type is expected, resolved by full name or by an unambiguous simple name, including enums nested in messages | The type universe is the protobuf type universe (8.1); indexing messages but not enums left enum support reachable only through inference | Draft |
 | 2026-08-25 | Conformance vectors | A vector is a ProtoLang `test` declaration, not a separate YAML or JSON format (25.2) | It is already bound and type-checked against descriptors, so a malformed vector is a compile error; a second authoring format would have to re-earn that | Draft |
 | 2026-08-25 | Conformance vectors | Backends compile and execute generated code, and must be shown to have run the same set of vectors, not merely to have passed | A driver that runs no tests also exits zero, so per-backend success alone does not establish cross-language agreement | Draft |
-| 2026-08-25 | Testing | `expect fail` runs out of process, and the verdict comes from what the child reported rather than from its exit code (25.3) | A terminal failure cannot be observed from inside the process it ends, and a host crash reporter can delay or suppress the exit indefinitely | Draft |
+| 2026-08-25 | Testing | `expect fail` runs out of process, and the verdict is an equality check on the child's exit code (25.3) | A terminal failure cannot be observed from inside the process it ends; requiring one exact code stops an unrelated crash from passing as a deliberate stop | Draft |
 | 2026-08-25 | Error reporting | The `on_zero fail` path writes its diagnostic to standard error before terminating, in every backend | Spec 20 bans I/O in method bodies, but this is a fatal-error path rather than behavior, and how a host reports a termination is not something a portable diagnostic can rely on | Draft |
+| 2026-08-25 | Error handling | `on_zero fail` terminates through `Environment.Exit` / `std::_Exit` with exit code 70, not `FailFast` / `abort` (10.2.1) | Crash primitives invoke the platform's error reporting, so generated library code could raise a dialog or a debugger prompt; `abort` is also catchable through `SIGABRT` and so does not deliver the guarantee at all. A fixed code also makes the backends observably identical | Draft |

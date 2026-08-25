@@ -247,8 +247,7 @@ expects the process to terminate, described next.
 
 ### Tests That Expect Failure
 
-`on_zero fail` says no substitute value is correct, so the program stops: `Environment.FailFast` in
-C#, `abort` in C++. A test can assert that:
+`on_zero fail` says no substitute value is correct, so the program stops. A test can assert that:
 
 ```protolang
 test InvoiceItem.strict_ratio "a zero divisor stops the program" {
@@ -261,12 +260,18 @@ test InvoiceItem.strict_ratio "a zero divisor stops the program" {
 }
 ```
 
+A stopped program writes its reason to standard error and exits with code **70** (`EX_SOFTWARE`),
+the same in every backend. That is `Environment.Exit` in C# and `std::_Exit` in C++, deliberately
+not `Environment.FailFast` or `std::abort`: those are crash-reporting primitives, so on Windows
+they hand the process to Windows Error Reporting and to whatever postmortem debugger is registered
+-- meaning generated library code could put a dialog on a user's screen. `abort` is also catchable
+through `SIGABRT`, so it would not even guarantee the program stops.
+
 Nothing inside a process can observe the process ending, so both backends generate this as an
 out-of-process test. The C# backend emits an extra `ProtoLangTestSupport.g.cs` and a module
 initializer that lets the test assembly be relaunched for one named test; the generated `[Fact]`
-starts that child and asserts how it died. The C++ driver reruns itself with `--run <name>` and
-checks the child's exit status. Neither needs any wiring from you beyond building the generated
-files as usual.
+starts that child and checks its exit code. The C++ driver reruns itself with `--run <name>` and
+does the same. Neither needs any wiring from you beyond building the generated files as usual.
 
 ### Conformance Suite
 

@@ -149,7 +149,7 @@ public sealed class CppBackend : ITestBackend
         }
 
         writer.WriteLine();
-        EmitMain(writer, module, functionNames, hasFailTests);
+        EmitMain(writer, module, functionNames);
 
         foreach (var test in module.Tests)
         {
@@ -218,8 +218,8 @@ public sealed class CppBackend : ITestBackend
     private static void EmitExpectFailHelpers(SourceWriter writer)
     {
         writer.WriteLine("// Turns what std::system reports into a plain exit code. POSIX returns a wait");
-        writer.WriteLine("// status, and a child killed by a signal -- which is what abort() does there --");
-        writer.WriteLine("// has no exit code at all, only an abnormal end, which is what this test wants.");
+        writer.WriteLine("// status rather than the code itself, and a child killed by a signal has no exit");
+        writer.WriteLine("// code at all, which -1 stands in for so it can never match the expected one.");
         using (writer.Block("static int protolang_exit_code(int status)"))
         {
             writer.WriteLine("#if defined(_WIN32)");
@@ -254,7 +254,6 @@ public sealed class CppBackend : ITestBackend
             writer.WriteLine("const int code = protolang_exit_code(::std::system(command.c_str()));");
             writer.WriteLine();
 
-            EmitExpectFailRejection(writer, "code == 0", "the child process exited normally");
             EmitExpectFailRejection(
                 writer,
                 "code == kProtoLangDidNotTerminate",
@@ -264,6 +263,20 @@ public sealed class CppBackend : ITestBackend
                 "code == kProtoLangUnknownTest",
                 "the child process did not recognize the test name");
 
+            // The exit code is normative (spec 10.2.1), so this is an equality check rather than
+            // "died somehow": a child that crashed for an unrelated reason must not pass.
+            using (writer.Block($"if (code != {CppRuntime.FailExitCode})"))
+            {
+                writer.WriteLine(
+                    "::std::cout << \"[FAIL] \" << identity << \" (the child process exited with \" << code");
+                writer.Indent();
+                writer.WriteLine(
+                    $"<< \", not the ProtoLang failure code {CppRuntime.FailExitCode})\" << ::std::endl;");
+                writer.Unindent();
+                writer.WriteLine("return false;");
+            }
+
+            writer.WriteLine();
             writer.WriteLine("::std::cout << \"[ok] \" << identity << ::std::endl;");
             writer.WriteLine("return true;");
         }
@@ -286,24 +299,13 @@ public sealed class CppBackend : ITestBackend
     private static void EmitMain(
         SourceWriter writer,
         IrModule module,
-        IReadOnlyDictionary<IrTest, string> functionNames,
-        bool hasFailTests)
+        IReadOnlyDictionary<IrTest, string> functionNames)
     {
         using var scope = writer.Block("int main(int argc, char** argv)");
 
         writer.WriteLine("// Single-test mode, used by the parent process for 'expect fail' tests.");
         using (writer.Block("if (argc >= 3 && ::std::strcmp(argv[1], \"--run\") == 0)"))
         {
-            if (hasFailTests)
-            {
-                writer.WriteLine("#if defined(_MSC_VER)");
-                writer.WriteLine("// Keep an expected abort() quiet and quick: no message box, and no");
-                writer.WriteLine("// Windows error report for a crash this test is asking for.");
-                writer.WriteLine("_set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);");
-                writer.WriteLine("#endif");
-                writer.WriteLine();
-            }
-
             foreach (var test in module.Tests)
             {
                 var name = functionNames[test];

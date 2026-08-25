@@ -379,11 +379,22 @@ public class BackendTests
             .Single(f => f.RelativePath == CppRuntime.FileName).Contents;
 
         // A catchable exception would let a consumer resume from a state the author declared has
-        // no valid result, and C++ has no equivalent under this design.
-        Assert.Contains("Environment.FailFast", csharp, StringComparison.Ordinal);
+        // no valid result, and it would not mean the same thing in every target.
         Assert.Contains("WrapDivideOrFail", csharp, StringComparison.Ordinal);
         Assert.Contains("[[noreturn]] inline void fail", cpp, StringComparison.Ordinal);
-        Assert.Contains("::std::abort();", cpp, StringComparison.Ordinal);
+
+        // Both report the same exit code, which spec 10.2.1 fixes at 70 (EX_SOFTWARE). That is what
+        // lets a test assert an exact code rather than merely that the process died.
+        Assert.Equal(CSharpRuntime.FailExitCode, CppRuntime.FailExitCode);
+        Assert.Contains($"global::System.Environment.Exit({CSharpRuntime.FailExitCode});", csharp, StringComparison.Ordinal);
+        Assert.Contains($"::std::_Exit({CppRuntime.FailExitCode});", cpp, StringComparison.Ordinal);
+
+        // Not the crash primitives. FailFast and abort hand the process to the platform's error
+        // reporting, so generated library code could raise a dialog or a postmortem debugger
+        // prompt; abort is catchable through SIGABRT besides, so it would not even guarantee the
+        // program stops.
+        Assert.DoesNotContain("Environment.FailFast", csharp, StringComparison.Ordinal);
+        Assert.DoesNotContain("::std::abort", cpp, StringComparison.Ordinal);
     }
 
     [Fact]

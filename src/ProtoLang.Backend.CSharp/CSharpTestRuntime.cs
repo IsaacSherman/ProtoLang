@@ -13,11 +13,11 @@ namespace ProtoLang.Backend.CSharp;
 /// child did.
 /// </para>
 /// <para>
-/// The verdict comes from what the child printed rather than from waiting for it to exit.
-/// <c>Environment.FailFast</c> hands the process to the host's crash reporting, and on a developer
-/// machine with a postmortem debugger registered under <c>AeDebug</c> -- which installing Visual
-/// Studio does -- that blocks indefinitely waiting for a prompt no one will answer. A harness that
-/// waited for the exit code would hang on exactly the machines this feature is written on.
+/// The verdict is the child's exit code, which is normative: a program stopped by
+/// <c>on_zero fail</c> reports <see cref="CSharpRuntime.FailExitCode"/> in every backend. Checking
+/// for that exact code rather than for "died somehow" is what stops a child that fell over for an
+/// unrelated reason from being mistaken for a pass. The two markers the child prints are there to
+/// say which way a failure went wrong, not to decide the verdict.
 /// </para>
 /// <para>
 /// Emitted as its own file so that compiling several ProtoLang sources into one assembly does not
@@ -50,7 +50,7 @@ public static class CSharpTestRuntime
     /// </summary>
     public const int DidNotTerminateExitCode = 91;
 
-    /// <summary>How long to wait for evidence before giving up on the child.</summary>
+    /// <summary>How long to wait for the child to exit before giving up on it.</summary>
     private const int GraceMilliseconds = 15000;
 
     private static readonly Lazy<string> LazySource = new(Build);
@@ -103,8 +103,8 @@ public static class CSharpTestRuntime
         writer.WriteLine("/// <summary>Printed by the child if that call returns.</summary>");
         writer.WriteLine($"public const string ReturnedMarker = \"{ReturnedMarker}\";");
         writer.WriteLine();
-        writer.WriteLine("/// <summary>Start of the line the ProtoLang fail path writes to standard error.</summary>");
-        writer.WriteLine($"public const string FailMarker = \"{CSharpRuntime.FailMarker}\";");
+        writer.WriteLine("/// <summary>Exit code a program stopped by 'on_zero fail' reports.</summary>");
+        writer.WriteLine($"public const int FailExitCode = {CSharpRuntime.FailExitCode};");
         writer.WriteLine();
         writer.WriteLine("/// <summary>Exit code used when the child does not recognize the requested test.</summary>");
         writer.WriteLine($"public const int UnknownTest = {UnknownTestExitCode};");
@@ -112,7 +112,7 @@ public static class CSharpTestRuntime
         writer.WriteLine("/// <summary>Exit code used when the body returned instead of terminating.</summary>");
         writer.WriteLine($"public const int DidNotTerminate = {DidNotTerminateExitCode};");
         writer.WriteLine();
-        writer.WriteLine("/// <summary>How long to wait for the child to prove what it did.</summary>");
+        writer.WriteLine("/// <summary>How long to wait for the child to exit.</summary>");
         writer.WriteLine($"private const int GraceMilliseconds = {GraceMilliseconds};");
     }
 
@@ -175,37 +175,7 @@ public static class CSharpTestRuntime
             writer.WriteLine("process.BeginOutputReadLine();");
             writer.WriteLine("process.BeginErrorReadLine();");
             writer.WriteLine();
-            writer.WriteLine("// Stop as soon as the child has said enough, rather than waiting for it to");
-            writer.WriteLine("// exit: a fail-fast can leave the process parked in the host's crash reporting.");
-            writer.WriteLine("var deadline = global::System.Environment.TickCount64 + GraceMilliseconds;");
-            writer.WriteLine("var exited = false;");
-            writer.WriteLine();
-            using (writer.Block("while (true)"))
-            {
-                writer.WriteLine("exited = process.WaitForExit(200);");
-                using (writer.Block("if (exited)"))
-                {
-                    writer.WriteLine("break;");
-                }
-
-                writer.WriteLine();
-                writer.WriteLine("var progress = Snapshot(buffer);");
-                using (writer.Block(
-                    "if (progress.Contains(FailMarker, global::System.StringComparison.Ordinal)"
-                    + " || progress.Contains(ReturnedMarker, global::System.StringComparison.Ordinal))"))
-                {
-                    writer.WriteLine("break;");
-                }
-
-                writer.WriteLine();
-                using (writer.Block("if (global::System.Environment.TickCount64 > deadline)"))
-                {
-                    writer.WriteLine("break;");
-                }
-            }
-
-            writer.WriteLine();
-            using (writer.Block("if (!exited)"))
+            using (writer.Block("if (!process.WaitForExit(GraceMilliseconds))"))
             {
                 using (writer.Block("try"))
                 {
@@ -216,13 +186,16 @@ public static class CSharpTestRuntime
                 {
                     writer.WriteLine("// Already gone.");
                 }
+
+                writer.WriteLine();
+                writer.WriteLine("return \"the child process never exited\";");
             }
 
             writer.WriteLine();
             writer.WriteLine("var output = Snapshot(buffer);");
             writer.WriteLine();
-            writer.WriteLine("// However the child ended says nothing unless it actually reached the body:");
-            writer.WriteLine("// a child that fell through to an ordinary test run would also end non-zero.");
+            writer.WriteLine("// The exit code alone would be enough, but these two say which way it went");
+            writer.WriteLine("// wrong, which is the difference between a useful failure and a puzzle.");
             using (writer.Block(
                 "if (!output.Contains(StartedMarker + testKey, global::System.StringComparison.Ordinal))"))
             {
@@ -237,19 +210,19 @@ public static class CSharpTestRuntime
             }
 
             writer.WriteLine();
-            using (writer.Block("if (exited)"))
+            writer.WriteLine("// The failure exit code is normative, so this is an equality check rather");
+            writer.WriteLine("// than \"died somehow\": a child that fell over for an unrelated reason, or one");
+            writer.WriteLine("// that ran an ordinary test run, must not be mistaken for a pass.");
+            using (writer.Block("if (process.ExitCode != FailExitCode)"))
             {
-                writer.WriteLine("return process.ExitCode == 0 ? \"the child process exited normally\" : null;");
+                writer.WriteLine("return \"the child process exited with \" + process.ExitCode");
+                writer.Indent();
+                writer.WriteLine("+ \", not the ProtoLang failure code \" + FailExitCode;");
+                writer.Unindent();
             }
 
             writer.WriteLine();
-            writer.WriteLine("// Still running. The ProtoLang fail path writes its diagnostic before handing");
-            writer.WriteLine("// the process to the host, so that line is the proof, not the exit code.");
-            writer.WriteLine("return output.Contains(FailMarker, global::System.StringComparison.Ordinal)");
-            writer.Indent();
-            writer.WriteLine("? null");
-            writer.WriteLine(": \"the child process neither terminated nor reported a ProtoLang failure\";");
-            writer.Unindent();
+            writer.WriteLine("return null;");
         }
     }
 

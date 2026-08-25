@@ -107,12 +107,28 @@ public static class CppRuntime
     }
 
     /// <summary>
+    /// Exit code of a program stopped by <c>on_zero fail</c>. <c>EX_SOFTWARE</c> from
+    /// <c>sysexits.h</c>, and normative: every backend reports the same code (spec 10.2.1).
+    /// </summary>
+    public const int FailExitCode = 70;
+
+    /// <summary>
     /// Emits the deterministic-termination helper behind <c>on_zero fail</c>.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Writing to stderr is the one place generated code performs I/O. Spec 20 bans I/O in method
-    /// bodies; this is a fatal-error path, not behavior, and a bare abort with no explanation would
-    /// be far harder to diagnose.
+    /// bodies; this is a fatal-error path, not behavior, and stopping with no explanation would be
+    /// far harder to diagnose.
+    /// </para>
+    /// <para>
+    /// <c>_Exit</c> rather than <c>abort</c>. <c>abort</c> raises <c>SIGABRT</c>, which means two
+    /// things this needs to avoid: the default handler hands the process to the platform's crash
+    /// reporter -- a dialog and a postmortem debugger prompt on Windows -- and a program that
+    /// installs its own <c>SIGABRT</c> handler could <em>resume</em>, which would defeat the whole
+    /// point of the clause. <c>_Exit</c> can be intercepted by nothing, runs no destructors or
+    /// atexit handlers, and reports the exit code chosen here rather than a signal.
+    /// </para>
     /// </remarks>
     private static void EmitFailHelper(SourceWriter writer)
     {
@@ -123,7 +139,11 @@ public static class CppRuntime
             writer.WriteLine("::std::fputs(\"ProtoLang: \", stderr);");
             writer.WriteLine("::std::fputs(operation, stderr);");
             writer.WriteLine("::std::fputs(\" by zero\\n\", stderr);");
-            writer.WriteLine("::std::abort();");
+            writer.WriteLine("::std::fflush(stderr);");
+            writer.WriteLine();
+            writer.WriteLine("// Not abort(): SIGABRT is catchable, and its default handler raises a crash");
+            writer.WriteLine("// report. Generated library code must not be able to do either.");
+            writer.WriteLine($"::std::_Exit({FailExitCode});");
         }
 
         writer.WriteLine();

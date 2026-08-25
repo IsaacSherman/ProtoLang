@@ -138,9 +138,9 @@ internal sealed class CSharpTestWorkspace
 
         ProcessRunner.ScrubMsBuildEnvironment(startInfo);
 
-        // A generated test may deliberately terminate a child process through Environment.FailFast.
-        // Without this, Windows error reporting can spend a long time collecting a dump for a crash
-        // the test is expecting.
+        // Belt and braces. ProtoLang's fail path exits cleanly rather than crashing, so nothing
+        // here should reach the crash reporter, but a genuinely faulting child would otherwise stall
+        // the run while a dump is collected.
         startInfo.Environment["DOTNET_DbgEnableMiniDump"] = "0";
 
         return ProcessRunner.Run(startInfo);
