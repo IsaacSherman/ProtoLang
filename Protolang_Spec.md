@@ -1145,11 +1145,24 @@ expected:
   ok: 30
 ```
 
-Open Questions:
+Decided. A conformance vector is not a separate file format at all: it is a ProtoLang `test`
+declaration (25.3) in a `.protolang` file, paired with the `.proto` it imports.
 
-- Should vectors be YAML, JSON, protobuf text format, or binary protobuf fixtures?
-- Should expected results be language-independent serialized values?
-- Should backend tests compile and execute generated code, or only inspect generated source for early phases?
+- **Format.** The `test` declaration, rather than YAML, JSON, or text format. It is already parsed,
+  name-resolved, and type-checked against protobuf descriptors, so a fixture field that does not
+  exist, or an expectation whose type does not match the method's return type, is a compile error
+  rather than something discovered when generated test code fails to build. A second, untyped way
+  to say the same thing would have to re-earn all of that.
+- **Expected results.** ProtoLang literals bound to the method's return type. Being bound to the
+  IR rather than to a serialization makes them language-independent without a wire format of their
+  own. The cost is that values with no ProtoLang literal -- `int64` MIN, `uint64` above `int64`
+  MAX, infinity, NaN -- must be written as expressions or asserted through a predicate.
+- **Compile and execute, not inspect.** Golden assertions over emitted source only state that a
+  backend emits what it emitted last time, one language at a time. The suite compiles the generated
+  code with a real compiler and runs it, and requires every backend to have run the same set of
+  vectors, identified by a backend-independent test identity that each backend reports.
+
+The reference corpus lives in `tests/conformance/`.
 
 ### 25.3 Author-Written ProtoLang Unit Tests
 
@@ -1289,8 +1302,18 @@ Open Questions:
   tests, or support both?
 - Should target test framework selection be a backend option such as
   `--test-opt framework=xunit|standalone|gtest`?
-- How should `expect fail` be tested for backends whose failure mapping terminates the process?
 - Should generated tests be stable enough to check in, or treated as build artifacts only?
+
+Decided: `expect fail` runs out of process. A terminal failure cannot be observed from inside the
+process it ends, so a backend generates such a test as a driver that relaunches itself for that one
+test and inspects what the child did.
+
+The verdict must come from what the child reported, not from waiting for it to exit. A backend
+whose failure mapping hands the process to a host crash reporter can leave it parked indefinitely:
+on Windows, a registered postmortem debugger under `AeDebug` -- which installing Visual Studio does
+-- blocks a .NET `FailFast` on a prompt no automated run will answer. A conforming backend
+therefore writes a diagnostic on the failure path before terminating, and the generated test treats
+that line, plus the absence of any "the call returned" marker, as the proof.
 
 ## 26. Diagnostics
 
@@ -1477,3 +1500,8 @@ Use this table to record decisions as the language stabilizes.
 | 2026-08-13 | Virtual behavior | Consider overridable behavior without committing to inheritance | Preserve extension flexibility while avoiding protobuf inheritance assumptions | Open |
 | 2026-08-24 | Control flow | `if` / `else if` / `else`, `while`, `break`, and `continue`, with bool-only conditions and mandatory braces | Smallest branching set that maps one-to-one onto every initial backend, so no target has to emulate it | Draft |
 | 2026-08-24 | Missing return | All-paths-return is a reachability question: a method with a return type must not be able to reach the end of its body | Branching makes a trailing-return rule wrong in both directions, and reachability is what the backends' own compilers will check anyway | Draft |
+| 2026-08-25 | Type system | Enum types can be named wherever a type is expected, resolved by full name or by an unambiguous simple name, including enums nested in messages | The type universe is the protobuf type universe (8.1); indexing messages but not enums left enum support reachable only through inference | Draft |
+| 2026-08-25 | Conformance vectors | A vector is a ProtoLang `test` declaration, not a separate YAML or JSON format (25.2) | It is already bound and type-checked against descriptors, so a malformed vector is a compile error; a second authoring format would have to re-earn that | Draft |
+| 2026-08-25 | Conformance vectors | Backends compile and execute generated code, and must be shown to have run the same set of vectors, not merely to have passed | A driver that runs no tests also exits zero, so per-backend success alone does not establish cross-language agreement | Draft |
+| 2026-08-25 | Testing | `expect fail` runs out of process, and the verdict comes from what the child reported rather than from its exit code (25.3) | A terminal failure cannot be observed from inside the process it ends, and a host crash reporter can delay or suppress the exit indefinitely | Draft |
+| 2026-08-25 | Error reporting | The `on_zero fail` path writes its diagnostic to standard error before terminating, in every backend | Spec 20 bans I/O in method bodies, but this is a fatal-error path rather than behavior, and how a host reports a termination is not something a portable diagnostic can rely on | Draft |

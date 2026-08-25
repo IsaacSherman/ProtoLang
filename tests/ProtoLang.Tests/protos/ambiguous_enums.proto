@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package protolang.tests.ambiguous;
+
+// Two enums that share a simple name, so an unqualified reference to 'Kind' has no single answer.
+// Kept out of fixtures.proto deliberately: the simple-name cases there must stay unambiguous.
+
+message First {
+  enum Kind {
+    FIRST_KIND_NONE = 0;
+  }
+
+  Kind kind = 1;
+}
+
+message Second {
+  enum Kind {
+    SECOND_KIND_NONE = 0;
+  }
+
+  Kind kind = 1;
+}

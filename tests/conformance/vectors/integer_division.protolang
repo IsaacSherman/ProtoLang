@@ -1,0 +1,143 @@
+// Conformance vectors for integer division and remainder (spec 10.2, 10.2.1).
+//
+// Three things here are exactly where the targets diverge if nothing forces them together:
+//
+//   * Rounding. ProtoLang truncates toward zero. C# and C++ agree, but Python does not, so the
+//     rule is pinned here rather than left to whatever a backend inherits.
+//   * MIN / -1 and MIN % -1. The quotient has no representable value; on x86 the hardware divide
+//     instruction traps rather than wrapping, in both C# and C++.
+//   * A zero divisor. There is no target-independent answer, so ProtoLang makes the author state
+//     one: a fallback value, or 'fail', which stops the program.
+//
+// The divisor comes from a fixture field rather than a literal, so the zero path is genuinely
+// reachable: a non-zero literal divisor is proof the on_zero clause is dead, and the compiler
+// warns about it.
+
+import proto "conformance.proto";
+
+extend DivisionCase {
+    fn quotient() -> int64 {
+        return numerator / divisor on_zero 0;
+    }
+
+    fn remainder() -> int64 {
+        return numerator % divisor on_zero 0;
+    }
+
+    // Declares that no substitute value is correct, so a zero divisor stops the program.
+    fn strict_quotient() -> int64 {
+        return numerator / divisor on_zero fail;
+    }
+
+    fn strict_remainder() -> int64 {
+        return numerator % divisor on_zero fail;
+    }
+}
+
+test DivisionCase.quotient "truncates a negative quotient toward zero" {
+    receiver {
+        numerator = -7;
+        divisor = 2;
+    }
+
+    expect return -3;
+}
+
+test DivisionCase.quotient "truncates toward zero for a negative divisor" {
+    receiver {
+        numerator = -7;
+        divisor = -2;
+    }
+
+    expect return 3;
+}
+
+test DivisionCase.remainder "gives the remainder the sign of the dividend" {
+    receiver {
+        numerator = -7;
+        divisor = 2;
+    }
+
+    expect return -1;
+}
+
+test DivisionCase.remainder "keeps the dividend sign for a negative divisor" {
+    receiver {
+        numerator = -7;
+        divisor = -2;
+    }
+
+    expect return -1;
+}
+
+test DivisionCase.quotient "yields the on_zero fallback for a zero divisor" {
+    receiver {
+        numerator = -7;
+        divisor = 0;
+    }
+
+    expect return 0;
+}
+
+test DivisionCase.remainder "yields the on_zero fallback for a zero divisor" {
+    receiver {
+        numerator = -7;
+        divisor = 0;
+    }
+
+    expect return 0;
+}
+
+test DivisionCase.quotient "wraps MIN divided by minus one to MIN" {
+    receiver {
+        numerator = -9223372036854775807 - 1;
+        divisor = -1;
+    }
+
+    expect return -9223372036854775807 - 1;
+}
+
+test DivisionCase.remainder "gives zero for MIN remainder minus one" {
+    receiver {
+        numerator = -9223372036854775807 - 1;
+        divisor = -1;
+    }
+
+    expect return 0;
+}
+
+test DivisionCase.strict_quotient "divides normally when the divisor is not zero" {
+    receiver {
+        numerator = -7;
+        divisor = 2;
+    }
+
+    expect return -3;
+}
+
+test DivisionCase.strict_remainder "takes the remainder when the divisor is not zero" {
+    receiver {
+        numerator = -7;
+        divisor = 2;
+    }
+
+    expect return -1;
+}
+
+test DivisionCase.strict_quotient "stops the program on a zero divisor" {
+    receiver {
+        numerator = -7;
+        divisor = 0;
+    }
+
+    expect fail;
+}
+
+test DivisionCase.strict_remainder "stops the program on a zero divisor" {
+    receiver {
+        numerator = -7;
+        divisor = 0;
+    }
+
+    expect fail;
+}

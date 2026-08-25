@@ -1,0 +1,95 @@
+// Conformance vectors for strings (spec 11).
+//
+// Strings are the one non-numeric value a ProtoLang method can return today, and the two backends
+// represent them differently: C# returns a string, C++ returns a std::string copied out of the
+// message. These vectors check that equality and the returned value agree across that difference,
+// and that a literal containing characters each backend has to escape survives code generation.
+
+import proto "conformance.proto";
+
+extend StringCase {
+    fn matches() -> bool {
+        return left == right;
+    }
+
+    fn differs() -> bool {
+        return left != right;
+    }
+
+    fn first() -> string {
+        return left;
+    }
+
+    fn matches_literal() -> bool {
+        return left == "ok";
+    }
+}
+
+test StringCase.matches "equal strings compare equal" {
+    receiver {
+        left = "invoice";
+        right = "invoice";
+    }
+
+    expect return true;
+}
+
+test StringCase.matches "different strings do not compare equal" {
+    receiver {
+        left = "invoice";
+        right = "receipt";
+    }
+
+    expect return false;
+}
+
+test StringCase.matches "an empty string equals an unset field" {
+    receiver {
+        left = "";
+    }
+
+    expect return true;
+}
+
+test StringCase.matches "comparison is case sensitive" {
+    receiver {
+        left = "invoice";
+        right = "Invoice";
+    }
+
+    expect return false;
+}
+
+test StringCase.differs "inequality is the negation of equality" {
+    receiver {
+        left = "invoice";
+        right = "receipt";
+    }
+
+    expect return true;
+}
+
+test StringCase.first "returns the field value unchanged" {
+    receiver {
+        left = "invoice";
+    }
+
+    expect return "invoice";
+}
+
+// Both backends have to re-escape this literal to keep it on one line.
+test StringCase.first "returns a value containing characters that need escaping" {
+    receiver {
+        left = "line\none\ttwo \"quoted\" back\\slash";
+    }
+
+    expect return "line\none\ttwo \"quoted\" back\\slash";
+}
+
+test StringCase.matches_literal "compares a field against a literal" {
+    receiver {
+        left = "ok";
+    }
+
+    expect return true;
+}

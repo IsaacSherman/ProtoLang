@@ -90,12 +90,26 @@ public static class CSharpRuntime
     ];
 
     /// <summary>
+    /// Prefix of the line the fail path writes to standard error. Also the marker a test harness
+    /// uses as proof that control reached a terminal failure.
+    /// </summary>
+    public const string FailMarker = "ProtoLang: ";
+
+    /// <summary>
     /// Emits the deterministic-termination helper behind <c>on_zero fail</c>.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <see cref="Environment.FailFast(string?)"/> rather than an exception, because a catchable
     /// exception would let a consumer resume from a state the author said has no valid result, and
     /// because C++ has no equivalent of a catchable exception under this design.
+    /// </para>
+    /// <para>
+    /// The diagnostic is written to standard error before that call rather than left to FailFast's
+    /// own reporting, which varies by host: on a machine with a postmortem debugger registered, the
+    /// process can block indefinitely before printing anything. The C++ runtime writes the same
+    /// line for the same reason.
+    /// </para>
     /// </remarks>
     private static void EmitFail(SourceWriter writer)
     {
@@ -106,8 +120,15 @@ public static class CSharpRuntime
         writer.WriteLine("[global::System.Diagnostics.CodeAnalysis.DoesNotReturn]");
         using (writer.Block("private static void Fail(string operation)"))
         {
-            writer.WriteLine(
-                "global::System.Environment.FailFast(\"ProtoLang: \" + operation + \" by zero\");");
+            writer.WriteLine($"var message = \"{FailMarker}\" + operation + \" by zero\";");
+            writer.WriteLine();
+            writer.WriteLine("// The one place generated code performs I/O. Spec 20 bans I/O in method");
+            writer.WriteLine("// bodies; this is a fatal-error path rather than behavior, and how a host");
+            writer.WriteLine("// reports a fail-fast is not something a portable diagnostic can rely on.");
+            writer.WriteLine("global::System.Console.Error.WriteLine(message);");
+            writer.WriteLine("global::System.Console.Error.Flush();");
+            writer.WriteLine();
+            writer.WriteLine("global::System.Environment.FailFast(message);");
         }
     }
 

@@ -90,7 +90,12 @@ public class BackendTests
         Assert.Empty(diagnostics);
         var source = Assert.Single(files).Contents;
 
-        Assert.Contains("[global::Xunit.Fact]", source, StringComparison.Ordinal);
+        // The display name is the backend-independent identity, so a conformance harness reading
+        // the test log sees the same string the C++ driver prints.
+        Assert.Contains(
+            "[global::Xunit.Fact(DisplayName = \"protolang.examples.Invoice.total_cents: sums line totals\")]",
+            source,
+            StringComparison.Ordinal);
         Assert.Contains("var receiver = new global::Protolang.Examples.Invoice", source, StringComparison.Ordinal);
         Assert.Contains("Items =", source, StringComparison.Ordinal);
         Assert.Contains("Quantity = 2L", source, StringComparison.Ordinal);
@@ -117,7 +122,7 @@ public class BackendTests
         var source = Assert.Single(files).Contents;
 
         Assert.Contains("#include \"simpleScript.pl.h\"", source, StringComparison.Ordinal);
-        Assert.Contains("int main()", source, StringComparison.Ordinal);
+        Assert.Contains("int main(int argc, char** argv)", source, StringComparison.Ordinal);
         Assert.Contains("::protolang::examples::Invoice receiver;", source, StringComparison.Ordinal);
         Assert.Contains("auto* items = receiver.add_items();", source, StringComparison.Ordinal);
         Assert.Contains("items->set_quantity(2LL);", source, StringComparison.Ordinal);
@@ -127,6 +132,86 @@ public class BackendTests
             source,
             StringComparison.Ordinal);
         Assert.Contains("const auto expected = 1100LL;", source, StringComparison.Ordinal);
+
+        // The driver reports each test by its backend-independent identity, and prints how many it
+        // ran: a driver that ran none also exits 0, so the count is what makes the exit code mean
+        // something.
+        Assert.Contains(
+            "::std::cout << \"[ok] protolang.examples.Invoice.total_cents: sums line totals\"",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains("::std::cout << \"protolang: 12 test(s), \"", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A source with no <c>expect fail</c> test must not gain the child-process machinery, so the
+    /// common case emits exactly what it emitted before the feature existed.
+    /// </summary>
+    [Fact]
+    public void CSharpOmitsTestSupportWhenNoTestExpectsFailure()
+    {
+        var result = Compilation.Compile(TestPaths.SimpleScript, [TestPaths.ExampleProtoDirectory]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
+
+        var files = new CSharpBackend().EmitTests(
+            result.Module!, new BackendOptions("simpleScript.protolang"), new DiagnosticBag());
+
+        Assert.DoesNotContain(files, file => file.RelativePath == CSharpTestRuntime.FileName);
+        Assert.DoesNotContain(
+            "ModuleInitializer",
+            Assert.Single(files).Contents,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BothBackendsGenerateOutOfProcessTestsForExpectedFailure()
+    {
+        var path = TestPaths.WriteTempScript(
+            """
+            import proto "invoice.proto";
+
+            extend InvoiceItem {
+                fn strict_ratio() -> int64 {
+                    return unit_price_cents / quantity on_zero fail;
+                }
+            }
+
+            test InvoiceItem.strict_ratio "a zero divisor stops the program" {
+                receiver {
+                    quantity = 0;
+                    unit_price_cents = 100;
+                }
+
+                expect fail;
+            }
+            """);
+
+        var result = Compilation.Compile(path, [TestPaths.ExampleProtoDirectory]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
+
+        var options = new BackendOptions(Path.GetFileName(path));
+
+        var csharpDiagnostics = new DiagnosticBag();
+        var csharpFiles = new CSharpBackend().EmitTests(result.Module!, options, csharpDiagnostics);
+        Assert.Empty(csharpDiagnostics);
+
+        // The support file carries the child-process launcher; the per-source file carries the
+        // module initializer the child lands in.
+        Assert.Contains(csharpFiles, file => file.RelativePath == CSharpTestRuntime.FileName);
+        var csharpTests = csharpFiles.Single(file => file.RelativePath.EndsWith(".tests.g.cs", StringComparison.Ordinal));
+        Assert.Contains("ModuleInitializer", csharpTests.Contents, StringComparison.Ordinal);
+        Assert.Contains(
+            "global::ProtoLang.Runtime.ProtoLangTestSupport.DescribeExpectFail(",
+            csharpTests.Contents,
+            StringComparison.Ordinal);
+
+        var cppDiagnostics = new DiagnosticBag();
+        var cppSource = Assert.Single(new CppBackend().EmitTests(result.Module!, options, cppDiagnostics)).Contents;
+        Assert.Empty(cppDiagnostics);
+
+        Assert.Contains("protolang_expect_fail(argv[0]", cppSource, StringComparison.Ordinal);
+        Assert.Contains("::std::system(command.c_str())", cppSource, StringComparison.Ordinal);
+        Assert.Contains("return kProtoLangDidNotTerminate;", cppSource, StringComparison.Ordinal);
     }
 
     [Fact]
