@@ -53,6 +53,53 @@ public class NameMappingTests
         Assert.Contains("global::Protolang.Tests.Outer.Types.Nested inner", source, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The explicit-return-type path, which only became reachable once the binder learned to
+    /// resolve enum type references (issue #1).
+    /// </summary>
+    [Fact]
+    public void CSharpQualifiesAnExplicitlyDeclaredEnumReturnType()
+    {
+        var source = Emit(
+            new CSharpBackend(),
+            FixturePrelude +
+            """
+            extend Outer {
+                fn f() -> TopLevelStatus {
+                    var s: TopLevelStatus = status;
+                    return s;
+                }
+            }
+            """,
+            "test.g.cs");
+
+        Assert.Contains(
+            "public static global::Protolang.Tests.TopLevelStatus F(",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains("global::Protolang.Tests.TopLevelStatus s = self.Status;", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CppQualifiesAnExplicitlyDeclaredEnumReturnType()
+    {
+        var source = Emit(
+            new CppBackend(),
+            FixturePrelude +
+            """
+            extend Outer {
+                fn f() -> protolang.tests.Outer.Nested {
+                    var n: Nested = nested;
+                    return n;
+                }
+            }
+            """,
+            "test.pl.h");
+
+        Assert.Contains("inline ::protolang::tests::Outer_Nested f(", source, StringComparison.Ordinal);
+        Assert.Contains("::protolang::tests::Outer_Nested n = self.nested();", source, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void CppFlattensNestedEnumsWithUnderscores()
     {

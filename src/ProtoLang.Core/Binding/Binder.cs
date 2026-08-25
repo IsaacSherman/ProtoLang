@@ -16,6 +16,8 @@ public sealed class Binder
     private readonly DiagnosticBag _diagnostics;
     private readonly Dictionary<string, MessageDescriptor> _messagesByFullName = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<MessageDescriptor>> _messagesBySimpleName = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, EnumDescriptor> _enumsByFullName = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<EnumDescriptor>> _enumsBySimpleName = new(StringComparer.Ordinal);
     private readonly Dictionary<(string Receiver, string Method), IrMethodSignature> _methods = new();
 
     public Binder(IReadOnlyList<FileDescriptor> files, DiagnosticBag diagnostics)
@@ -27,6 +29,11 @@ public sealed class Binder
             foreach (var message in file.MessageTypes)
             {
                 IndexMessage(message);
+            }
+
+            foreach (var enumType in file.EnumTypes)
+            {
+                IndexEnum(enumType);
             }
         }
     }
@@ -43,10 +50,30 @@ public sealed class Binder
 
         list.Add(message);
 
+        // Enums nested in a message are only reachable through this walk, so they are indexed here
+        // rather than in the constructor's top-level loop.
+        foreach (var nested in message.EnumTypes)
+        {
+            IndexEnum(nested);
+        }
+
         foreach (var nested in message.NestedTypes)
         {
             IndexMessage(nested);
         }
+    }
+
+    private void IndexEnum(EnumDescriptor enumType)
+    {
+        _enumsByFullName[enumType.FullName] = enumType;
+
+        if (!_enumsBySimpleName.TryGetValue(enumType.Name, out var list))
+        {
+            list = [];
+            _enumsBySimpleName[enumType.Name] = list;
+        }
+
+        list.Add(enumType);
     }
 
     public IrModule Bind(CompilationUnit unit)
@@ -197,14 +224,48 @@ public sealed class Binder
             return scalar;
         }
 
-        if (_messagesByFullName.TryGetValue(reference.Name, out var byFullName))
+        // A fully qualified name is unambiguous by construction, so it is tried before any
+        // simple-name lookup that could report a false ambiguity.
+        if (_messagesByFullName.TryGetValue(reference.Name, out var messageByFullName))
         {
-            return new MessageType(byFullName);
+            return new MessageType(messageByFullName);
         }
 
-        if (_messagesBySimpleName.TryGetValue(reference.Name, out var candidates) && candidates.Count == 1)
+        if (_enumsByFullName.TryGetValue(reference.Name, out var enumByFullName))
         {
-            return new MessageType(candidates[0]);
+            return new EnumPlType(enumByFullName);
+        }
+
+        _messagesBySimpleName.TryGetValue(reference.Name, out var messages);
+        _enumsBySimpleName.TryGetValue(reference.Name, out var enums);
+
+        var candidateCount = (messages?.Count ?? 0) + (enums?.Count ?? 0);
+
+        if (candidateCount > 1)
+        {
+            // Messages and enums share one type name space here, so a name matching one of each is
+            // just as ambiguous as a name matching two enums.
+            var fullNames = (messages ?? Enumerable.Empty<MessageDescriptor>()).Select(m => m.FullName)
+                .Concat((enums ?? Enumerable.Empty<EnumDescriptor>()).Select(e => e.FullName))
+                .Order(StringComparer.Ordinal);
+
+            _diagnostics.Error(
+                "PL0074",
+                "ambiguous type name",
+                $"'{reference.Name}' matches {candidateCount} types: " + string.Join(", ", fullNames) + ".",
+                reference.Span,
+                "Qualify the name with its protobuf package.");
+            return ErrorType.Instance;
+        }
+
+        if (messages is { Count: 1 })
+        {
+            return new MessageType(messages[0]);
+        }
+
+        if (enums is { Count: 1 })
+        {
+            return new EnumPlType(enums[0]);
         }
 
         _diagnostics.Error(

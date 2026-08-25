@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package protolang.conformance;
+
+// Schema for the ProtoLang conformance vectors (spec 25.2).
+//
+// Every vector file shares this one schema so protoc runs once per language and the C++ link
+// reuses a single conformance.pb object file. Each vector gets its OWN message: the C# backend
+// names its extension class after the receiver, so two vector files extending the same message
+// would emit duplicate class declarations into the one assembly the C# vectors are built as.
+
+// integer_overflow.protolang -- wrapping arithmetic (spec 10.1).
+message OverflowCase {
+  int32 i32_left = 1;
+  int32 i32_right = 2;
+  int64 i64_left = 3;
+  int64 i64_right = 4;
+  uint32 u32_left = 5;
+  uint32 u32_right = 6;
+  uint64 u64_left = 7;
+  uint64 u64_right = 8;
+}
+
+// integer_division.protolang -- truncation, on_zero, and the MIN / -1 pair (spec 10.2, 10.2.1).
+message DivisionCase {
+  int64 numerator = 1;
+  int64 divisor = 2;
+}
+
+// floating_point.protolang -- IEEE 754 division, including by zero.
+message FloatCase {
+  double numerator = 1;
+  double denominator = 2;
+  float narrow_numerator = 3;
+  float narrow_denominator = 4;
+}
+
+// control_flow.protolang -- if / else if / else, while, break, continue, for-in (spec 15).
+message ControlFlowCase {
+  repeated int64 values = 1;
+  int64 threshold = 2;
+}
+
+// strings.protolang -- string equality and string returns (spec 11).
+message StringCase {
+  string left = 1;
+  string right = 2;
+}
+
+// enum_types.protolang -- enum-typed locals, parameters, and returns (issue #1).
+message EnumCase {
+  enum Level {
+    LEVEL_UNSPECIFIED = 0;
+    LEVEL_HIGH = 1;
+  }
+
+  Level level = 1;
+  Level other = 2;
+  int64 count = 3;
+}

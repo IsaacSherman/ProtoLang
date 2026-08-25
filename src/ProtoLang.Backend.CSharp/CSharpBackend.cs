@@ -114,30 +114,22 @@ public sealed class CSharpBackend : ITestBackend
             return [];
         }
 
-        foreach (var test in module.Tests.Where(t => t.Expectation is IrTestFailExpectation))
-        {
-            diagnostics.Error(
-                "PL1002",
-                "expected-fail tests are not supported by the C# backend",
-                $"Test '{test.Name}' expects terminal failure, but the C# runtime maps that to FailFast.",
-                test.Span,
-                "A later test backend can run these out-of-process.");
-        }
-
-        if (diagnostics.HasErrors)
-        {
-            return [];
-        }
-
+        var sourceName = Path.GetFileNameWithoutExtension(options.SourceFileName);
         var writer = new SourceWriter();
         WriteTestHeader(writer, options);
 
+        // Names are allocated once and reused, because an 'expect fail' test needs the same
+        // identifier in three places: the fact, the key it passes to the child process, and the
+        // case label the child dispatches on.
+        var usedNames = new HashSet<string>(StringComparer.Ordinal);
+        var methodNames = module.Tests.ToDictionary(test => test, test => UniqueTestMethodName(test, usedNames));
+        var failTests = module.Tests.Where(t => t.Expectation is IrTestFailExpectation).ToList();
+
         using (writer.Block("namespace ProtoLang.GeneratedTests"))
         {
-            var className = ToIdentifier(Path.GetFileNameWithoutExtension(options.SourceFileName)) + "ProtoLangTests";
+            var className = ToIdentifier(sourceName) + "ProtoLangTests";
             using var classScope = writer.Block($"public sealed class {className}");
 
-            var usedNames = new HashSet<string>(StringComparer.Ordinal);
             var first = true;
             foreach (var test in module.Tests)
             {
@@ -147,12 +139,27 @@ public sealed class CSharpBackend : ITestBackend
                 }
 
                 first = false;
-                EmitTest(writer, test, usedNames);
+                EmitTest(writer, test, methodNames[test], sourceName);
+            }
+
+            if (failTests.Count > 0)
+            {
+                writer.WriteLine();
+                EmitFailTestDispatcher(writer, failTests, methodNames, sourceName);
             }
         }
 
-        var fileName = Path.GetFileNameWithoutExtension(options.SourceFileName) + ".tests.g.cs";
-        return [new GeneratedFile(fileName, writer.ToString())];
+        var fileName = sourceName + ".tests.g.cs";
+
+        // The support file is emitted only when something needs it, so a source with no 'expect
+        // fail' test does not gain a file that starts child processes.
+        return failTests.Count > 0
+            ?
+            [
+                new GeneratedFile(CSharpTestRuntime.FileName, CSharpTestRuntime.Source),
+                new GeneratedFile(fileName, writer.ToString()),
+            ]
+            : [new GeneratedFile(fileName, writer.ToString())];
     }
 
     private static void WriteHeader(SourceWriter writer, BackendOptions options)
@@ -166,6 +173,11 @@ public sealed class CSharpBackend : ITestBackend
         writer.WriteLine();
         writer.WriteLine("#nullable enable");
         writer.WriteLine();
+        writer.WriteLine("// A ProtoLang comparison is emitted exactly as written, including 'x != x', which is");
+        writer.WriteLine("// how a NaN is detected. Generated code must build in a project that treats");
+        writer.WriteLine("// warnings as errors.");
+        writer.WriteLine("#pragma warning disable CS1718 // Comparison made to same variable");
+        writer.WriteLine();
     }
 
     private static void WriteTestHeader(SourceWriter writer, BackendOptions options)
@@ -178,26 +190,132 @@ public sealed class CSharpBackend : ITestBackend
         writer.WriteLine();
         writer.WriteLine("#nullable enable");
         writer.WriteLine();
+        writer.WriteLine("// Every expectation is asserted the same way, whatever its type, so that the");
+        writer.WriteLine("// emitted assertion follows from the declared 'expect return' rather than from the");
+        writer.WriteLine("// backend guessing which overload reads better.");
+        writer.WriteLine("#pragma warning disable xUnit2004 // Do not use Assert.Equal for boolean conditions");
+        writer.WriteLine();
     }
 
-    private static void EmitTest(SourceWriter writer, IrTest test, HashSet<string> usedNames)
+    private static void EmitTest(SourceWriter writer, IrTest test, string methodName, string sourceName)
     {
+        // The display name is the backend-independent identity rather than the mangled method name,
+        // so a conformance harness reading the test log sees the same string every backend reports.
+        writer.WriteLine($"[global::Xunit.Fact(DisplayName = {FormatString(test.Identity)})]");
+        using var scope = writer.Block($"public void {methodName}()");
+
+        if (test.Expectation is IrTestFailExpectation)
+        {
+            EmitFailTest(writer, test, methodName, sourceName);
+            return;
+        }
+
         if (test.Expectation is not IrTestReturnExpectation returnExpectation)
         {
             throw new ArgumentOutOfRangeException(nameof(test), test.Expectation, "Unhandled C# test expectation.");
         }
 
-        var methodName = UniqueTestMethodName(test, usedNames);
-        writer.WriteLine("[global::Xunit.Fact]");
-        using var scope = writer.Block($"public void {methodName}()");
-
         EmitReceiverCreation(writer, test.Receiver);
+        writer.WriteLine(
+            $"global::Xunit.Assert.Equal({Expression(returnExpectation.Value, "receiver")}, {Invocation(test)});");
+    }
 
+    /// <summary>
+    /// Emits an <c>expect fail</c> test. What it asserts is that the call does not return, which no
+    /// assertion inside the same process can observe, so the call happens in a child process and
+    /// this only inspects how that process ended.
+    /// </summary>
+    private static void EmitFailTest(SourceWriter writer, IrTest test, string methodName, string sourceName)
+    {
+        var key = FormatString(sourceName + ":" + methodName);
+
+        writer.WriteLine($"var unexpected = {CSharpTestRuntime.TypeName}.DescribeExpectFail({key});");
+        writer.WriteLine("global::Xunit.Assert.True(");
+        writer.Indent();
+        writer.WriteLine("unexpected is null,");
+        writer.WriteLine($"{FormatString(test.Identity + " expected terminal failure, but ")} + unexpected);");
+        writer.Unindent();
+    }
+
+    /// <summary>
+    /// Emits the module initializer a child process lands in. It runs before the test host's entry
+    /// point, so a child never starts a normal test run.
+    /// </summary>
+    private static void EmitFailTestDispatcher(
+        SourceWriter writer,
+        IReadOnlyList<IrTest> failTests,
+        IReadOnlyDictionary<IrTest, string> methodNames,
+        string sourceName)
+    {
+        writer.WriteLine("/// <summary>");
+        writer.WriteLine("/// Runs the single 'expect fail' test this process was launched for, and returns");
+        writer.WriteLine("/// immediately during an ordinary test run.");
+        writer.WriteLine("/// </summary>");
+        writer.WriteLine("[global::System.Runtime.CompilerServices.ModuleInitializer]");
+        using var scope = writer.Block("internal static void RunRequestedProtoLangFailTest()");
+
+        writer.WriteLine(
+            $"var requested = {CSharpTestRuntime.TypeName}.RequestedTest({FormatString(sourceName)});");
+        using (writer.Block("if (requested is null)"))
+        {
+            writer.WriteLine("return;");
+        }
+
+        writer.WriteLine();
+        writer.WriteLine($"var key = {FormatString(sourceName + ":")} + requested;");
+        writer.WriteLine();
+        writer.WriteLine("// The parent reads these two markers rather than an exit code: how a host");
+        writer.WriteLine("// reports a fail-fast, and how long it takes to, is not something a test can");
+        writer.WriteLine("// depend on. The first says the body ran; the second says it came back, which");
+        writer.WriteLine("// is exactly the failure an 'expect fail' test is looking for.");
+        writer.WriteLine($"global::System.Console.Out.WriteLine({CSharpTestRuntime.TypeName}.StartedMarker + key);");
+        writer.WriteLine("global::System.Console.Out.Flush();");
+        writer.WriteLine();
+        using (writer.Block("switch (requested)"))
+        {
+            foreach (var test in failTests)
+            {
+                // Each case gets its own block: the receiver local would otherwise collide with the
+                // one declared by the case before it.
+                writer.WriteLine($"case {FormatString(methodNames[test])}:");
+                writer.WriteLine("{");
+                writer.Indent();
+
+                EmitReceiverCreation(writer, test.Receiver);
+
+                // The call is expected not to return, so its result is deliberately unused.
+                writer.WriteLine(test.Target.ReturnType is VoidType
+                    ? $"{Invocation(test)};"
+                    : $"_ = {Invocation(test)};");
+                writer.WriteLine("break;");
+
+                writer.Unindent();
+                writer.WriteLine("}");
+                writer.WriteLine();
+            }
+
+            writer.WriteLine("default:");
+            writer.Indent();
+            writer.WriteLine($"global::System.Environment.Exit({CSharpTestRuntime.TypeName}.UnknownTest);");
+            writer.WriteLine("break;");
+            writer.Unindent();
+        }
+
+        writer.WriteLine();
+        writer.WriteLine("// Reached only when the method returned instead of terminating the process.");
+        writer.WriteLine($"global::System.Console.Out.WriteLine({CSharpTestRuntime.TypeName}.ReturnedMarker + key);");
+        writer.WriteLine("global::System.Console.Out.Flush();");
+        writer.WriteLine($"global::System.Environment.Exit({CSharpTestRuntime.TypeName}.DidNotTerminate);");
+    }
+
+    /// <summary>The call under test, against the local named <c>receiver</c>.</summary>
+    private static string Invocation(IrTest test)
+    {
         var arguments = new List<string> { "receiver" };
         arguments.AddRange(test.Arguments.Select(a => Expression(a.Value, "receiver")));
-        var actual = $"{QualifiedExtensionClassName(test.Target.Receiver)}."
+
+        return $"{QualifiedExtensionClassName(test.Target.Receiver)}."
             + $"{NameConventions.ToPascalCase(test.Target.Name)}({string.Join(", ", arguments)})";
-        writer.WriteLine($"global::Xunit.Assert.Equal({Expression(returnExpectation.Value, "receiver")}, {actual});");
     }
 
     private static void EmitReceiverCreation(SourceWriter writer, IrTestMessageValue receiver)

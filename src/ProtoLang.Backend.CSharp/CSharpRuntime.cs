@@ -90,12 +90,37 @@ public static class CSharpRuntime
     ];
 
     /// <summary>
+    /// Prefix of the line the fail path writes to standard error.
+    /// </summary>
+    public const string FailMarker = "ProtoLang: ";
+
+    /// <summary>
+    /// Exit code of a program stopped by <c>on_zero fail</c>. <c>EX_SOFTWARE</c> from
+    /// <c>sysexits.h</c>, and normative: every backend reports the same code (spec 10.2.1).
+    /// </summary>
+    public const int FailExitCode = 70;
+
+    /// <summary>
     /// Emits the deterministic-termination helper behind <c>on_zero fail</c>.
     /// </summary>
     /// <remarks>
-    /// <see cref="Environment.FailFast(string?)"/> rather than an exception, because a catchable
-    /// exception would let a consumer resume from a state the author said has no valid result, and
-    /// because C++ has no equivalent of a catchable exception under this design.
+    /// <para>
+    /// Termination rather than an exception, because a catchable exception would let a consumer
+    /// resume from a state the author said has no valid result, and because it would not mean the
+    /// same thing in every target.
+    /// </para>
+    /// <para>
+    /// <see cref="Environment.Exit(int)"/> rather than <see cref="Environment.FailFast(string?)"/>:
+    /// fail-fast is a crash-reporting primitive, so it hands the process to Windows Error Reporting
+    /// and to any postmortem debugger registered under <c>AeDebug</c> -- which installing Visual
+    /// Studio does. Generated library code must not be able to put a dialog on someone's screen. It
+    /// also leaves the exit code up to the host, where this reports <see cref="FailExitCode"/> in
+    /// every backend. Nothing can cancel an Exit, so it is no more recoverable than a fail-fast.
+    /// </para>
+    /// <para>
+    /// The diagnostic is written to standard error first, so the reason survives however the host
+    /// reports the exit. The C++ runtime writes the same line for the same reason.
+    /// </para>
     /// </remarks>
     private static void EmitFail(SourceWriter writer)
     {
@@ -106,8 +131,15 @@ public static class CSharpRuntime
         writer.WriteLine("[global::System.Diagnostics.CodeAnalysis.DoesNotReturn]");
         using (writer.Block("private static void Fail(string operation)"))
         {
-            writer.WriteLine(
-                "global::System.Environment.FailFast(\"ProtoLang: \" + operation + \" by zero\");");
+            writer.WriteLine("// The one place generated code performs I/O. Spec 20 bans I/O in method");
+            writer.WriteLine("// bodies; this is a fatal-error path rather than behavior, and the reason has");
+            writer.WriteLine("// to survive however the host reports the exit.");
+            writer.WriteLine($"global::System.Console.Error.WriteLine(\"{FailMarker}\" + operation + \" by zero\");");
+            writer.WriteLine("global::System.Console.Error.Flush();");
+            writer.WriteLine();
+            writer.WriteLine("// Exit, not FailFast: a fail-fast is a crash report, and generated library");
+            writer.WriteLine("// code must not be able to raise a dialog or invoke a postmortem debugger.");
+            writer.WriteLine($"global::System.Environment.Exit({FailExitCode});");
         }
     }
 

@@ -191,7 +191,18 @@ public sealed record IrTest(
     IrTestMessageValue Receiver,
     IReadOnlyList<IrTestArgument> Arguments,
     IrTestExpectation Expectation,
-    SourceSpan Span);
+    SourceSpan Span)
+{
+    /// <summary>
+    /// A stable name for this test that does not depend on any target language.
+    /// </summary>
+    /// <remarks>
+    /// Each backend has to mangle test names into an identifier its own language accepts, and the
+    /// two do it differently. This is what they report instead, so a conformance harness can check
+    /// that every backend ran the same set of tests rather than merely that each ran some.
+    /// </remarks>
+    public string Identity => $"{Target.Receiver.FullName}.{Target.Name}: {Name}";
+}
 
 public sealed record IrTestArgument(string Name, IrExpression Value, SourceSpan Span);
 

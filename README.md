@@ -111,13 +111,16 @@ Implemented:
 
 - Lexer and recursive-descent parser
 - Protobuf descriptor binding via `protoc`
-- Name resolution and type checking against real descriptors
+- Name resolution and type checking against real descriptors, including enum type references
 - Typed IR carrying resolved types, source locations, and per-operation arithmetic behavior
+- Control flow: `if` / `else if` / `else`, `while`, `break`, `continue`, and `for`-`in`
 - C# backend (extension methods) and C++ backend (header-only free functions)
+- Author-written `test` declarations, generated into xUnit tests and a C++ test executable
+- A cross-language conformance suite that runs the same vectors in both backends
 
-Not implemented: conditionals and loops other than `for`-`in`, maps, presence, explicit casts,
-mutation, virtual methods, `Result` types, and the Python backend. Backends reject these rather
-than emitting something whose semantics differ from the spec.
+Not implemented: maps, presence, explicit casts, mutation, virtual methods, `Result` types, naming
+an enum value in an expression, and the Python backend. Backends reject these rather than emitting
+something whose semantics differ from the spec.
 
 ### Building
 
@@ -160,6 +163,7 @@ Output layout:
 | `generated/cpp/protolang_runtime.h` | C++ runtime helpers for ProtoLang arithmetic semantics |
 | `generated/cpp/simpleScript.pl.h` | C++ header-only free functions generated from ProtoLang behavior |
 | `generated/tests/csharp/simpleScript.tests.g.cs` | C# xUnit tests generated from ProtoLang `test` declarations |
+| `generated/tests/csharp/ProtoLangTestSupport.g.cs` | C# support for `expect fail` tests. Emitted only when the source has one |
 | `generated/tests/cpp/simpleScript.tests.cc` | C++ standalone test executable source generated from ProtoLang `test` declarations |
 
 The compiler options used in those commands are:
@@ -230,8 +234,60 @@ dotnet run --project src/ProtoLang.Cli -- examples/simpleScript.protolang -I exa
 
 That writes `generated/tests/cpp/simpleScript.tests.cc`. Build it with the generated ProtoLang
 header, generated protobuf C++ sources, protobuf headers, and protobuf libraries on your normal C++
-compiler command line. The executable returns `0` when all generated ProtoLang tests pass and
-non-zero otherwise.
+compiler command line. The executable prints one line per test and a summary, and returns `0` when
+all generated ProtoLang tests pass and non-zero otherwise:
+
+```text
+[ok] protolang.examples.Invoice.total_cents: sums line totals
+protolang: 12 test(s), 0 failed
+```
+
+Passing `--run <name>` runs a single test instead; that is how the driver observes a test that
+expects the process to terminate, described next.
+
+### Tests That Expect Failure
+
+`on_zero fail` says no substitute value is correct, so the program stops. A test can assert that:
+
+```protolang
+test InvoiceItem.strict_ratio "a zero divisor stops the program" {
+    receiver {
+        quantity = 0;
+        unit_price_cents = 100;
+    }
+
+    expect fail;
+}
+```
+
+A stopped program writes its reason to standard error and exits with code **70** (`EX_SOFTWARE`),
+the same in every backend. That is `Environment.Exit` in C# and `std::_Exit` in C++, deliberately
+not `Environment.FailFast` or `std::abort`: those are crash-reporting primitives, so on Windows
+they hand the process to Windows Error Reporting and to whatever postmortem debugger is registered
+-- meaning generated library code could put a dialog on a user's screen. `abort` is also catchable
+through `SIGABRT`, so it would not even guarantee the program stops.
+
+Nothing inside a process can observe the process ending, so both backends generate this as an
+out-of-process test. The C# backend emits an extra `ProtoLangTestSupport.g.cs` and a module
+initializer that lets the test assembly be relaunched for one named test; the generated `[Fact]`
+starts that child and checks its exit code. The C++ driver reruns itself with `--run <name>` and
+does the same. Neither needs any wiring from you beyond building the generated files as usual.
+
+### Conformance Suite
+
+The compiler's own cross-language test suite lives in
+[tests/conformance/](tests/conformance/README.md). Each vector is a `.protolang` file whose `test`
+declarations state an expected result once; every backend then compiles, builds, and executes them,
+and all backends must agree. It covers the cases where the targets natively disagree: integer
+overflow wrapping, `on_zero` and `on_zero fail`, `MIN / -1`, truncating integer division, and IEEE
+754 division by zero.
+
+It runs as part of `dotnet test`, and skips with a message naming the missing tool when protoc, a
+C++ compiler, or a protobuf C++ install is not available.
+
+```powershell
+dotnet test tests\ProtoLang.Tests\ProtoLang.Tests.csproj --filter "FullyQualifiedName~Conformance"
+```
 
 ### Optional C++ Smoke Test Dependencies
 
@@ -266,6 +322,11 @@ system install paths, and the explicit override:
 $env:PROTOLANG_PROTOBUF_CPP_INCLUDE = "C:\path\to\protobuf\include"
 ```
 
+Point that at the `include` directory of a complete install rather than at a bare copy of the
+headers. The libraries, runtime binaries, and matching `protoc` are located beside it, and the tests
+that build and execute generated C++ need all four. Given headers alone, those tests skip and say
+which pieces were missing.
+
 To run only the C++ smoke tests:
 
 ```powershell
@@ -292,6 +353,7 @@ is skipped with a message. A fully active local run should report zero skipped t
 | `src/ProtoLang.Backend.CSharp` | C# code generation |
 | `src/ProtoLang.Backend.Cpp` | C++ code generation |
 | `src/ProtoLang.Cli` | `protolangc` command-line driver |
-| `tests/ProtoLang.Tests` | Lexer, parser, binder, and backend tests |
+| `tests/ProtoLang.Tests` | Lexer, parser, binder, and backend tests, plus the conformance harness |
+| `tests/conformance` | Cross-language conformance vectors ([README](tests/conformance/README.md)) |
 
 Backends depend only on the IR, never on the AST.
