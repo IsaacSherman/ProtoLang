@@ -35,6 +35,19 @@ message FloatCase {
   float narrow_denominator = 4;
 }
 
+// casts.protolang -- explicit numeric conversions (spec 10.3).
+message CastCase {
+  int32 i32 = 1;
+  int64 i64 = 2;
+  uint32 u32 = 3;
+  uint64 u64 = 4;
+  double d = 5;
+  float f = 6;
+
+  // A NaN has no literal form, so vectors that need one build it as d / zero.
+  double zero = 7;
+}
+
 // control_flow.protolang -- if / else if / else, while, break, continue, for-in (spec 15).
 message ControlFlowCase {
   repeated int64 values = 1;
@@ -47,14 +60,24 @@ message StringCase {
   string right = 2;
 }
 
-// enum_types.protolang -- enum-typed locals, parameters, and returns (issue #1).
+// enum_types.protolang -- enum types and named enum values.
+//
+// A top-level enum as well as a nested one, because the two are named differently in C++: protoc
+// prefixes a nested enum's values with the flattened enum name and leaves a top-level enum's bare.
+enum ConformanceStatus {
+  CONFORMANCE_STATUS_UNSPECIFIED = 0;
+  CONFORMANCE_STATUS_READY = 1;
+}
+
 message EnumCase {
   enum Level {
     LEVEL_UNSPECIFIED = 0;
     LEVEL_HIGH = 1;
+    LEVEL_LOW = 2;
   }
 
   Level level = 1;
   Level other = 2;
   int64 count = 3;
+  ConformanceStatus status = 4;
 }

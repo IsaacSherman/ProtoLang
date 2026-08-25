@@ -616,6 +616,8 @@ public sealed class CppBackend : ITestBackend
         IrBinary binary => EmitBinary(binary),
         IrIntegerDivision division => EmitIntegerDivision(division),
         IrUnary unary => EmitUnary(unary),
+        IrConversion conversion => EmitConversion(conversion),
+        IrEnumValue enumValue => QualifiedEnumValueName(enumValue.Value),
         IrLiteral literal => EmitLiteral(literal),
         _ => throw new ArgumentOutOfRangeException(nameof(expression), expression, "Unhandled expression."),
     };
@@ -714,6 +716,50 @@ public sealed class CppBackend : ITestBackend
         ScalarKind.UInt64 => "u64",
         _ => throw new ArgumentOutOfRangeException(nameof(scalar), scalar.Kind, "Not an integer kind."),
     };
+
+    /// <summary>
+    /// Emits an explicit conversion (spec 10.3).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Integer narrowing needs no helper here, unlike <c>+</c>, <c>-</c>, and <c>*</c>: C++20
+    /// defines the conversion to a signed type as two's complement (P0907R4), and the runtime
+    /// header already asserts C++20, so <c>static_cast</c> is the explicit statement of the
+    /// wrapping rule rather than a reliance on a default. The same goes for widening to a
+    /// floating-point type.
+    /// </para>
+    /// <para>
+    /// The two directions that lose range do need helpers, because C++ makes both undefined rather
+    /// than merely implementation-defined: converting a <c>double</c> outside <c>float</c>'s range,
+    /// and converting a floating-point value outside the target integer's range.
+    /// </para>
+    /// </remarks>
+    private static string EmitConversion(IrConversion conversion)
+    {
+        if (conversion.Behavior != ConversionBehavior.WrapOrSaturate)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(conversion), conversion.Behavior, "Unhandled conversion behavior.");
+        }
+
+        var operand = Expression(conversion.Operand);
+        var target = TypeName(conversion.TargetType);
+
+        return conversion.Kind switch
+        {
+            ConversionKind.Identity => operand,
+            ConversionKind.IntegerToInteger or ConversionKind.IntegerToFloat =>
+                $"static_cast<{target}>({operand})",
+            ConversionKind.FloatToFloat => conversion.TargetType.Kind == ScalarKind.Float
+                ? $"{RuntimeNamespace}::narrow_f64_to_f32({operand})"
+                : $"static_cast<{target}>({operand})",
+            ConversionKind.FloatToInteger =>
+                $"{RuntimeNamespace}::trunc_sat_f64_to_{HelperSuffix(conversion.TargetType)}"
+                + $"(static_cast<double>({operand}))",
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(conversion), conversion.Kind, "Unhandled conversion kind."),
+        };
+    }
 
     private static string EmitLiteral(IrLiteral literal) => literal.Value switch
     {
@@ -865,6 +911,17 @@ public sealed class CppBackend : ITestBackend
     {
         var ns = NameConventions.GetCppNamespace(descriptor.File);
         var name = NameConventions.GetCppTypeName(descriptor);
+        return string.IsNullOrEmpty(ns) ? $"::{name}" : $"::{ns}::{name}";
+    }
+
+    /// <summary>
+    /// An enum constant, fully qualified. protoc emits enum values at namespace scope rather than
+    /// as members of the enum, so this qualifies the value name and not the type name.
+    /// </summary>
+    private static string QualifiedEnumValueName(EnumValueDescriptor value)
+    {
+        var ns = NameConventions.GetCppNamespace(value.EnumDescriptor.File);
+        var name = NameConventions.GetCppValueName(value);
         return string.IsNullOrEmpty(ns) ? $"::{name}" : $"::{ns}::{name}";
     }
 

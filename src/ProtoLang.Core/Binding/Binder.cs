@@ -19,10 +19,12 @@ public sealed class Binder
     private readonly Dictionary<string, EnumDescriptor> _enumsByFullName = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<EnumDescriptor>> _enumsBySimpleName = new(StringComparer.Ordinal);
     private readonly Dictionary<(string Receiver, string Method), IrMethodSignature> _methods = new();
+    private readonly NumericPolicy _policy;
 
-    public Binder(IReadOnlyList<FileDescriptor> files, DiagnosticBag diagnostics)
+    public Binder(IReadOnlyList<FileDescriptor> files, DiagnosticBag diagnostics, NumericPolicy? policy = null)
     {
         _diagnostics = diagnostics;
+        _policy = policy ?? NumericPolicy.Default;
 
         foreach (var file in files)
         {
@@ -211,6 +213,18 @@ public sealed class Binder
         _methods[key] = new IrMethodSignature(receiver, method.Name, returnType, parameterNames, parameterTypes);
     }
 
+    private void ReportAmbiguousTypeName(string name, SourceSpan span, IEnumerable<string> fullNames)
+    {
+        var ordered = fullNames.Order(StringComparer.Ordinal).ToList();
+
+        _diagnostics.Error(
+            "PL0074",
+            "ambiguous type name",
+            $"'{name}' matches {ordered.Count} types: " + string.Join(", ", ordered) + ".",
+            span,
+            "Qualify the name with its protobuf package.");
+    }
+
     private PlType ResolveTypeReference(TypeReference reference)
     {
         if (reference.Name == "void")
@@ -246,15 +260,9 @@ public sealed class Binder
             // Messages and enums share one type name space here, so a name matching one of each is
             // just as ambiguous as a name matching two enums.
             var fullNames = (messages ?? Enumerable.Empty<MessageDescriptor>()).Select(m => m.FullName)
-                .Concat((enums ?? Enumerable.Empty<EnumDescriptor>()).Select(e => e.FullName))
-                .Order(StringComparer.Ordinal);
+                .Concat((enums ?? Enumerable.Empty<EnumDescriptor>()).Select(e => e.FullName));
 
-            _diagnostics.Error(
-                "PL0074",
-                "ambiguous type name",
-                $"'{reference.Name}' matches {candidateCount} types: " + string.Join(", ", fullNames) + ".",
-                reference.Span,
-                "Qualify the name with its protobuf package.");
+            ReportAmbiguousTypeName(reference.Name, reference.Span, fullNames);
             return ErrorType.Instance;
         }
 
@@ -429,13 +437,17 @@ public sealed class Binder
                 case TestScalarFieldInitializer scalar:
                 {
                     var expectedType = TypeFactory.FromFieldValue(descriptorField);
-                    if (expectedType is MessageType or EnumPlType)
+
+                    // Enums are not excluded here: an enum field is set from a named constant, which
+                    // is an ordinary expression. PL0063 below catches one of the wrong enum type.
+                    if (expectedType is MessageType)
                     {
                         _diagnostics.Error(
                             "PL0062",
                             "fixture field requires a nested value",
-                            $"Field '{descriptorField.Name}' is '{expectedType.DisplayName}' and cannot be set from a scalar expression.",
-                            field.Span);
+                            $"Field '{descriptorField.Name}' is message '{expectedType.DisplayName}' and cannot be set from an expression.",
+                            field.Span,
+                            $"Write '{descriptorField.Name} {{ ... }}' to build the nested message.");
                         continue;
                     }
 
@@ -895,9 +907,69 @@ public sealed class Binder
             InvocationExpression invocation => BindInvocation(invocation, scope, context),
             BinaryExpression binary => BindBinary(binary, scope, context, expectedType),
             UnaryExpression unary => BindUnary(unary, scope, context, expectedType),
+            CastExpression cast => BindCast(cast, scope, context),
             ErrorExpression error => new IrLiteral(null, ErrorType.Instance, error.Span),
             _ => throw new ArgumentOutOfRangeException(nameof(expression), expression, "Unhandled expression."),
         };
+
+    /// <summary>
+    /// Binds an explicit conversion, <c>x as int64</c> (spec 10.3). This is the only way to change
+    /// the width or signedness of a value, and the reason mixed-width arithmetic is expressible at
+    /// all.
+    /// </summary>
+    /// <remarks>
+    /// The operand is bound with no expected type. The cast already states the target, so the
+    /// operand keeps whatever type it has on its own: an integer literal takes its natural
+    /// <c>int64</c> and a float literal its natural <c>double</c>. That is what makes
+    /// <c>3000000000 as int32</c> a narrowing conversion that wraps, rather than a literal that
+    /// silently retypes itself and then reports PL0036 for not fitting.
+    /// </remarks>
+    private IrExpression BindCast(CastExpression cast, Scope scope, MethodContext context)
+    {
+        var operand = BindExpression(cast.Operand, scope, context, null);
+        var target = ResolveTypeReference(cast.TargetType);
+
+        // ResolveTypeReference has already reported an unknown or ambiguous target, and a failed
+        // operand has already reported whatever went wrong there.
+        if (operand.Type is ErrorType || target is ErrorType)
+        {
+            return new IrLiteral(null, ErrorType.Instance, cast.Span);
+        }
+
+        if (operand.Type is not ScalarType { IsNumeric: true } source
+            || target is not ScalarType { IsNumeric: true } destination)
+        {
+            _diagnostics.Error(
+                "PL0075",
+                "invalid conversion",
+                $"Cannot convert '{operand.Type.DisplayName}' to '{target.DisplayName}'.",
+                cast.Span,
+                "'as' converts between numeric scalar types only (spec 10.3).");
+            return new IrLiteral(null, ErrorType.Instance, cast.Span);
+        }
+
+        return new IrConversion(
+            operand,
+            destination,
+            ClassifyConversion(source, destination),
+            _policy.ResolveConversion(source, destination),
+            cast.Span);
+    }
+
+    private static ConversionKind ClassifyConversion(ScalarType source, ScalarType destination)
+    {
+        if (source.Kind == destination.Kind)
+        {
+            return ConversionKind.Identity;
+        }
+
+        if (source.IsInteger)
+        {
+            return destination.IsInteger ? ConversionKind.IntegerToInteger : ConversionKind.IntegerToFloat;
+        }
+
+        return destination.IsInteger ? ConversionKind.FloatToInteger : ConversionKind.FloatToFloat;
+    }
 
     /// <summary>
     /// Integer literals adopt the expected integer type when the value fits, so
@@ -986,8 +1058,107 @@ public sealed class Binder
         return new IrFieldAccess(receiver, field, TypeFactory.FromField(field), span);
     }
 
+    /// <summary>
+    /// Resolves <c>SomeEnum.SOME_VALUE</c>, or returns null when the member access is not naming an
+    /// enum constant and should be bound the ordinary way.
+    /// </summary>
+    /// <remarks>
+    /// Values win over types. If the leading identifier is a local, a parameter, or a field of the
+    /// implicit receiver, this is a field access on that value and the enum lookup does not happen
+    /// at all -- so a schema whose field name matches an enum type name keeps resolving as it did.
+    /// </remarks>
+    private IrExpression? TryBindEnumValue(MemberAccessExpression member, Scope scope, MethodContext context)
+    {
+        if (!TryFlattenName(member.Receiver, out var typeName, out var leadingName))
+        {
+            return null;
+        }
+
+        if (IsValueName(leadingName, scope, context))
+        {
+            return null;
+        }
+
+        // A fully qualified name is unambiguous by construction, so it is tried before the
+        // simple-name lookup that could report a false ambiguity.
+        if (!_enumsByFullName.TryGetValue(typeName, out var descriptor))
+        {
+            if (!_enumsBySimpleName.TryGetValue(typeName, out var candidates))
+            {
+                // Not an enum. Whatever this is, the ordinary path reports it.
+                return null;
+            }
+
+            if (candidates.Count > 1)
+            {
+                ReportAmbiguousTypeName(typeName, member.Receiver.Span, candidates.Select(e => e.FullName));
+                return new IrLiteral(null, ErrorType.Instance, member.Span);
+            }
+
+            descriptor = candidates[0];
+        }
+
+        var value = descriptor.FindValueByName(member.Name);
+        if (value is null)
+        {
+            _diagnostics.Error(
+                "PL0076",
+                "unknown enum value",
+                $"'{member.Name}' is not a value of enum '{descriptor.FullName}'.",
+                member.Span,
+                "Enum values are written exactly as the .proto file spells them.");
+            return new IrLiteral(null, ErrorType.Instance, member.Span);
+        }
+
+        return new IrEnumValue(value, new EnumPlType(descriptor), member.Span);
+    }
+
+    /// <summary>
+    /// Flattens a chain of member accesses over a bare identifier back into a dotted name, and
+    /// reports the leading identifier separately. Returns false for anything else, such as a call
+    /// or a literal at the root.
+    /// </summary>
+    private static bool TryFlattenName(Expression expression, out string name, out string leadingName)
+    {
+        var parts = new List<string>();
+        var current = expression;
+
+        while (current is MemberAccessExpression member)
+        {
+            parts.Insert(0, member.Name);
+            current = member.Receiver;
+        }
+
+        if (current is not NameExpression root)
+        {
+            name = string.Empty;
+            leadingName = string.Empty;
+            return false;
+        }
+
+        parts.Insert(0, root.Name);
+        name = string.Join('.', parts);
+        leadingName = root.Name;
+        return true;
+    }
+
+    /// <summary>Whether an identifier names a value in scope, using the same order as BindName.</summary>
+    private static bool IsValueName(string name, Scope scope, MethodContext context)
+        => scope.LookupLocal(name) is not null
+        || scope.LookupParameter(name) is not null
+        || (context.AllowImplicitReceiverFields && context.Receiver.FindFieldByName(name) is not null);
+
     private IrExpression BindMemberAccess(MemberAccessExpression member, Scope scope, MethodContext context)
     {
+        // A member access whose receiver is a plain dotted name may be naming an enum constant
+        // rather than reaching into a value, as in `Level.LEVEL_HIGH`. That has to be settled before
+        // the receiver is bound: `Level` is a type, so binding it as an expression reports PL0037
+        // and the error short circuit below would swallow the real question.
+        if (TryBindEnumValue(member, scope, context) is { } enumValue)
+        {
+            return enumValue;
+        }
+
         var receiver = BindExpression(member.Receiver, scope, context, null);
 
         if (receiver.Type is ErrorType)
@@ -1240,7 +1411,8 @@ public sealed class Binder
                 binary.OnZero.Span);
         }
 
-        return new IrBinary(op, left, right, resultType, ArithmeticBehavior.Wrap, binary.Span);
+        return new IrBinary(
+            op, left, right, resultType, _policy.ResolveArithmetic(op, resultType), binary.Span);
     }
 
     /// <summary>
@@ -1273,7 +1445,7 @@ public sealed class Binder
 
             return new IrIntegerDivision(
                 op, left, right, ZeroDivisorBehavior.Unreachable, null, resultType,
-                ArithmeticBehavior.Wrap, binary.Span);
+                _policy.ResolveDivision(op, resultType), binary.Span);
         }
 
         if (binary.OnZero is null)
@@ -1296,7 +1468,7 @@ public sealed class Binder
         {
             return new IrIntegerDivision(
                 op, left, right, ZeroDivisorBehavior.Fail, null, resultType,
-                ArithmeticBehavior.Wrap, binary.Span);
+                _policy.ResolveDivision(op, resultType), binary.Span);
         }
 
         var onZero = BindExpression(binary.OnZero.Fallback!, scope, context, resultType);
@@ -1314,7 +1486,7 @@ public sealed class Binder
 
         return new IrIntegerDivision(
             op, left, right, ZeroDivisorBehavior.Fallback, onZero, resultType,
-            ArithmeticBehavior.Wrap, binary.Span);
+            _policy.ResolveDivision(op, resultType), binary.Span);
     }
 
     private IrExpression BindUnary(
@@ -1357,7 +1529,8 @@ public sealed class Binder
                     unary.Span);
             }
 
-            return new IrUnary(IrUnaryOperator.Negate, operand, scalar, ArithmeticBehavior.Wrap, unary.Span);
+            return new IrUnary(
+                IrUnaryOperator.Negate, operand, scalar, _policy.ResolveNegation(scalar), unary.Span);
         }
 
         if (!TypesMatch(operand.Type, ScalarType.BoolType))

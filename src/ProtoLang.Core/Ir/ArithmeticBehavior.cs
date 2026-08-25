@@ -25,3 +25,24 @@ public enum ArithmeticBehavior
     /// </summary>
     Wrap,
 }
+
+/// <summary>
+/// What an explicit numeric conversion does when the source value is not representable in the
+/// target type (spec 10.3).
+/// </summary>
+/// <remarks>
+/// One member today, exactly like <see cref="ArithmeticBehavior"/>. The three initial targets
+/// disagree here too, and more sharply: an out-of-range floating-point to integer conversion is
+/// unspecified in C#, undefined behavior in C++, and floors in Python. Backends therefore state
+/// the behavior rather than inheriting it.
+/// </remarks>
+public enum ConversionBehavior
+{
+    /// <summary>
+    /// Integer targets take the low bits, reduced modulo 2^N per 10.1. A floating-point source
+    /// truncates toward zero, clamps to the target's bounds, and maps NaN to zero. A
+    /// floating-point target rounds to nearest, ties to even. This is what the .NET runtime
+    /// produces, which is the baseline every arithmetic-policy question starts from.
+    /// </summary>
+    WrapOrSaturate,
+}

@@ -460,4 +460,65 @@ public class BackendTests
         Assert.Contains("break;", source, StringComparison.Ordinal);
         Assert.Contains("continue;", source, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// Both runtimes carry the saturating conversion helpers. Neither target defines what an
+    /// out-of-range floating point to integer conversion produces -- C# leaves it unspecified and
+    /// throws under a checked build, C++ makes it undefined behavior -- so the clamp has to be
+    /// written out rather than inherited.
+    /// </summary>
+    [Fact]
+    public void BothRuntimesDefineSaturatingFloatToIntegerConversions()
+    {
+        var csharp = Emit(new CSharpBackend(), TestPaths.SimpleScript, out var csharpDiagnostics)
+            .Single(f => f.RelativePath == CSharpRuntime.FileName).Contents;
+        var cpp = Emit(new CppBackend(), TestPaths.SimpleScript, out var cppDiagnostics)
+            .Single(f => f.RelativePath == CppRuntime.FileName).Contents;
+
+        Assert.Empty(csharpDiagnostics);
+        Assert.Empty(cppDiagnostics);
+
+        string[] csharpSignatures =
+        [
+            "public static int ToInt32(double value)",
+            "public static long ToInt64(double value)",
+            "public static uint ToUInt32(double value)",
+            "public static ulong ToUInt64(double value)",
+        ];
+
+        foreach (var signature in csharpSignatures)
+        {
+            Assert.Contains(signature, csharp, StringComparison.Ordinal);
+        }
+
+        foreach (var suffix in new[] { "i32", "i64", "u32", "u64" })
+        {
+            Assert.Contains($"trunc_sat_f64_to_{suffix}(double v)", cpp, StringComparison.Ordinal);
+        }
+
+        // NaN has no ordering, so it has to be tested for before the range guards rather than
+        // falling out of them.
+        Assert.Contains("double.IsNaN(value)", csharp, StringComparison.Ordinal);
+        Assert.Contains("if (v != v)", cpp, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Only C++ needs a helper for double to float: the conversion is defined in C# and yields an
+    /// infinity out of range, where C++ makes it undefined behavior.
+    /// </summary>
+    [Fact]
+    public void OnlyTheCppRuntimeNeedsANarrowingFloatHelper()
+    {
+        var csharp = Emit(new CSharpBackend(), TestPaths.SimpleScript, out _)
+            .Single(f => f.RelativePath == CSharpRuntime.FileName).Contents;
+        var cpp = Emit(new CppBackend(), TestPaths.SimpleScript, out _)
+            .Single(f => f.RelativePath == CppRuntime.FileName).Contents;
+
+        Assert.Contains("narrow_f64_to_f32(double v)", cpp, StringComparison.Ordinal);
+
+        // The threshold is the smallest magnitude that rounds to infinity, not FLT_MAX: doubles
+        // between the two round down to FLT_MAX instead of overflowing.
+        Assert.Contains("0x1.ffffffp+127", cpp, StringComparison.Ordinal);
+        Assert.DoesNotContain("narrow", csharp, StringComparison.OrdinalIgnoreCase);
+    }
 }

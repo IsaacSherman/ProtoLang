@@ -544,6 +544,10 @@ public sealed class CSharpBackend : ITestBackend
         IrBinary binary => EmitBinary(binary, receiverName),
         IrIntegerDivision division => EmitIntegerDivision(division, receiverName),
         IrUnary unary => EmitUnary(unary, receiverName),
+        IrConversion conversion => EmitConversion(conversion, receiverName),
+        IrEnumValue enumValue => "global::"
+            + NameConventions.GetCSharpTypeName(enumValue.EnumType.Descriptor)
+            + "." + NameConventions.GetCSharpValueName(enumValue.Value),
         IrLiteral literal => EmitLiteral(literal),
         _ => throw new ArgumentOutOfRangeException(nameof(expression), expression, "Unhandled expression."),
     };
@@ -635,6 +639,58 @@ public sealed class CSharpBackend : ITestBackend
 
         return $"(!{operand})";
     }
+
+    /// <summary>
+    /// Emits an explicit conversion (spec 10.3).
+    /// </summary>
+    /// <remarks>
+    /// Integer targets are wrapped in <c>unchecked</c>, which states the wrapping and also stops a
+    /// consumer's <c>CheckForOverflowUnderflow</c> from turning a deliberate narrowing into an
+    /// <see cref="OverflowException"/>. Conversions to a floating-point type are fully defined in
+    /// C# and unaffected by checked context, so a plain cast says everything. A floating-point
+    /// source converting to an integer is the one case the language leaves unspecified when the
+    /// value is out of range -- and throws under a checked context -- so it goes through the
+    /// runtime, where the saturating result is spelled out.
+    /// </remarks>
+    private static string EmitConversion(IrConversion conversion, string receiverName)
+    {
+        if (conversion.Behavior != ConversionBehavior.WrapOrSaturate)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(conversion), conversion.Behavior, "Unhandled conversion behavior.");
+        }
+
+        // Every Expression() result is self-delimiting -- an identifier, a member access, a call, a
+        // non-negative literal, or something already wrapped in parentheses -- so a cast can be
+        // prefixed without re-parenthesizing the operand.
+        var operand = Expression(conversion.Operand, receiverName);
+        var target = TypeName(conversion.TargetType);
+
+        return conversion.Kind switch
+        {
+            ConversionKind.Identity => operand,
+            ConversionKind.IntegerToInteger => $"unchecked(({target}){operand})",
+            ConversionKind.IntegerToFloat or ConversionKind.FloatToFloat => $"({target}){operand}",
+            ConversionKind.FloatToInteger =>
+                $"{CSharpRuntime.TypeName}.{FloatToIntegerHelper(conversion.TargetType)}((double){operand})",
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(conversion), conversion.Kind, "Unhandled conversion kind."),
+        };
+    }
+
+    /// <summary>
+    /// The runtime helper for a floating-point to integer conversion. The source is widened to
+    /// <c>double</c> at the call site, which is exact, so one helper per target covers both
+    /// <c>float</c> and <c>double</c> sources.
+    /// </summary>
+    private static string FloatToIntegerHelper(ScalarType target) => target.Kind switch
+    {
+        ScalarKind.Int32 => "ToInt32",
+        ScalarKind.Int64 => "ToInt64",
+        ScalarKind.UInt32 => "ToUInt32",
+        ScalarKind.UInt64 => "ToUInt64",
+        _ => throw new ArgumentOutOfRangeException(nameof(target), target.Kind, "Not an integer kind."),
+    };
 
     private static string EmitLiteral(IrLiteral literal) => literal.Value switch
     {

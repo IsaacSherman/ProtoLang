@@ -14,6 +14,7 @@ public sealed class Lexer
     private static readonly Dictionary<string, TokenKind> Keywords = new(StringComparer.Ordinal)
     {
         ["and"] = TokenKind.And,
+        ["as"] = TokenKind.As,
         ["arg"] = TokenKind.Arg,
         ["bool"] = TokenKind.Bool,
         ["break"] = TokenKind.Break,
