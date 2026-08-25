@@ -322,4 +322,46 @@ public class BackendTests
 
         Assert.DoesNotContain('\r', source);
     }
+
+    [Fact]
+    public void CSharpFlattensElseIfChains()
+    {
+        var source = EmitSingle(new CSharpBackend(), "simpleScript.g.cs");
+
+        // 'else if' rather than an 'else' wrapping a nested 'if': one brace level per branch is
+        // what the author wrote, and what a reader of the generated code should see.
+        Assert.Contains("if ((self.Quantity >= 100L))", source, StringComparison.Ordinal);
+        Assert.Contains("else if ((self.Quantity >= 10L))", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CSharpEmitsLoopsWithBreakAndContinue()
+    {
+        var source = EmitSingle(new CSharpBackend(), "simpleScript.g.cs");
+
+        Assert.Contains("while ((remaining >= case_size))", source, StringComparison.Ordinal);
+        Assert.Contains("while (true)", source, StringComparison.Ordinal);
+        Assert.Contains("break;", source, StringComparison.Ordinal);
+        Assert.Contains("continue;", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CppFlattensElseIfChains()
+    {
+        var source = EmitSingle(new CppBackend(), "simpleScript.pl.h");
+
+        Assert.Contains("if ((self.quantity() >= 100LL))", source, StringComparison.Ordinal);
+        Assert.Contains("else if ((self.quantity() >= 10LL))", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CppEmitsLoopsWithBreakAndContinue()
+    {
+        var source = EmitSingle(new CppBackend(), "simpleScript.pl.h");
+
+        Assert.Contains("while ((remaining >= case_size))", source, StringComparison.Ordinal);
+        Assert.Contains("while (true)", source, StringComparison.Ordinal);
+        Assert.Contains("break;", source, StringComparison.Ordinal);
+        Assert.Contains("continue;", source, StringComparison.Ordinal);
+    }
 }

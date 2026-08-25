@@ -4,6 +4,59 @@ extend InvoiceItem {
     fn line_total_cents() -> int64 {
         return quantity * unit_price_cents;
     }
+
+    // Bulk pricing: the more units on a single line, the larger the discount.
+    fn discount_percent() -> int64 {
+        if quantity >= 100 {
+            return 20;
+        } else if quantity >= 10 {
+            return 10;
+        } else {
+            return 0;
+        }
+    }
+
+    fn discounted_total_cents() -> int64 {
+        var gross: int64 = line_total_cents();
+        return gross - gross * discount_percent() / 100;
+    }
+
+    // How many full cases this line fills, at case_size units per case.
+    fn case_count(case_size: int64) -> int64 {
+        if case_size <= 0 {
+            return 0;
+        }
+
+        var remaining: int64 = quantity;
+        var cases: int64 = 0;
+
+        while remaining >= case_size {
+            remaining = remaining - case_size;
+            cases = cases + 1;
+        }
+
+        return cases;
+    }
+
+    // Units left over once every whole case is filled. This loop has no exit condition
+    // of its own, so a 'break' is the only way out of it.
+    fn leftover_units(case_size: int64) -> int64 {
+        var remaining: int64 = quantity;
+
+        while true {
+            if case_size <= 0 {
+                break;
+            }
+
+            if remaining < case_size {
+                break;
+            }
+
+            remaining = remaining - case_size;
+        }
+
+        return remaining;
+    }
 }
 
 extend Invoice {
@@ -15,6 +68,36 @@ extend Invoice {
         }
 
         return total;
+    }
+
+    fn discounted_total_cents() -> int64 {
+        var total: int64 = 0;
+
+        for item in items {
+            total = total + item.discounted_total_cents();
+        }
+
+        return total;
+    }
+
+    // Lines that bill something. An empty line is skipped, and a free sample ends
+    // the billable prefix.
+    fn billable_line_count() -> int64 {
+        var count: int64 = 0;
+
+        for item in items {
+            if item.unit_price_cents == 0 {
+                break;
+            }
+
+            if item.quantity == 0 {
+                continue;
+            }
+
+            count = count + 1;
+        }
+
+        return count;
     }
 }
 
@@ -32,4 +115,160 @@ test Invoice.total_cents "sums line totals" {
     }
 
     expect return 1100;
+}
+
+test InvoiceItem.discount_percent "charges full price below ten units" {
+    receiver {
+        quantity = 5;
+        unit_price_cents = 100;
+    }
+
+    expect return 0;
+}
+
+test InvoiceItem.discount_percent "discounts ten percent at ten units" {
+    receiver {
+        quantity = 10;
+        unit_price_cents = 100;
+    }
+
+    expect return 10;
+}
+
+test InvoiceItem.discount_percent "discounts twenty percent at a hundred units" {
+    receiver {
+        quantity = 100;
+        unit_price_cents = 100;
+    }
+
+    expect return 20;
+}
+
+test InvoiceItem.case_count "counts whole cases and drops the remainder" {
+    receiver {
+        quantity = 30;
+    }
+
+    arg case_size = 12;
+
+    expect return 2;
+}
+
+test InvoiceItem.case_count "refuses a non-positive case size" {
+    receiver {
+        quantity = 30;
+    }
+
+    arg case_size = 0;
+
+    expect return 0;
+}
+
+test Invoice.discounted_total_cents "applies each line's bulk discount" {
+    receiver {
+        items {
+            quantity = 10;
+            unit_price_cents = 100;
+        }
+
+        items {
+            quantity = 2;
+            unit_price_cents = 250;
+        }
+    }
+
+    expect return 1400;
+}
+
+test Invoice.billable_line_count "skips empty lines and stops at a free sample" {
+    receiver {
+        items {
+            quantity = 2;
+            unit_price_cents = 100;
+        }
+
+        items {
+            quantity = 0;
+            unit_price_cents = 100;
+        }
+
+        items {
+            quantity = 5;
+            unit_price_cents = 250;
+        }
+
+        items {
+            quantity = 1;
+            unit_price_cents = 0;
+        }
+
+        items {
+            quantity = 9;
+            unit_price_cents = 100;
+        }
+    }
+
+    expect return 2;
+}
+
+test InvoiceItem.leftover_units "returns the remainder after whole cases" {
+    receiver {
+        quantity = 30;
+    }
+
+    arg case_size = 12;
+
+    expect return 6;
+}
+
+test InvoiceItem.leftover_units "leaves the quantity alone for a non-positive case size" {
+    receiver {
+        quantity = 30;
+    }
+
+    arg case_size = 0;
+
+    expect return 30;
+}
+
+test Invoice.billable_line_count "skips an empty line" {
+    receiver {
+        items {
+            quantity = 2;
+            unit_price_cents = 100;
+        }
+
+        items {
+            quantity = 0;
+            unit_price_cents = 100;
+        }
+
+        items {
+            quantity = 5;
+            unit_price_cents = 250;
+        }
+    }
+
+    expect return 2;
+}
+
+test Invoice.billable_line_count "stops at a free sample" {
+    receiver {
+        items {
+            quantity = 2;
+            unit_price_cents = 100;
+        }
+
+        items {
+            quantity = 1;
+            unit_price_cents = 0;
+        }
+
+        items {
+            quantity = 9;
+            unit_price_cents = 100;
+        }
+    }
+
+    expect return 1;
 }

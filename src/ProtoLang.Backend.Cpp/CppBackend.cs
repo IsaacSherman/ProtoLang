@@ -345,12 +345,64 @@ public sealed class CppBackend : ITestBackend
                 break;
             }
 
+            case IrIf ifStatement:
+                EmitIf(writer, ifStatement);
+                break;
+
+            case IrWhile whileStatement:
+            {
+                using var scope = writer.Block($"while ({Expression(whileStatement.Condition)})");
+                EmitStatements(writer, whileStatement.Body.Statements);
+                break;
+            }
+
+            case IrBreak:
+                writer.WriteLine("break;");
+                break;
+
+            case IrContinue:
+                writer.WriteLine("continue;");
+                break;
+
             case IrExpressionStatement expression:
                 writer.WriteLine($"{Expression(expression.Expression)};");
                 break;
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(statement), statement, "Unhandled statement.");
+        }
+    }
+
+    /// <summary>
+    /// Emits an if/else chain. The chain is flattened rather than nested, so an 'else if' in the
+    /// source stays an 'else if' in the output instead of gaining a brace level per branch.
+    /// </summary>
+    private static void EmitIf(SourceWriter writer, IrIf statement)
+    {
+        var keyword = "if";
+
+        while (true)
+        {
+            using (writer.Block($"{keyword} ({Expression(statement.Condition)})"))
+            {
+                EmitStatements(writer, statement.Then.Statements);
+            }
+
+            // The binder only ever puts a block or a nested 'if' in the else branch.
+            if (statement.Else is IrIf nested)
+            {
+                statement = nested;
+                keyword = "else if";
+                continue;
+            }
+
+            if (statement.Else is IrBlock elseBlock)
+            {
+                using var scope = writer.Block("else");
+                EmitStatements(writer, elseBlock.Statements);
+            }
+
+            return;
         }
     }
 

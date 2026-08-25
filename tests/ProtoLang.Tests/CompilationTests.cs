@@ -26,8 +26,8 @@ public class CompilationTests
         Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
 
         var module = result.Module!;
-        Assert.Equal(2, module.Methods.Count);
-        Assert.Single(module.Tests);
+        Assert.Equal(8, module.Methods.Count);
+        Assert.Equal(12, module.Tests.Count);
 
         var lineTotal = module.Methods.Single(m => m.Name == "line_total_cents");
         Assert.Equal("protolang.examples.InvoiceItem", lineTotal.Receiver.FullName);
@@ -36,9 +36,8 @@ public class CompilationTests
         var totalCents = module.Methods.Single(m => m.Name == "total_cents");
         Assert.Equal("protolang.examples.Invoice", totalCents.Receiver.FullName);
 
-        var test = module.Tests.Single();
+        var test = module.Tests.Single(t => t.Name == "sums line totals");
         Assert.Equal(totalCents.Signature, test.Target);
-        Assert.Equal("sums line totals", test.Name);
         Assert.IsType<IrTestReturnExpectation>(test.Expectation);
     }
 
@@ -447,5 +446,183 @@ public class CompilationTests
         var method = result.Module!.Methods.Single();
         var declaration = Assert.IsType<IrVariableDeclaration>(method.Body.Statements[0]);
         Assert.Equal(ScalarType.Int64Type, declaration.Initializer.Type);
+    }
+
+    [Fact]
+    public void AcceptsIfElseWhereBothBranchesReturn()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend InvoiceItem { fn f() -> int64 { if quantity > 1 { return 1; } else { return 2; } } }");
+
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
+    }
+
+    [Fact]
+    public void AcceptsAnElseIfChainThatReturnsEverywhere()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend InvoiceItem { fn f() -> int64 { if quantity > 2 { return 1; } "
+            + "else if quantity > 1 { return 2; } else { return 3; } } }");
+
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
+    }
+
+    [Fact]
+    public void ReportsMissingReturnWhenOnlyOneBranchReturns()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend InvoiceItem { fn f() -> int64 { if quantity > 1 { return 1; } "
+            + "else { var x: int64 = 2; } } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0027");
+    }
+
+    [Fact]
+    public void ReportsMissingReturnWhenTheElseBranchIsAbsent()
+    {
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn f() -> int64 { if quantity > 1 { return 1; } } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0027");
+    }
+
+    [Fact]
+    public void ReportsMissingReturnWhenAnElseIfChainHasNoElse()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend InvoiceItem { fn f() -> int64 { if quantity > 2 { return 1; } "
+            + "else if quantity > 1 { return 2; } } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0027");
+    }
+
+    [Fact]
+    public void TreatsAnUnconditionalLoopAsNeverFallingThrough()
+    {
+        // Nothing follows the loop because nothing can: the only way out is the return.
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn f() -> int64 { while true { return 1; } } }");
+
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
+    }
+
+    [Fact]
+    public void ReportsMissingReturnWhenAnUnconditionalLoopCanBreak()
+    {
+        // The 'break' escapes the loop, so the end of the method is reachable after all.
+        var result = CompileSource(
+            Prelude
+            + "extend InvoiceItem { fn f() -> int64 { while true { if quantity > 1 { break; } return 1; } } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0027");
+    }
+
+    [Fact]
+    public void DoesNotTreatAConditionalLoopAsAlwaysReturning()
+    {
+        // A 'while' with a real condition may run zero times.
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn f() -> int64 { while quantity > 1 { return 1; } } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0027");
+    }
+
+    [Fact]
+    public void DoesNotTreatAForLoopAsAlwaysReturning()
+    {
+        // The repeated field may be empty.
+        var result = CompileSource(
+            Prelude + "extend Invoice { fn f() -> int64 { for item in items { return 1; } } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0027");
+    }
+
+    [Fact]
+    public void RejectsANonBoolIfCondition()
+    {
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn f() -> int64 { if quantity { return 1; } return 0; } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0071");
+    }
+
+    [Fact]
+    public void RejectsANonBoolWhileCondition()
+    {
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn f() -> int64 { while name { return 1; } return 0; } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0071");
+    }
+
+    [Fact]
+    public void RejectsBreakOutsideALoop()
+    {
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn f() -> int64 { if quantity > 1 { break; } return 0; } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0072");
+    }
+
+    [Fact]
+    public void RejectsContinueOutsideALoop()
+    {
+        var result = CompileSource(Prelude + "extend InvoiceItem { fn f() -> int64 { continue; } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0073");
+    }
+
+    [Fact]
+    public void RejectsBreakAfterTheLoopItLooksLikeItBelongsTo()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend Invoice { fn f() -> int64 { for item in items { var x: int64 = 1; } break; } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0072");
+    }
+
+    [Fact]
+    public void AcceptsBreakAndContinueInsideAForLoop()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend Invoice { fn f() -> int64 { for item in items { if item.quantity > 1 { break; } "
+            + "continue; } return 0; } }");
+
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
+    }
+
+    [Fact]
+    public void AcceptsBreakAndContinueInsideAWhileLoop()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend InvoiceItem { fn f() -> int64 { var n: int64 = 0; while n < quantity { "
+            + "n = n + 1; if n > 2 { break; } continue; } return n; } }");
+
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
+    }
+
+    [Fact]
+    public void LowersBranchesAndLoopsIntoTheIr()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend InvoiceItem { fn f() -> int64 { while true { if quantity > 1 { break; } "
+            + "else { continue; } } return 0; } }");
+
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
+
+        var body = result.Module!.Methods.Single(m => m.Name == "f").Body;
+        var loop = Assert.IsType<IrWhile>(body.Statements[0]);
+        var branch = Assert.IsType<IrIf>(Assert.Single(loop.Body.Statements));
+
+        Assert.IsType<IrBreak>(Assert.Single(branch.Then.Statements));
+        Assert.IsType<IrContinue>(Assert.Single(Assert.IsType<IrBlock>(branch.Else).Statements));
     }
 }

@@ -85,6 +85,27 @@ public sealed record ForInStatement(
     BlockStatement Body,
     SourceSpan Span) : Statement(Span);
 
+/// <summary>
+/// An <c>if</c> statement (spec 15.1). The condition is not parenthesized and the branches are
+/// always braced. <paramref name="Else"/> is either a <see cref="BlockStatement"/> or a nested
+/// <see cref="IfStatement"/>; the latter is how <c>else if</c> chains are represented.
+/// </summary>
+public sealed record IfStatement(
+    Expression Condition,
+    BlockStatement Then,
+    Statement? Else,
+    SourceSpan Span) : Statement(Span);
+
+/// <summary>A <c>while</c> loop (spec 15.2).</summary>
+public sealed record WhileStatement(
+    Expression Condition,
+    BlockStatement Body,
+    SourceSpan Span) : Statement(Span);
+
+public sealed record BreakStatement(SourceSpan Span) : Statement(Span);
+
+public sealed record ContinueStatement(SourceSpan Span) : Statement(Span);
+
 public sealed record AssignmentStatement(Expression Target, Expression Value, SourceSpan Span) : Statement(Span);
 
 public sealed record ExpressionStatement(Expression Expression, SourceSpan Span) : Statement(Span);

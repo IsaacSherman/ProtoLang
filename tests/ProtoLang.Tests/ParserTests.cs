@@ -210,4 +210,100 @@ public class ParserTests
         Assert.Single(unit.Imports);
         Assert.Single(unit.Extends);
     }
+
+    private static Statement ParseSingleStatement(string body, out DiagnosticBag diagnostics)
+    {
+        var unit = Parse(
+            "import proto \"x.proto\";\nextend M { fn f() -> int64 {\n" + body + "\n} }",
+            out diagnostics);
+
+        return unit.Extends[0].Methods[0].Body.Statements[0];
+    }
+
+    [Fact]
+    public void ParsesIfWithoutAnElseBranch()
+    {
+        var statement = ParseSingleStatement("if a > 1 { return 1; }", out var diagnostics);
+
+        Assert.Empty(diagnostics);
+        Assert.Null(Assert.IsType<IfStatement>(statement).Else);
+    }
+
+    [Fact]
+    public void ParsesElseIfAsAChainRatherThanANestedBlock()
+    {
+        var statement = ParseSingleStatement(
+            """
+            if a > 2 {
+                return 1;
+            } else if a > 1 {
+                return 2;
+            } else {
+                return 3;
+            }
+            """,
+            out var diagnostics);
+
+        Assert.Empty(diagnostics);
+
+        // 'else if' holds the next if directly, so the chain stays flat.
+        var second = Assert.IsType<IfStatement>(Assert.IsType<IfStatement>(statement).Else);
+        Assert.IsType<BlockStatement>(second.Else);
+    }
+
+    [Fact]
+    public void BindsElseToTheNearestUnmatchedIf()
+    {
+        var statement = ParseSingleStatement(
+            """
+            if a > 1 {
+                if a > 2 {
+                    return 1;
+                } else {
+                    return 2;
+                }
+            }
+            """,
+            out var diagnostics);
+
+        Assert.Empty(diagnostics);
+
+        var outer = Assert.IsType<IfStatement>(statement);
+        Assert.Null(outer.Else);
+
+        var inner = Assert.IsType<IfStatement>(Assert.Single(outer.Then.Statements));
+        Assert.NotNull(inner.Else);
+    }
+
+    [Fact]
+    public void ParsesWhileLoopsWithBreakAndContinue()
+    {
+        var statement = ParseSingleStatement(
+            """
+            while a > 1 {
+                if a > 2 {
+                    break;
+                }
+
+                continue;
+            }
+            """,
+            out var diagnostics);
+
+        Assert.Empty(diagnostics);
+
+        var loop = Assert.IsType<WhileStatement>(statement);
+        Assert.Equal(2, loop.Body.Statements.Count);
+        Assert.IsType<BreakStatement>(
+            Assert.Single(Assert.IsType<IfStatement>(loop.Body.Statements[0]).Then.Statements));
+        Assert.IsType<ContinueStatement>(loop.Body.Statements[1]);
+    }
+
+    [Fact]
+    public void RequiresASemicolonAfterBreak()
+    {
+        ParseSingleStatement("while a > 1 { break }", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Code == "PL0010");
+    }
 }

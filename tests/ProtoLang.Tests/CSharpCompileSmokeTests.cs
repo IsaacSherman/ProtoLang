@@ -91,6 +91,7 @@ public class CSharpCompileSmokeTests
 
         Assert.Empty(diagnostics);
         Assert.NotEmpty(testFiles);
+        GeneratedSourceGuards.AssertExercisesControlFlow("C#", "foreach (", files);
 
         foreach (var file in files.Concat(testFiles))
         {

@@ -117,6 +117,7 @@ public class CppSyntaxSmokeTests
         var testFiles = backend.EmitTests(result.Module!, options, diagnostics);
 
         Assert.Empty(diagnostics);
+        GeneratedSourceGuards.AssertExercisesControlFlow("C++", "for (", files);
 
         foreach (var file in files.Concat(testFiles))
         {

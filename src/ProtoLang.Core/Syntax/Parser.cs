@@ -412,6 +412,10 @@ public sealed class Parser
         {
             TokenKind.Var => ParseVariableDeclaration(),
             TokenKind.Return => ParseReturnStatement(),
+            TokenKind.If => ParseIfStatement(),
+            TokenKind.While => ParseWhileStatement(),
+            TokenKind.Break => ParseBreakStatement(),
+            TokenKind.Continue => ParseContinueStatement(),
             TokenKind.For => ParseForInStatement(),
             TokenKind.OpenBrace => ParseBlock(),
             _ => ParseExpressionOrAssignmentStatement(),
@@ -459,6 +463,54 @@ public sealed class Parser
         var body = ParseBlock();
 
         return new ForInStatement(variable, collection, body, Spanning(start, body.Span));
+    }
+
+    /// <summary>Parses <c>if &lt;condition&gt; { ... }</c> with an optional else branch (spec 15.1).</summary>
+    /// <remarks>
+    /// The condition is unparenthesized, so the '{' that opens the body is what ends it. That is
+    /// unambiguous only because no ProtoLang expression can contain a brace; if message
+    /// construction literals (spec 13.2) are ever added, the condition will have to be parsed at a
+    /// restricted precedence to keep <c>if m { }</c> from reading as a construction. An 'else'
+    /// binds to the nearest unmatched 'if', which recursive descent gives for free.
+    /// </remarks>
+    private Statement ParseIfStatement()
+    {
+        var start = Expect(TokenKind.If).Span;
+        var condition = ParseExpression();
+        var then = ParseBlock();
+
+        // 'else if' nests another if statement rather than wrapping one in a block, so the tree
+        // records the chain the author wrote.
+        Statement? elseBranch = null;
+        if (Match(TokenKind.Else))
+        {
+            elseBranch = Current.Kind == TokenKind.If ? ParseIfStatement() : ParseBlock();
+        }
+
+        return new IfStatement(condition, then, elseBranch, Spanning(start, elseBranch?.Span ?? then.Span));
+    }
+
+    private Statement ParseWhileStatement()
+    {
+        var start = Expect(TokenKind.While).Span;
+        var condition = ParseExpression();
+        var body = ParseBlock();
+
+        return new WhileStatement(condition, body, Spanning(start, body.Span));
+    }
+
+    private Statement ParseBreakStatement()
+    {
+        var start = Expect(TokenKind.Break).Span;
+        var end = Expect(TokenKind.Semicolon).Span;
+        return new BreakStatement(Spanning(start, end));
+    }
+
+    private Statement ParseContinueStatement()
+    {
+        var start = Expect(TokenKind.Continue).Span;
+        var end = Expect(TokenKind.Semicolon).Span;
+        return new ContinueStatement(Spanning(start, end));
     }
 
     private Statement ParseExpressionOrAssignmentStatement()
