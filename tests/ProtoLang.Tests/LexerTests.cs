@@ -15,13 +15,14 @@ public class LexerTests
     [Fact]
     public void RecognizesKeywordsAndIdentifiers()
     {
-        var tokens = Tokenize("extend fn var for in return InvoiceItem", out var diagnostics);
+        var tokens = Tokenize("extend fn var for in return test receiver arg expect InvoiceItem", out var diagnostics);
 
         Assert.Empty(diagnostics);
         Assert.Equal(
             [
                 TokenKind.Extend, TokenKind.Fn, TokenKind.Var, TokenKind.For, TokenKind.In,
-                TokenKind.Return, TokenKind.Identifier, TokenKind.EndOfFile,
+                TokenKind.Return, TokenKind.Test, TokenKind.Receiver, TokenKind.Arg, TokenKind.Expect,
+                TokenKind.Identifier, TokenKind.EndOfFile,
             ],
             tokens.Select(t => t.Kind));
     }

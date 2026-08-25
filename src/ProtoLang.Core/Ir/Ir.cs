@@ -9,7 +9,7 @@ namespace ProtoLang.Ir;
 /// protobuf type references, exact numeric operation kinds, evaluation order, and virtual
 /// annotations. Backends consume only this; they never see the AST.
 /// </summary>
-public sealed record IrModule(IReadOnlyList<IrMethod> Methods);
+public sealed record IrModule(IReadOnlyList<IrMethod> Methods, IReadOnlyList<IrTest> Tests);
 
 /// <summary>
 /// Identifies a method without carrying its body, so a call can reference a method declared later
@@ -19,6 +19,7 @@ public sealed record IrMethodSignature(
     MessageDescriptor Receiver,
     string Name,
     PlType ReturnType,
+    IReadOnlyList<string> ParameterNames,
     IReadOnlyList<PlType> ParameterTypes);
 
 public sealed record IrParameter(string Name, PlType Type);
@@ -164,3 +165,30 @@ public sealed record IrUnary(
 
 public sealed record IrLiteral(object? Value, PlType LiteralType, SourceSpan Span)
     : IrExpression(LiteralType, Span);
+
+public sealed record IrTest(
+    IrMethodSignature Target,
+    string Name,
+    IrTestMessageValue Receiver,
+    IReadOnlyList<IrTestArgument> Arguments,
+    IrTestExpectation Expectation,
+    SourceSpan Span);
+
+public sealed record IrTestArgument(string Name, IrExpression Value, SourceSpan Span);
+
+public sealed record IrTestMessageValue(
+    MessageDescriptor Descriptor,
+    IReadOnlyList<IrTestFieldValue> Fields,
+    SourceSpan Span);
+
+public sealed record IrTestFieldValue(
+    FieldDescriptor Field,
+    IrExpression? ScalarValue,
+    IrTestMessageValue? MessageValue,
+    SourceSpan Span);
+
+public abstract record IrTestExpectation(SourceSpan Span);
+
+public sealed record IrTestReturnExpectation(IrExpression Value, SourceSpan Span) : IrTestExpectation(Span);
+
+public sealed record IrTestFailExpectation(SourceSpan Span) : IrTestExpectation(Span);

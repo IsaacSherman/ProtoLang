@@ -1167,29 +1167,37 @@ extend Invoice {
 }
 
 test Invoice.total_cents "sums line totals" {
-    receiver textproto """
-        items { quantity: 2 unit_price_cents: 300 }
-        items { quantity: 4 unit_price_cents: 125 }
-    """;
+    receiver {
+        items {
+            quantity = 2;
+            unit_price_cents = 300;
+        }
+
+        items {
+            quantity = 4;
+            unit_price_cents = 125;
+        }
+    }
 
     expect return 1100;
 }
 ```
 
-The `textproto` block is intentionally protobuf text format rather than a new ProtoLang message
-literal syntax. Message construction is still an open language design area (13), and tests should
-not force that feature into the expression language prematurely. Backends may either embed the
-text format and parse it at test runtime, or the compiler may lower the fixture to target-language
-message construction code. Either way, the fixture semantics must come from protobuf descriptors.
+The `receiver` block is a descriptor-bound fixture initializer, not a general ProtoLang message
+literal. Each entry names a protobuf field. Scalar fields use `field = expression;`; message fields
+use nested blocks. Repeated fields may appear multiple times. The compiler binds field names and
+fixture value types against protobuf descriptors, then a backend may lower the fixture to
+target-language message construction code. A future test syntax may also accept protobuf text
+format, but fixture semantics must still come from protobuf descriptors.
 
 For methods with parameters, the test declaration should name each argument:
 
 ```protolang
 test InvoiceItem.discounted_total "applies discount" {
-    receiver textproto """
-        quantity: 2
-        unit_price_cents: 300
-    """;
+    receiver {
+        quantity = 2;
+        unit_price_cents = 300;
+    }
 
     arg discount_cents = 50;
     expect return 550;
@@ -1201,10 +1209,10 @@ mechanism:
 
 ```protolang
 test InvoiceItem.strict_ratio "zero divisor fails" {
-    receiver textproto """
-        quantity: 2
-        unit_price_cents: 0
-    """;
+    receiver {
+        quantity = 2;
+        unit_price_cents = 0;
+    }
 
     expect fail;
 }

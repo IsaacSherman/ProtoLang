@@ -27,6 +27,7 @@ public class CompilationTests
 
         var module = result.Module!;
         Assert.Equal(2, module.Methods.Count);
+        Assert.Single(module.Tests);
 
         var lineTotal = module.Methods.Single(m => m.Name == "line_total_cents");
         Assert.Equal("protolang.examples.InvoiceItem", lineTotal.Receiver.FullName);
@@ -34,6 +35,61 @@ public class CompilationTests
 
         var totalCents = module.Methods.Single(m => m.Name == "total_cents");
         Assert.Equal("protolang.examples.Invoice", totalCents.Receiver.FullName);
+
+        var test = module.Tests.Single();
+        Assert.Equal(totalCents.Signature, test.Target);
+        Assert.Equal("sums line totals", test.Name);
+        Assert.IsType<IrTestReturnExpectation>(test.Expectation);
+    }
+
+    [Fact]
+    public void TypeChecksUnitTestFixtures()
+    {
+        var result = CompileSource(
+            Prelude +
+            """
+            extend InvoiceItem {
+                fn line_total_cents() -> int64 {
+                    return quantity * unit_price_cents;
+                }
+            }
+
+            test InvoiceItem.line_total_cents "line total" {
+                receiver {
+                    quantity = 2;
+                    unit_price_cents = "oops";
+                }
+
+                expect return 600;
+            }
+            """);
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0063");
+    }
+
+    [Fact]
+    public void RejectsReceiverFieldReferencesInsideUnitTestFixtures()
+    {
+        var result = CompileSource(
+            Prelude +
+            """
+            extend InvoiceItem {
+                fn line_total_cents() -> int64 {
+                    return quantity * unit_price_cents;
+                }
+            }
+
+            test InvoiceItem.line_total_cents "line total" {
+                receiver {
+                    quantity = unit_price_cents;
+                    unit_price_cents = 300;
+                }
+
+                expect return 600;
+            }
+            """);
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0037");
     }
 
     [Fact]

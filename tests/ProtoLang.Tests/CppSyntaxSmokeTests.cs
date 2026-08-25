@@ -42,7 +42,7 @@ public class CppSyntaxSmokeTests
         var workspace = PrepareSmokeWorkspace(protoc);
 
         var compileResult = compiler.RunSyntaxOnly(
-            workspace.SmokeSourcePath,
+            workspace.DriverSourcePath,
             workspace.Directory,
             protobuf.IncludeDirectory);
         Assert.True(
@@ -97,15 +97,28 @@ public class CppSyntaxSmokeTests
         var result = Compilation.Compile(TestPaths.SimpleScript, [TestPaths.ExampleProtoDirectory]);
         Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
 
+        // Guard against a vacuous pass: EmitTests returns nothing when the source declares no
+        // tests, which would leave a driver that compiles and exits 0 without calling anything.
+        Assert.NotEmpty(result.Module!.Tests);
+
+        var backend = new CppBackend();
+        var options = new BackendOptions(Path.GetFileName(TestPaths.SimpleScript));
         var diagnostics = new DiagnosticBag();
-        var files = new CppBackend().Emit(
-            result.Module!,
-            new BackendOptions(Path.GetFileName(TestPaths.SimpleScript)),
-            diagnostics);
+
+        var files = backend.Emit(result.Module!, options, diagnostics);
+
+        // The driver is generated from the `test` blocks in the ProtoLang source rather than
+        // hand-written here, so everything this test compiles is compiler output. That matters for
+        // more than tidiness: a hand-written driver hardcodes the emitted namespace, the method
+        // naming, and the free-function calling convention, so changing any of those would break
+        // the driver and have to be fixed by editing C++ in this file. Generating it means the
+        // driver follows the backend, and a failure here is a real regression rather than a stale
+        // copy of what the backend used to emit.
+        var testFiles = backend.EmitTests(result.Module!, options, diagnostics);
 
         Assert.Empty(diagnostics);
 
-        foreach (var file in files)
+        foreach (var file in files.Concat(testFiles))
         {
             File.WriteAllText(Path.Combine(directory, file.RelativePath), file.Contents);
         }
@@ -115,30 +128,14 @@ public class CppSyntaxSmokeTests
             protocResult.ExitCode == 0,
             $"protoc C++ generation failed.{Environment.NewLine}{protocResult.Output}");
 
-        var smokePath = Path.Combine(directory, "smoke.cc");
-        File.WriteAllText(
-            smokePath,
-            """
-            #include "invoice.pb.h"
-            #include "protolang_runtime.h"
-            #include "simpleScript.pl.h"
+        var driver = Assert.Single(
+            testFiles,
+            file => file.RelativePath.EndsWith(".cc", StringComparison.Ordinal));
 
-            int main() {
-              protolang::examples::Invoice invoice;
-
-              auto* first = invoice.add_items();
-              first->set_quantity(2);
-              first->set_unit_price_cents(300);
-
-              auto* second = invoice.add_items();
-              second->set_quantity(4);
-              second->set_unit_price_cents(125);
-
-              return protolang::examples::total_cents(invoice) == 1100 ? 0 : 1;
-            }
-            """);
-
-        return new CppSmokeWorkspace(directory, smokePath, Path.Combine(directory, "invoice.pb.cc"));
+        return new CppSmokeWorkspace(
+            directory,
+            Path.Combine(directory, driver.RelativePath),
+            Path.Combine(directory, "invoice.pb.cc"));
     }
 
     private static ProcessResult RunProtocCpp(string protoc, string outputDirectory)
@@ -304,7 +301,7 @@ public class CppSyntaxSmokeTests
 
     private sealed record CppSmokeWorkspace(
         string Directory,
-        string SmokeSourcePath,
+        string DriverSourcePath,
         string ProtobufSourcePath);
 
     private static ProcessResult Run(ProcessStartInfo startInfo)
@@ -479,9 +476,18 @@ public class CppSyntaxSmokeTests
                     $"/I{QuoteRspArgument(workspace.Directory)}",
                     $"/I{QuoteRspArgument(protobuf.IncludeDirectory)}",
                     $"/Fo{QuoteRspArgument(workspace.Directory + Path.DirectorySeparatorChar)}",
-                    QuoteRspArgument(workspace.SmokeSourcePath),
+                    QuoteRspArgument(workspace.DriverSourcePath),
                     QuoteRspArgument(workspace.ProtobufSourcePath),
                 ]);
+
+            // MSVC names each object after its source basename. Derive both rather than hardcoding
+            // them: the driver filename comes from the backend now, not from this file.
+            var driverObject = Path.Combine(
+                workspace.Directory,
+                Path.GetFileNameWithoutExtension(workspace.DriverSourcePath) + ".obj");
+            var protobufObject = Path.Combine(
+                workspace.Directory,
+                Path.GetFileNameWithoutExtension(workspace.ProtobufSourcePath) + ".obj");
 
             var executablePath = Path.Combine(workspace.Directory, "protolang-cpp-smoke.exe");
             var linkResponsePath = Path.Combine(workspace.Directory, "msvc-link.rsp");
@@ -490,8 +496,8 @@ public class CppSyntaxSmokeTests
                 [
                     "/nologo",
                     $"/out:{QuoteRspArgument(executablePath)}",
-                    QuoteRspArgument(Path.Combine(workspace.Directory, "smoke.obj")),
-                    QuoteRspArgument(Path.Combine(workspace.Directory, "invoice.pb.obj")),
+                    QuoteRspArgument(driverObject),
+                    QuoteRspArgument(protobufObject),
                     $"/LIBPATH:{QuoteRspArgument(protobuf.LibraryDirectory!)}",
                     "libprotobuf.lib",
                     "abseil_dll.lib",

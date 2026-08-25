@@ -7,6 +7,7 @@ public abstract record SyntaxNode(SourceSpan Span);
 public sealed record CompilationUnit(
     IReadOnlyList<ImportDeclaration> Imports,
     IReadOnlyList<ExtendDeclaration> Extends,
+    IReadOnlyList<TestDeclaration> Tests,
     SourceSpan Span) : SyntaxNode(Span);
 
 /// <summary>An <c>import proto "path.proto";</c> declaration (spec 5.2).</summary>
@@ -33,6 +34,38 @@ public sealed record ParameterDeclaration(string Name, TypeReference Type, Sourc
 /// spec 8.1 defines the ProtoLang type universe as exactly the protobuf type universe.
 /// </summary>
 public sealed record TypeReference(string Name, SourceSpan Span) : SyntaxNode(Span);
+
+public sealed record TestDeclaration(
+    string TargetName,
+    string Name,
+    TestReceiverFixture Receiver,
+    IReadOnlyList<TestArgumentDeclaration> Arguments,
+    TestExpectation Expectation,
+    SourceSpan Span) : SyntaxNode(Span);
+
+public sealed record TestReceiverFixture(
+    IReadOnlyList<TestFieldInitializer> Fields,
+    SourceSpan Span) : SyntaxNode(Span);
+
+public abstract record TestFieldInitializer(string FieldName, SourceSpan Span) : SyntaxNode(Span);
+
+public sealed record TestScalarFieldInitializer(
+    string Name,
+    Expression Value,
+    SourceSpan Span) : TestFieldInitializer(Name, Span);
+
+public sealed record TestMessageFieldInitializer(
+    string Name,
+    IReadOnlyList<TestFieldInitializer> Fields,
+    SourceSpan Span) : TestFieldInitializer(Name, Span);
+
+public sealed record TestArgumentDeclaration(string Name, Expression Value, SourceSpan Span) : SyntaxNode(Span);
+
+public abstract record TestExpectation(SourceSpan Span) : SyntaxNode(Span);
+
+public sealed record TestReturnExpectation(Expression Value, SourceSpan Span) : TestExpectation(Span);
+
+public sealed record TestFailExpectation(SourceSpan Span) : TestExpectation(Span);
 
 public abstract record Statement(SourceSpan Span) : SyntaxNode(Span);
 

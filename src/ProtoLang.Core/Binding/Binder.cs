@@ -85,7 +85,17 @@ public sealed class Binder
             }
         }
 
-        return new IrModule(methods);
+        var tests = new List<IrTest>();
+        foreach (var test in unit.Tests)
+        {
+            var bound = BindTest(test);
+            if (bound is not null)
+            {
+                tests.Add(bound);
+            }
+        }
+
+        return new IrModule(methods, tests);
     }
 
     private MessageDescriptor? ResolveMessage(string name, SourceSpan span)
@@ -151,9 +161,11 @@ public sealed class Binder
             ? VoidType.Instance
             : ResolveTypeReference(method.ReturnType);
 
+        var parameterNames = new List<string>();
         var parameterTypes = new List<PlType>();
         foreach (var parameter in method.Parameters)
         {
+            parameterNames.Add(parameter.Name);
             var type = ResolveTypeReference(parameter.Type);
             if (type is VoidType)
             {
@@ -169,7 +181,7 @@ public sealed class Binder
             parameterTypes.Add(type);
         }
 
-        _methods[key] = new IrMethodSignature(receiver, method.Name, returnType, parameterTypes);
+        _methods[key] = new IrMethodSignature(receiver, method.Name, returnType, parameterNames, parameterTypes);
     }
 
     private PlType ResolveTypeReference(TypeReference reference)
@@ -244,6 +256,262 @@ public sealed class Binder
         }
 
         return new IrMethod(signature, parameters, body, method.IsVirtual, method.Span);
+    }
+
+    private IrTest? BindTest(TestDeclaration test)
+    {
+        var signature = ResolveTestTarget(test.TargetName, test.Span);
+        if (signature is null)
+        {
+            return null;
+        }
+
+        var context = new MethodContext(
+            signature.Receiver,
+            signature.ReturnType,
+            [],
+            AllowImplicitReceiverFields: false);
+        var receiver = BindTestReceiver(test.Receiver, signature.Receiver, context);
+        var arguments = BindTestArguments(test, signature, context);
+        var expectation = BindTestExpectation(test.Expectation, signature, context);
+
+        return new IrTest(signature, test.Name, receiver, arguments, expectation, test.Span);
+    }
+
+    private IrMethodSignature? ResolveTestTarget(string targetName, SourceSpan span)
+    {
+        var dot = targetName.LastIndexOf('.');
+        if (dot <= 0 || dot == targetName.Length - 1)
+        {
+            _diagnostics.Error(
+                "PL0057",
+                "invalid test target",
+                $"'{targetName}' is not a method target.",
+                span,
+                "Write tests against a receiver method, for example 'test Invoice.total_cents'.");
+            return null;
+        }
+
+        var receiverName = targetName[..dot];
+        var methodName = targetName[(dot + 1)..];
+        var receiver = ResolveMessage(receiverName, span);
+        if (receiver is null)
+        {
+            return null;
+        }
+
+        if (_methods.TryGetValue((receiver.FullName, methodName), out var signature))
+        {
+            return signature;
+        }
+
+        _diagnostics.Error(
+            "PL0058",
+            "unknown test target",
+            $"'{receiver.FullName}' has no ProtoLang method named '{methodName}'.",
+            span,
+            "Tests can only target methods declared in an extend block.");
+        return null;
+    }
+
+    private IrTestMessageValue BindTestReceiver(
+        TestReceiverFixture receiver,
+        MessageDescriptor descriptor,
+        MethodContext context)
+        => BindTestMessageValue(receiver.Fields, descriptor, receiver.Span, context);
+
+    private IrTestMessageValue BindTestMessageValue(
+        IReadOnlyList<TestFieldInitializer> fields,
+        MessageDescriptor descriptor,
+        SourceSpan span,
+        MethodContext context)
+    {
+        var values = new List<IrTestFieldValue>();
+        var seenSingular = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var field in fields)
+        {
+            var descriptorField = descriptor.FindFieldByName(field.FieldName);
+            if (descriptorField is null)
+            {
+                _diagnostics.Error(
+                    "PL0059",
+                    "unknown fixture field",
+                    $"'{descriptor.FullName}' has no field named '{field.FieldName}'.",
+                    field.Span);
+                continue;
+            }
+
+            if (descriptorField.IsMap)
+            {
+                _diagnostics.Error(
+                    "PL0060",
+                    "maps are not supported in test fixtures",
+                    $"Field '{descriptorField.Name}' is a map, which this compiler version does not support.",
+                    field.Span);
+                continue;
+            }
+
+            if (!descriptorField.IsRepeated && !seenSingular.Add(descriptorField.Name))
+            {
+                _diagnostics.Error(
+                    "PL0061",
+                    "duplicate fixture field",
+                    $"Field '{descriptorField.Name}' is set more than once.",
+                    field.Span,
+                    "Repeated fields may be listed multiple times; singular fields may not.");
+                continue;
+            }
+
+            switch (field)
+            {
+                case TestScalarFieldInitializer scalar:
+                {
+                    var expectedType = TypeFactory.FromFieldValue(descriptorField);
+                    if (expectedType is MessageType or EnumPlType)
+                    {
+                        _diagnostics.Error(
+                            "PL0062",
+                            "fixture field requires a nested value",
+                            $"Field '{descriptorField.Name}' is '{expectedType.DisplayName}' and cannot be set from a scalar expression.",
+                            field.Span);
+                        continue;
+                    }
+
+                    var value = BindExpression(scalar.Value, new Scope(null), context, expectedType);
+                    if (value.Type is not ErrorType && !TypesMatch(expectedType, value.Type))
+                    {
+                        _diagnostics.Error(
+                            "PL0063",
+                            "fixture field type mismatch",
+                            $"Field '{descriptorField.Name}' expects '{expectedType.DisplayName}' but got '{value.Type.DisplayName}'.",
+                            field.Span);
+                    }
+
+                    values.Add(new IrTestFieldValue(descriptorField, value, null, field.Span));
+                    break;
+                }
+
+                case TestMessageFieldInitializer message:
+                {
+                    var fieldType = TypeFactory.FromFieldValue(descriptorField);
+                    if (fieldType is not MessageType messageType)
+                    {
+                        _diagnostics.Error(
+                            "PL0064",
+                            "fixture field is not a message",
+                            $"Field '{descriptorField.Name}' has type '{fieldType.DisplayName}' and cannot contain nested fields.",
+                            field.Span);
+                        continue;
+                    }
+
+                    var value = BindTestMessageValue(message.Fields, messageType.Descriptor, message.Span, context);
+                    values.Add(new IrTestFieldValue(descriptorField, null, value, field.Span));
+                    break;
+                }
+            }
+        }
+
+        return new IrTestMessageValue(descriptor, values, span);
+    }
+
+    private IReadOnlyList<IrTestArgument> BindTestArguments(
+        TestDeclaration test,
+        IrMethodSignature signature,
+        MethodContext context)
+    {
+        var declared = new Dictionary<string, TestArgumentDeclaration>(StringComparer.Ordinal);
+        foreach (var argument in test.Arguments)
+        {
+            if (!declared.TryAdd(argument.Name, argument))
+            {
+                _diagnostics.Error(
+                    "PL0065",
+                    "duplicate test argument",
+                    $"Argument '{argument.Name}' is supplied more than once.",
+                    argument.Span);
+            }
+        }
+
+        var arguments = new List<IrTestArgument>();
+        for (var i = 0; i < signature.ParameterNames.Count; i++)
+        {
+            var name = signature.ParameterNames[i];
+            if (!declared.TryGetValue(name, out var declaration))
+            {
+                _diagnostics.Error(
+                    "PL0066",
+                    "missing test argument",
+                    $"Test '{test.Name}' does not supply argument '{name}'.",
+                    test.Span);
+                continue;
+            }
+
+            var expectedType = signature.ParameterTypes[i];
+            var value = BindExpression(declaration.Value, new Scope(null), context, expectedType);
+            if (value.Type is not ErrorType && !TypesMatch(expectedType, value.Type))
+            {
+                _diagnostics.Error(
+                    "PL0067",
+                    "test argument type mismatch",
+                    $"Argument '{name}' expects '{expectedType.DisplayName}' but got '{value.Type.DisplayName}'.",
+                    declaration.Span);
+            }
+
+            arguments.Add(new IrTestArgument(name, value, declaration.Span));
+        }
+
+        foreach (var extra in declared.Keys.Except(signature.ParameterNames, StringComparer.Ordinal))
+        {
+            _diagnostics.Error(
+                "PL0068",
+                "unknown test argument",
+                $"'{signature.Name}' has no parameter named '{extra}'.",
+                declared[extra].Span);
+        }
+
+        return arguments;
+    }
+
+    private IrTestExpectation BindTestExpectation(
+        TestExpectation expectation,
+        IrMethodSignature signature,
+        MethodContext context)
+    {
+        switch (expectation)
+        {
+            case TestFailExpectation fail:
+                return new IrTestFailExpectation(fail.Span);
+
+            case TestReturnExpectation returns:
+            {
+                if (signature.ReturnType is VoidType)
+                {
+                    _diagnostics.Error(
+                        "PL0069",
+                        "void method cannot expect a return value",
+                        $"'{signature.Name}' does not return a value.",
+                        returns.Span);
+                }
+
+                var value = BindExpression(returns.Value, new Scope(null), context, signature.ReturnType);
+                if (signature.ReturnType is not VoidType
+                    && value.Type is not ErrorType
+                    && !TypesMatch(signature.ReturnType, value.Type))
+                {
+                    _diagnostics.Error(
+                        "PL0070",
+                        "test expectation type mismatch",
+                        $"'{signature.Name}' returns '{signature.ReturnType.DisplayName}' but the expectation is '{value.Type.DisplayName}'.",
+                        returns.Span);
+                }
+
+                return new IrTestReturnExpectation(value, returns.Span);
+            }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(expectation), expectation, "Unhandled expectation.");
+        }
     }
 
     /// <summary>
@@ -527,11 +795,14 @@ public sealed class Binder
             return new IrParameterReference(parameter, name.Span);
         }
 
-        // A bare identifier may be a field of the implicit receiver, as in `quantity`.
-        var field = context.Receiver.FindFieldByName(name.Name);
-        if (field is not null)
+        if (context.AllowImplicitReceiverFields)
         {
-            return BindFieldAccess(new IrThis(new MessageType(context.Receiver), name.Span), field, name.Span);
+            // A bare identifier may be a field of the implicit receiver, as in `quantity`.
+            var field = context.Receiver.FindFieldByName(name.Name);
+            if (field is not null)
+            {
+                return BindFieldAccess(new IrThis(new MessageType(context.Receiver), name.Span), field, name.Span);
+            }
         }
 
         _diagnostics.Error(
@@ -986,7 +1257,8 @@ public sealed class Binder
     private sealed record MethodContext(
         MessageDescriptor Receiver,
         PlType ReturnType,
-        IReadOnlyList<IrParameter> Parameters);
+        IReadOnlyList<IrParameter> Parameters,
+        bool AllowImplicitReceiverFields = true);
 
     private sealed class Scope
     {

@@ -20,3 +20,8 @@ public interface IBackend
 
     IReadOnlyList<GeneratedFile> Emit(IrModule module, BackendOptions options, DiagnosticBag diagnostics);
 }
+
+public interface ITestBackend : IBackend
+{
+    IReadOnlyList<GeneratedFile> EmitTests(IrModule module, BackendOptions options, DiagnosticBag diagnostics);
+}

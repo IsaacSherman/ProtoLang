@@ -57,6 +57,24 @@ foreach (var backend in backends)
         File.WriteAllText(path, file.Contents);
         written.Add(path);
     }
+
+    if (options.TestOutputDirectory is not null && backend is ITestBackend testBackend)
+    {
+        var testFiles = testBackend.EmitTests(
+            result.Module!,
+            new BackendOptions(Path.GetFileName(options.SourcePath)),
+            backendDiagnostics);
+
+        var testOutputDirectory = Path.Combine(options.TestOutputDirectory, backend.Name);
+        Directory.CreateDirectory(testOutputDirectory);
+
+        foreach (var file in testFiles)
+        {
+            var path = Path.Combine(testOutputDirectory, file.RelativePath);
+            File.WriteAllText(path, file.Contents);
+            written.Add(path);
+        }
+    }
 }
 
 PrintDiagnostics(backendDiagnostics);
@@ -88,6 +106,7 @@ internal sealed record CommandLineOptions(
     string SourcePath,
     IReadOnlyList<string> IncludePaths,
     string OutputDirectory,
+    string? TestOutputDirectory,
     IReadOnlySet<string> Targets)
 {
     private static readonly string[] KnownTargets = ["csharp", "cpp"];
@@ -97,6 +116,7 @@ internal sealed record CommandLineOptions(
         string? sourcePath = null;
         var includePaths = new List<string>();
         var outputDirectory = "generated";
+        string? testOutputDirectory = null;
         var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = 0; i < args.Length; i++)
@@ -123,6 +143,16 @@ internal sealed record CommandLineOptions(
                     }
 
                     outputDirectory = args[i];
+                    break;
+
+                case "--test-out":
+                    if (++i >= args.Length)
+                    {
+                        Console.Error.WriteLine($"error: {arg} requires a directory");
+                        return null;
+                    }
+
+                    testOutputDirectory = args[i];
                     break;
 
                 case "-t" or "--target":
@@ -181,7 +211,7 @@ internal sealed record CommandLineOptions(
             }
         }
 
-        return new CommandLineOptions(sourcePath, includePaths, outputDirectory, targets);
+        return new CommandLineOptions(sourcePath, includePaths, outputDirectory, testOutputDirectory, targets);
     }
 
     public static void PrintUsage()
@@ -195,6 +225,8 @@ internal sealed record CommandLineOptions(
         Console.Error.WriteLine("                           May be repeated. The source directory is always searched.");
         Console.Error.WriteLine("  -o, --out <dir>          Output directory (default: generated).");
         Console.Error.WriteLine("                           Each backend writes to <dir>/<target>/.");
+        Console.Error.WriteLine("  --test-out <dir>         Optional generated test output directory.");
+        Console.Error.WriteLine("                           Each test backend writes to <dir>/<target>/.");
         Console.Error.WriteLine("  -t, --target <list>      Comma-separated targets: csharp, cpp (default: all).");
         Console.Error.WriteLine("  -h, --help               Show this help.");
         Console.Error.WriteLine();
