@@ -119,4 +119,18 @@ public class LexerTests
         Assert.Empty(diagnostics);
         Assert.Equal("a\tb\"c", tokens[0].Value);
     }
+
+    [Fact]
+    public void RecognizesControlFlowKeywords()
+    {
+        var tokens = Tokenize("if else while break continue", out var diagnostics);
+
+        Assert.Empty(diagnostics);
+        Assert.Equal(
+            [
+                TokenKind.If, TokenKind.Else, TokenKind.While, TokenKind.Break, TokenKind.Continue,
+                TokenKind.EndOfFile,
+            ],
+            tokens.Select(t => t.Kind));
+    }
 }

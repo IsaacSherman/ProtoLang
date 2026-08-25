@@ -56,6 +56,25 @@ public sealed record IrReturn(IrExpression? Value, SourceSpan Span) : IrStatemen
 public sealed record IrForEach(IrLocal Loop, IrExpression Collection, IrBlock Body, SourceSpan Span)
     : IrStatement(Span);
 
+/// <summary>
+/// A conditional (spec 15.1). <paramref name="Else"/> is an <see cref="IrBlock"/>, a nested
+/// <see cref="IrIf"/> for an <c>else if</c> chain, or null when there is no else branch.
+/// </summary>
+public sealed record IrIf(IrExpression Condition, IrBlock Then, IrStatement? Else, SourceSpan Span)
+    : IrStatement(Span);
+
+/// <summary>
+/// A <c>while</c> loop (spec 15.2). The compiler performs no termination analysis; that was
+/// decided against in 15.2.
+/// </summary>
+public sealed record IrWhile(IrExpression Condition, IrBlock Body, SourceSpan Span) : IrStatement(Span);
+
+/// <summary>Exits the innermost enclosing loop.</summary>
+public sealed record IrBreak(SourceSpan Span) : IrStatement(Span);
+
+/// <summary>Advances the innermost enclosing loop to its next iteration.</summary>
+public sealed record IrContinue(SourceSpan Span) : IrStatement(Span);
+
 public sealed record IrExpressionStatement(IrExpression Expression, SourceSpan Span) : IrStatement(Span);
 
 public abstract record IrExpression(PlType Type, SourceSpan Span);

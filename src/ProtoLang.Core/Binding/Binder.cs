@@ -245,7 +245,7 @@ public sealed class Binder
         var context = new MethodContext(receiver, signature.ReturnType, parameters);
         var body = BindBlock(method.Body, scope, context);
 
-        if (signature.ReturnType is not VoidType && !AlwaysReturns(body))
+        if (signature.ReturnType is not VoidType && !NeverFallsThrough(body))
         {
             _diagnostics.Error(
                 "PL0027",
@@ -515,23 +515,47 @@ public sealed class Binder
     }
 
     /// <summary>
-    /// Conservative all-paths-return check. The current statement set has no branching, so a
-    /// trailing return (or a trailing block that returns) is both necessary and sufficient.
+    /// All-paths-return analysis. A method that declares a return type is well formed when control
+    /// cannot reach the end of its body, so this asks the inverse question: after this statement
+    /// runs, can the statement following it run?
     /// </summary>
-    private static bool AlwaysReturns(IrBlock block)
+    /// <remarks>
+    /// <c>break</c> and <c>continue</c> do not return a value, but they do stop the enclosing block
+    /// from falling through, which is what this predicate measures. A method body ending in a stray
+    /// <c>break</c> therefore escapes PL0027 -- but PL0072 has already rejected it.
+    /// </remarks>
+    private static bool NeverFallsThrough(IrStatement statement) => statement switch
     {
-        if (block.Statements.Count == 0)
-        {
-            return false;
-        }
+        IrReturn or IrBreak or IrContinue => true,
 
-        return block.Statements[^1] switch
-        {
-            IrReturn => true,
-            IrBlock nested => AlwaysReturns(nested),
-            _ => false,
-        };
-    }
+        // Anything after a terminator in the same block is unreachable, so its position does not
+        // matter: the block as a whole cannot fall through.
+        IrBlock block => block.Statements.Any(NeverFallsThrough),
+
+        IrIf ifStatement => ifStatement.Else is not null
+            && NeverFallsThrough(ifStatement.Then)
+            && NeverFallsThrough(ifStatement.Else),
+
+        // A loop with a real condition may run zero times, and 'for' iterates a repeated field that
+        // may be empty, so neither terminates the flow. 'while true' does: the only way out is a
+        // 'break', or a 'return' that this predicate credits at the enclosing level anyway.
+        IrWhile { Condition: IrLiteral { Value: true } } loop => !ContainsBreak(loop.Body),
+
+        _ => false,
+    };
+
+    /// <summary>
+    /// Whether a <c>break</c> would exit the loop whose body is <paramref name="statement"/>.
+    /// Nested loops are not searched: a <c>break</c> inside one binds to that loop, not to this one.
+    /// </summary>
+    private static bool ContainsBreak(IrStatement statement) => statement switch
+    {
+        IrBreak => true,
+        IrBlock block => block.Statements.Any(ContainsBreak),
+        IrIf ifStatement => ContainsBreak(ifStatement.Then)
+            || (ifStatement.Else is not null && ContainsBreak(ifStatement.Else)),
+        _ => false,
+    };
 
     private IrBlock BindBlock(BlockStatement block, Scope parent, MethodContext context)
     {
@@ -551,6 +575,10 @@ public sealed class Binder
         BlockStatement block => BindBlock(block, scope, context),
         VariableDeclarationStatement declaration => BindVariableDeclaration(declaration, scope, context),
         ReturnStatement returnStatement => BindReturn(returnStatement, scope, context),
+        IfStatement ifStatement => BindIf(ifStatement, scope, context),
+        WhileStatement whileStatement => BindWhile(whileStatement, scope, context),
+        BreakStatement breakStatement => BindBreak(breakStatement, context),
+        ContinueStatement continueStatement => BindContinue(continueStatement, context),
         ForInStatement forIn => BindForIn(forIn, scope, context),
         AssignmentStatement assignment => BindAssignment(assignment, scope, context),
         ExpressionStatement expression => new IrExpressionStatement(
@@ -685,8 +713,76 @@ public sealed class Binder
                 statement.Span);
         }
 
-        var body = BindBlock(statement.Body, loopScope, context);
+        var body = BindBlock(statement.Body, loopScope, context with { LoopDepth = context.LoopDepth + 1 });
         return new IrForEach(loop, collection, body, statement.Span);
+    }
+
+    private IrStatement BindIf(IfStatement statement, Scope scope, MethodContext context)
+    {
+        var condition = BindCondition(statement.Condition, scope, context, "if");
+        var then = BindBlock(statement.Then, scope, context);
+
+        // The parser only ever puts a block or a nested 'if' here, and BindStatement handles both.
+        var elseBranch = statement.Else is null ? null : BindStatement(statement.Else, scope, context);
+
+        return new IrIf(condition, then, elseBranch, statement.Span);
+    }
+
+    private IrStatement BindWhile(WhileStatement statement, Scope scope, MethodContext context)
+    {
+        var condition = BindCondition(statement.Condition, scope, context, "while");
+        var body = BindBlock(statement.Body, scope, context with { LoopDepth = context.LoopDepth + 1 });
+
+        return new IrWhile(condition, body, statement.Span);
+    }
+
+    /// <summary>
+    /// Binds a branch or loop condition. ProtoLang has no truthiness, so the condition must already
+    /// be a bool -- the same rule the logical operators follow (PL0047).
+    /// </summary>
+    private IrExpression BindCondition(Expression condition, Scope scope, MethodContext context, string keyword)
+    {
+        var bound = BindExpression(condition, scope, context, ScalarType.BoolType);
+
+        if (bound.Type is not ErrorType && !TypesMatch(bound.Type, ScalarType.BoolType))
+        {
+            _diagnostics.Error(
+                "PL0071",
+                "condition must be bool",
+                $"The '{keyword}' condition has type '{bound.Type.DisplayName}'.",
+                condition.Span,
+                "ProtoLang does not treat non-bool values as true or false; compare explicitly.");
+        }
+
+        return bound;
+    }
+
+    private IrStatement BindBreak(BreakStatement statement, MethodContext context)
+    {
+        if (context.LoopDepth == 0)
+        {
+            _diagnostics.Error(
+                "PL0072",
+                "'break' outside a loop",
+                "'break' can only appear inside a 'for' or 'while' loop.",
+                statement.Span);
+        }
+
+        return new IrBreak(statement.Span);
+    }
+
+    private IrStatement BindContinue(ContinueStatement statement, MethodContext context)
+    {
+        if (context.LoopDepth == 0)
+        {
+            _diagnostics.Error(
+                "PL0073",
+                "'continue' outside a loop",
+                "'continue' can only appear inside a 'for' or 'while' loop.",
+                statement.Span);
+        }
+
+        return new IrContinue(statement.Span);
     }
 
     private IrStatement BindAssignment(AssignmentStatement statement, Scope scope, MethodContext context)
@@ -1254,11 +1350,16 @@ public sealed class Binder
 
     private static bool TypesMatch(PlType left, PlType right) => left.Equals(right);
 
+    /// <param name="LoopDepth">
+    /// How many enclosing loops the statement being bound sits inside. Zero means 'break' and
+    /// 'continue' have nothing to bind to.
+    /// </param>
     private sealed record MethodContext(
         MessageDescriptor Receiver,
         PlType ReturnType,
         IReadOnlyList<IrParameter> Parameters,
-        bool AllowImplicitReceiverFields = true);
+        bool AllowImplicitReceiverFields = true,
+        int LoopDepth = 0);
 
     private sealed class Scope
     {
