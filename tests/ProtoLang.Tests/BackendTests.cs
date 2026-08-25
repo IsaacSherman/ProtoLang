@@ -47,7 +47,10 @@ public class BackendTests
         // C# already wraps by default, but a consumer setting CheckForOverflowUnderflow would
         // change that silently. The generated code must not depend on their build settings.
         Assert.Contains("unchecked(self.Quantity * self.UnitPriceCents)", source, StringComparison.Ordinal);
-        Assert.Contains("unchecked(total + item.LineTotalCents())", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "unchecked(total + global::Protolang.Examples.InvoiceItemProtoLangExtensions.LineTotalCents(item))",
+            source,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -70,6 +73,60 @@ public class BackendTests
         // unchecked does not suppress the MIN / -1 trap, so division needs a helper.
         Assert.Contains("WrapDivide", runtime.Contents, StringComparison.Ordinal);
         Assert.Contains("WrapModulo", runtime.Contents, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CSharpEmitsXUnitTestsForProtoLangUnitTests()
+    {
+        var result = Compilation.Compile(TestPaths.SimpleScript, [TestPaths.ExampleProtoDirectory]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
+
+        var diagnostics = new DiagnosticBag();
+        var files = new CSharpBackend().EmitTests(
+            result.Module!,
+            new BackendOptions("simpleScript.protolang"),
+            diagnostics);
+
+        Assert.Empty(diagnostics);
+        var source = Assert.Single(files).Contents;
+
+        Assert.Contains("[global::Xunit.Fact]", source, StringComparison.Ordinal);
+        Assert.Contains("var receiver = new global::Protolang.Examples.Invoice", source, StringComparison.Ordinal);
+        Assert.Contains("Items =", source, StringComparison.Ordinal);
+        Assert.Contains("Quantity = 2L", source, StringComparison.Ordinal);
+        Assert.Contains("UnitPriceCents = 300L", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "global::Xunit.Assert.Equal(1100L, global::Protolang.Examples.InvoiceProtoLangExtensions.TotalCents(receiver));",
+            source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CppEmitsStandaloneTestsForProtoLangUnitTests()
+    {
+        var result = Compilation.Compile(TestPaths.SimpleScript, [TestPaths.ExampleProtoDirectory]);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
+
+        var diagnostics = new DiagnosticBag();
+        var files = new CppBackend().EmitTests(
+            result.Module!,
+            new BackendOptions("simpleScript.protolang"),
+            diagnostics);
+
+        Assert.Empty(diagnostics);
+        var source = Assert.Single(files).Contents;
+
+        Assert.Contains("#include \"simpleScript.pl.h\"", source, StringComparison.Ordinal);
+        Assert.Contains("int main()", source, StringComparison.Ordinal);
+        Assert.Contains("::protolang::examples::Invoice receiver;", source, StringComparison.Ordinal);
+        Assert.Contains("auto* items = receiver.add_items();", source, StringComparison.Ordinal);
+        Assert.Contains("items->set_quantity(2LL);", source, StringComparison.Ordinal);
+        Assert.Contains("items->set_unit_price_cents(300LL);", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "const auto actual = ::protolang::examples::total_cents(receiver);",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains("const auto expected = 1100LL;", source, StringComparison.Ordinal);
     }
 
     [Fact]

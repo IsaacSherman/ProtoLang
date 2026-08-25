@@ -15,6 +15,13 @@ internal static class TestPaths
     public static string FixtureProtoDirectory
         => Path.Combine(RepositoryRoot, "tests", "ProtoLang.Tests", "protos");
 
+    /// <summary>
+    /// The repository's central package versions. Copied into generated smoke projects so they
+    /// resolve the same versions as the repository instead of hardcoding their own.
+    /// </summary>
+    public static string DirectoryPackagesProps
+        => Path.Combine(RepositoryRoot, "Directory.Packages.props");
+
     private static string FindRepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

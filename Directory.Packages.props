@@ -1,0 +1,23 @@
+<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <!--
+    Single source of truth for package versions. Projects reference packages without a Version
+    attribute and pick it up from here.
+
+    This file is also copied into the temporary project that CSharpCompileSmokeTests builds, so the
+    generated smoke project resolves the same versions as the repository rather than carrying its
+    own hardcoded copy that could silently drift.
+  -->
+  <ItemGroup>
+    <PackageVersion Include="Google.Protobuf" Version="3.31.1" />
+    <PackageVersion Include="Grpc.Tools" Version="2.80.0" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+  </ItemGroup>
+
+</Project>

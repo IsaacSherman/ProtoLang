@@ -14,6 +14,7 @@ public sealed class Lexer
     private static readonly Dictionary<string, TokenKind> Keywords = new(StringComparer.Ordinal)
     {
         ["and"] = TokenKind.And,
+        ["arg"] = TokenKind.Arg,
         ["bool"] = TokenKind.Bool,
         ["break"] = TokenKind.Break,
         ["bytes"] = TokenKind.Bytes,
@@ -23,6 +24,7 @@ public sealed class Lexer
         ["else"] = TokenKind.Else,
         ["enum"] = TokenKind.Enum,
         ["extend"] = TokenKind.Extend,
+        ["expect"] = TokenKind.Expect,
         ["fail"] = TokenKind.Fail,
         ["false"] = TokenKind.False,
         ["float"] = TokenKind.Float,
@@ -38,9 +40,11 @@ public sealed class Lexer
         ["on_zero"] = TokenKind.OnZero,
         ["or"] = TokenKind.Or,
         ["proto"] = TokenKind.Proto,
+        ["receiver"] = TokenKind.Receiver,
         ["return"] = TokenKind.Return,
         ["string"] = TokenKind.String,
         ["switch"] = TokenKind.Switch,
+        ["test"] = TokenKind.Test,
         ["true"] = TokenKind.True,
         ["uint32"] = TokenKind.UInt32,
         ["uint64"] = TokenKind.UInt64,

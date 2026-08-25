@@ -55,6 +55,45 @@ public class ParserTests
     }
 
     [Fact]
+    public void ParsesUnitTests()
+    {
+        var unit = Parse(
+            """
+            import proto "invoice.proto";
+            test Invoice.total_cents "sums line totals" {
+                receiver {
+                    items {
+                        quantity = 2;
+                        unit_price_cents = 300;
+                    }
+
+                    items {
+                        quantity = 4;
+                        unit_price_cents = 125;
+                    }
+                }
+
+                expect return 1100;
+            }
+            """,
+            out var diagnostics);
+
+        Assert.Empty(diagnostics);
+
+        var test = Assert.Single(unit.Tests);
+        Assert.Equal("Invoice.total_cents", test.TargetName);
+        Assert.Equal("sums line totals", test.Name);
+        Assert.IsType<TestReturnExpectation>(test.Expectation);
+
+        var items = new List<TestMessageFieldInitializer>();
+        Assert.Collection(
+            test.Receiver.Fields,
+            first => items.Add(Assert.IsType<TestMessageFieldInitializer>(first)),
+            second => items.Add(Assert.IsType<TestMessageFieldInitializer>(second)));
+        Assert.Equal("items", items[0].FieldName);
+    }
+
+    [Fact]
     public void ParsesForInAndAssignment()
     {
         var unit = Parse(

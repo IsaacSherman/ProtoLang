@@ -72,6 +72,7 @@ public sealed class Parser
         var start = Current.Span;
         var imports = new List<ImportDeclaration>();
         var extends = new List<ExtendDeclaration>();
+        var tests = new List<TestDeclaration>();
 
         while (Current.Kind != TokenKind.EndOfFile)
         {
@@ -85,24 +86,28 @@ public sealed class Parser
                     extends.Add(ParseExtendDeclaration());
                     break;
 
+                case TokenKind.Test:
+                    tests.Add(ParseTestDeclaration());
+                    break;
+
                 default:
                     _diagnostics.Error(
                         "PL0011",
                         "unexpected top-level declaration",
-                        $"Expected 'import' or 'extend' but found {Current.Kind.Describe()}.",
+                        $"Expected 'import', 'extend', or 'test' but found {Current.Kind.Describe()}.",
                         Current.Span,
-                        "A ProtoLang file contains only proto imports and extend blocks.");
+                        "A ProtoLang file contains proto imports, extend blocks, and test declarations.");
                     SkipToNextTopLevelDeclaration();
                     break;
             }
         }
 
-        return new CompilationUnit(imports, extends, Spanning(start, Current.Span));
+        return new CompilationUnit(imports, extends, tests, Spanning(start, Current.Span));
     }
 
     private void SkipToNextTopLevelDeclaration()
     {
-        while (Current.Kind is not (TokenKind.EndOfFile or TokenKind.Import or TokenKind.Extend))
+        while (Current.Kind is not (TokenKind.EndOfFile or TokenKind.Import or TokenKind.Extend or TokenKind.Test))
         {
             Advance();
         }
@@ -148,6 +153,156 @@ public sealed class Parser
 
         var end = Expect(TokenKind.CloseBrace).Span;
         return new ExtendDeclaration(name, methods, Spanning(start, end));
+    }
+
+    private TestDeclaration ParseTestDeclaration()
+    {
+        var start = Expect(TokenKind.Test).Span;
+        var targetName = ParseQualifiedName();
+        var name = Expect(TokenKind.StringLiteral);
+        Expect(TokenKind.OpenBrace);
+
+        TestReceiverFixture? receiver = null;
+        var arguments = new List<TestArgumentDeclaration>();
+        TestExpectation? expectation = null;
+
+        while (Current.Kind is not (TokenKind.CloseBrace or TokenKind.EndOfFile))
+        {
+            switch (Current.Kind)
+            {
+                case TokenKind.Receiver:
+                    receiver = ParseTestReceiver();
+                    break;
+
+                case TokenKind.Arg:
+                    arguments.Add(ParseTestArgument());
+                    break;
+
+                case TokenKind.Expect:
+                    expectation = ParseTestExpectation();
+                    break;
+
+                default:
+                    _diagnostics.Error(
+                        "PL0016",
+                        "unexpected member in test block",
+                        $"Expected 'receiver', 'arg', or 'expect' but found {Current.Kind.Describe()}.",
+                        Current.Span);
+
+                    while (Current.Kind is not (
+                        TokenKind.CloseBrace or TokenKind.EndOfFile or TokenKind.Receiver
+                        or TokenKind.Arg or TokenKind.Expect))
+                    {
+                        Advance();
+                    }
+
+                    break;
+            }
+        }
+
+        var end = Expect(TokenKind.CloseBrace).Span;
+
+        if (receiver is null)
+        {
+            _diagnostics.Error(
+                "PL0017",
+                "test is missing a receiver",
+                "A ProtoLang unit test must declare the protobuf receiver fixture.",
+                Spanning(start, end),
+                "Add a 'receiver { ... }' block.");
+            receiver = new TestReceiverFixture([], Spanning(start, end));
+        }
+
+        if (expectation is null)
+        {
+            _diagnostics.Error(
+                "PL0018",
+                "test is missing an expectation",
+                "A ProtoLang unit test must declare 'expect return <value>;' or 'expect fail;'.",
+                Spanning(start, end));
+            expectation = new TestFailExpectation(Spanning(start, end));
+        }
+
+        return new TestDeclaration(
+            targetName,
+            (string?)name.Value ?? string.Empty,
+            receiver,
+            arguments,
+            expectation,
+            Spanning(start, end));
+    }
+
+    private TestReceiverFixture ParseTestReceiver()
+    {
+        var start = Expect(TokenKind.Receiver).Span;
+        Expect(TokenKind.OpenBrace);
+        var fields = ParseTestFieldInitializers();
+        var end = Expect(TokenKind.CloseBrace).Span;
+        return new TestReceiverFixture(fields, Spanning(start, end));
+    }
+
+    private IReadOnlyList<TestFieldInitializer> ParseTestFieldInitializers()
+    {
+        var fields = new List<TestFieldInitializer>();
+
+        while (Current.Kind is not (TokenKind.CloseBrace or TokenKind.EndOfFile))
+        {
+            var start = Current.Span;
+            var fieldName = Expect(TokenKind.Identifier).Text;
+
+            if (Match(TokenKind.Equals))
+            {
+                var value = ParseExpression();
+                var end = Expect(TokenKind.Semicolon).Span;
+                fields.Add(new TestScalarFieldInitializer(fieldName, value, Spanning(start, end)));
+                continue;
+            }
+
+            Expect(TokenKind.OpenBrace);
+            var nested = ParseTestFieldInitializers();
+            var nestedEnd = Expect(TokenKind.CloseBrace).Span;
+            fields.Add(new TestMessageFieldInitializer(fieldName, nested, Spanning(start, nestedEnd)));
+        }
+
+        return fields;
+    }
+
+    private TestArgumentDeclaration ParseTestArgument()
+    {
+        var start = Expect(TokenKind.Arg).Span;
+        var name = Expect(TokenKind.Identifier).Text;
+        Expect(TokenKind.Equals);
+        var value = ParseExpression();
+        var end = Expect(TokenKind.Semicolon).Span;
+        return new TestArgumentDeclaration(name, value, Spanning(start, end));
+    }
+
+    private TestExpectation ParseTestExpectation()
+    {
+        var start = Expect(TokenKind.Expect).Span;
+
+        if (Match(TokenKind.Return))
+        {
+            var value = ParseExpression();
+            var end = Expect(TokenKind.Semicolon).Span;
+            return new TestReturnExpectation(value, Spanning(start, end));
+        }
+
+        if (Match(TokenKind.Fail))
+        {
+            var end = Expect(TokenKind.Semicolon).Span;
+            return new TestFailExpectation(Spanning(start, end));
+        }
+
+        _diagnostics.Error(
+            "PL0019",
+            "expected a test expectation",
+            $"Expected 'return' or 'fail' but found {Current.Kind.Describe()}.",
+            Current.Span);
+        Advance();
+        var recoveredEnd = Current.Span;
+        Match(TokenKind.Semicolon);
+        return new TestFailExpectation(Spanning(start, recoveredEnd));
     }
 
     /// <summary>Parses <c>Foo</c> or <c>pkg.Foo</c> into a single dotted name.</summary>

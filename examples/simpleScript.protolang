@@ -17,3 +17,19 @@ extend Invoice {
         return total;
     }
 }
+
+test Invoice.total_cents "sums line totals" {
+    receiver {
+        items {
+            quantity = 2;
+            unit_price_cents = 300;
+        }
+
+        items {
+            quantity = 4;
+            unit_price_cents = 125;
+        }
+    }
+
+    expect return 1100;
+}

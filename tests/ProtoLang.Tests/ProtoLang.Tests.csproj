@@ -7,9 +7,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
-    <PackageReference Include="xunit.v3" Version="3.2.2" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
 
   <!--
@@ -18,7 +18,7 @@
     without depending on what happens to be in the current user's profile.
   -->
   <ItemGroup>
-    <PackageReference Include="Grpc.Tools" Version="2.80.0" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Include="Grpc.Tools" PrivateAssets="all" ExcludeAssets="runtime" />
   </ItemGroup>
 
   <ItemGroup>

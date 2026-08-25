@@ -116,7 +116,7 @@ extend InventoryItem {
 
 Open Questions:
 
-- Should imports reference `.proto` files directly, compiled descriptor sets, or both?
+- Should imports reference `.proto` files directly, compiled descriptor sets, or both? `Ultimately, I'd like to see this code embedded IN proto files... but I don't know if we can. ~IS`
 - Should ProtoLang support packages/namespaces independently of protobuf packages?
 - Should one ProtoLang file be allowed to extend messages from multiple protobuf packages?
 
@@ -1128,6 +1128,147 @@ Open Questions:
 - Should expected results be language-independent serialized values?
 - Should backend tests compile and execute generated code, or only inspect generated source for early phases?
 
+### 25.3 Author-Written ProtoLang Unit Tests
+
+ProtoLang should support author-written unit tests for behavior defined in ProtoLang source.
+These tests are distinct from the compiler's own conformance suite:
+
+- Conformance vectors test whether a ProtoLang compiler/backend implements the language correctly.
+- ProtoLang unit tests test whether a project's ProtoLang behavior is correct for that project.
+
+Recommended direction:
+
+- Unit tests are written in a ProtoLang test declaration, either in the same `.protolang` file as
+  the behavior or in a companion test file imported by the test command.
+- Unit tests are declarative fixtures and expectations, not arbitrary executable ProtoLang code.
+- A test names a receiver method, supplies a protobuf receiver value and method arguments, and
+  declares the expected return value or expected terminal failure.
+- Test declarations are not emitted into production behavior output unless test generation is
+  explicitly requested.
+- The compiler generates target-language test source files into a user-selected output directory.
+- The compiler should not execute tests by default. Execution belongs to the target language's
+  normal test runner or build system.
+
+Candidate syntax:
+
+```protolang
+import proto "invoice.proto";
+
+extend Invoice {
+    fn total_cents() -> int64 {
+        var total: int64 = 0;
+
+        for item in items {
+            total = total + item.line_total_cents();
+        }
+
+        return total;
+    }
+}
+
+test Invoice.total_cents "sums line totals" {
+    receiver {
+        items {
+            quantity = 2;
+            unit_price_cents = 300;
+        }
+
+        items {
+            quantity = 4;
+            unit_price_cents = 125;
+        }
+    }
+
+    expect return 1100;
+}
+```
+
+The `receiver` block is a descriptor-bound fixture initializer, not a general ProtoLang message
+literal. Each entry names a protobuf field. Scalar fields use `field = expression;`; message fields
+use nested blocks. Repeated fields may appear multiple times. The compiler binds field names and
+fixture value types against protobuf descriptors, then a backend may lower the fixture to
+target-language message construction code. A future test syntax may also accept protobuf text
+format, but fixture semantics must still come from protobuf descriptors.
+
+For methods with parameters, the test declaration should name each argument:
+
+```protolang
+test InvoiceItem.discounted_total "applies discount" {
+    receiver {
+        quantity = 2;
+        unit_price_cents = 300;
+    }
+
+    arg discount_cents = 50;
+    expect return 550;
+}
+```
+
+For methods expected to terminate through `on_zero fail` or another future terminal failure
+mechanism:
+
+```protolang
+test InvoiceItem.strict_ratio "zero divisor fails" {
+    receiver {
+        quantity = 2;
+        unit_price_cents = 0;
+    }
+
+    expect fail;
+}
+```
+
+Test generation should follow the same shape as normal backend generation:
+
+```text
+protolangc behavior.protolang \
+  --target csharp \
+  --out generated/src \
+  --test-out generated/tests
+```
+
+If ProtoLang is run as a `protoc` plugin, test generation should use protoc-style output flags
+rather than a special test runner protocol. Since `protoc` passes `.proto` descriptors to
+plugins, the ProtoLang behavior/test source file must be named explicitly in plugin options:
+
+```text
+protoc \
+  --proto_path=protos \
+  --protolang_out=generated/src \
+  --protolang_opt=source=behavior.protolang,target=csharp \
+  --protolang_test_out=generated/tests \
+  --protolang_test_opt=source=behavior.protolang,target=csharp \
+  invoice.proto
+```
+
+The exact flag names remain open, but the important constraint is that test output is a separate
+artifact root. This lets users choose whether generated test code is checked in, compiled only in
+CI, copied into an existing test project, or adapted by downstream build tooling.
+
+Backend expectations:
+
+- C# should generate ordinary test source that can live in a user-selected test project. The test
+  framework binding is an option; xUnit is a reasonable default for this repository but should not
+  be a language-level requirement.
+- C++ should initially generate a small standalone test executable source, because this avoids
+  requiring GoogleTest/Catch2 before the language has a package story. A backend option can later
+  select a test framework.
+- Python should generate test functions compatible with the standard `unittest` module by default,
+  with pytest-compatible output as an option.
+
+Open Questions:
+
+- Should test declarations live in production `.protolang` files, separate `.protolangtest` files,
+  or both?
+- Should expected protobuf message values use text format, JSON mapping, binary fixtures, or all
+  three?
+- Should the compiler embed fixtures in generated source, copy fixture files beside the generated
+  tests, or support both?
+- Should target test framework selection be a backend option such as
+  `--test-opt framework=xunit|standalone|gtest`?
+- How should `expect fail` be tested for backends whose failure mapping terminates the process?
+- Should generated tests be stable enough to check in, or treated as build artifacts only?
+
 ## 26. Diagnostics
 
 The compiler should provide deterministic diagnostics for:
@@ -1291,6 +1432,8 @@ This section should be maintained as the authoritative list of open decisions.
 - Error result model.
 - External function support.
 - `protoc` plugin and Buf integration strategy.
+- ProtoLang unit test declaration syntax and file extension.
+- Generated test output flags and target test framework options.
 - Stable IR format.
 - Third-party backend support.
 - Generated API shape per target language.

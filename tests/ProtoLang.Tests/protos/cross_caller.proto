@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package protolang.caller;
+
+option csharp_namespace = "ProtoLang.Caller";
+
+import "cross_target.proto";
+
+message Caller {
+  protolang.target.Target target = 1;
+}
