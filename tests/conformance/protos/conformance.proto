@@ -81,3 +81,25 @@ message EnumCase {
   int64 count = 3;
   ConformanceStatus status = 4;
 }
+
+// whimsy_math.protolang -- mixed protobuf objects, numeric conversions, and compound control flow.
+message WhimsyIngredient {
+  int64 sparkle = 1;
+  int32 fizz = 2;
+  uint32 shimmer = 3;
+  uint64 moon_dust = 4;
+  double volatility = 5;
+  float lift = 6;
+  string name = 7;
+  bool cursed = 8;
+}
+
+message WhimsyCauldronCase {
+  repeated WhimsyIngredient ingredients = 1;
+  int64 bias = 2;
+  int64 divisor = 3;
+  uint64 mask = 4;
+  double drift = 5;
+  float gust = 6;
+  int32 gate = 7;
+}

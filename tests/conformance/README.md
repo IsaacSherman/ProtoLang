@@ -87,6 +87,7 @@ failing. A fully equipped machine should report no skips.
 | `strings` | String equality, string returns, and literals containing characters both backends must escape (spec 11) |
 | `enum_types` | Enum-typed locals, parameters, and returns, and named enum values in comparisons, returns, branches, and fixtures (spec 12) |
 | `casts` | Explicit conversions: mixed-width arithmetic, integer narrowing and signedness, int-to-float rounding, and float-to-integer truncation, saturation, and NaN (spec 10.3) |
+| `whimsy_math` | A larger end-to-end fixture with repeated protobuf objects, method calls, arguments, mixed numeric widths, explicit casts, unsigned wrapping, float/double math, strings, booleans, and compound control flow |
 
 ## Adding a backend
 
