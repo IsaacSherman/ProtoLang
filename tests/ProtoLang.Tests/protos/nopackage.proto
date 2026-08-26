@@ -5,6 +5,7 @@ syntax = "proto3";
 
 enum BareStatus {
   BARE_STATUS_NONE = 0;
+  BARE_STATUS_SET = 1;
 }
 
 message BareMessage {

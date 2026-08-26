@@ -597,7 +597,9 @@ public sealed class Parser
     /// The clause binds to the single division it follows, so <c>x + a / b on_zero 0</c> means
     /// <c>x + (a / b on_zero 0)</c>. The fallback itself is parsed at unary precedence, so anything
     /// more involved than a literal, name, or call must be parenthesized. That keeps
-    /// <c>a / b on_zero 0 + 1</c> from being ambiguous.
+    /// <c>a / b on_zero 0 + 1</c> from being ambiguous. Unary precedence includes <c>as</c>, so
+    /// <c>a / b on_zero 0 as int32</c> converts the fallback rather than the quotient; parenthesize
+    /// the division to convert its result.
     /// </remarks>
     private OnZeroClause? ParseOnZeroClause(BinaryOperatorKind op, Token operatorToken)
     {
@@ -629,14 +631,37 @@ public sealed class Parser
         return new OnZeroClause(fallback, Spanning(onZeroToken.Span, fallback.Span));
     }
 
+    /// <summary>
+    /// Parses a prefix expression and any <c>as</c> conversions applied to it.
+    /// </summary>
+    /// <remarks>
+    /// <c>as</c> binds tighter than every binary operator and looser than a prefix operator, so
+    /// <c>a as int64 * b</c> is <c>(a as int64) * b</c> and <c>-x as int32</c> negates first and
+    /// converts the result. Chaining is allowed and left-associative, so a conversion through an
+    /// intermediate width reads left to right.
+    /// </remarks>
     private Expression ParseUnaryExpression()
+    {
+        var expression = ParsePrefixExpression();
+
+        while (Current.Kind == TokenKind.As)
+        {
+            Advance();
+            var target = ParseTypeReference();
+            expression = new CastExpression(expression, target, Spanning(expression.Span, target.Span));
+        }
+
+        return expression;
+    }
+
+    private Expression ParsePrefixExpression()
     {
         var token = Current;
 
         if (token.Kind is TokenKind.Minus or TokenKind.Bang or TokenKind.Not)
         {
             Advance();
-            var operand = ParseUnaryExpression();
+            var operand = ParsePrefixExpression();
             var op = token.Kind == TokenKind.Minus ? UnaryOperatorKind.Negate : UnaryOperatorKind.LogicalNot;
             return new UnaryExpression(op, operand, Spanning(token.Span, operand.Span));
         }

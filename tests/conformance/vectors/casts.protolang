@@ -1,0 +1,192 @@
+// Conformance vectors for explicit numeric conversions (spec 10.3).
+//
+// ProtoLang applies no implicit numeric conversions, so `as` is the only way a value changes width
+// or signedness -- and until it existed, a schema mixing int32 and int64 could not have arithmetic
+// written against it at all.
+//
+// The conversions worth pinning are the ones where the targets do not already agree. Integer
+// narrowing wraps, which C# only does outside a checked build and C++ only guarantees under C++20.
+// Converting a floating-point value that does not fit into an integer is unspecified in C# and
+// undefined behavior in C++, and narrowing a double past float's range is undefined behavior in
+// C++ where C# yields an infinity. Those three are why the vectors below exist; the widening cases
+// are here because a conversion that quietly loses a value is worse than one that fails to build.
+//
+// Large doubles are built by multiplication rather than written down: ProtoLang has no exponent
+// syntax, so 1e40 would have to be spelled with forty-one digits. There is no NaN literal either,
+// so a NaN is produced the way floating_point.protolang produces one, by dividing zero by zero.
+// int32 MIN is spelled -MAX - 1 for the same reason int64 MIN is in integer_overflow.protolang:
+// its magnitude does not fit in a positive literal of its own type.
+
+import proto "conformance.proto";
+
+extend CastCase {
+    // The headline case. Done in 32 bits this overflows to -2, so a conversion that is missing or
+    // applied to the wrong operand is visible in the result rather than only in the generated text.
+    fn mixed_product() -> int64 {
+        return i32 as int64 * i64;
+    }
+
+    fn narrowed() -> int32 {
+        return i64 as int32;
+    }
+
+    fn to_unsigned() -> uint32 {
+        return i32 as uint32;
+    }
+
+    fn from_unsigned() -> int32 {
+        return u32 as int32;
+    }
+
+    // uint64 values above int64 MAX have no literal form, so the operand is wrapped into existence
+    // first, exactly as integer_overflow.protolang does.
+    fn wide_unsigned_as_signed() -> int64 {
+        return (u64 - 1) as int64;
+    }
+
+    fn widened_to_double() -> double {
+        return i64 as double;
+    }
+
+    fn widened_to_float() -> double {
+        return f as double;
+    }
+
+    fn truncated() -> int64 {
+        return d as int64;
+    }
+
+    fn saturated() -> int32 {
+        var big: double = d * d * d;
+        return big as int32;
+    }
+
+    fn nan_to_integer() -> int32 {
+        var q: double = d / zero;
+        return q as int32;
+    }
+
+    // No infinity literal, so the result is checked by the property that identifies an infinity:
+    // it is positive and unchanged by doubling.
+    fn narrowed_is_infinite() -> bool {
+        var big: double = d * d * d * d;
+        var n: float = big as float;
+        return n > 0.0 and n == n * 2.0;
+    }
+}
+
+test CastCase.mixed_product "an int32 widened to int64 multiplies without overflowing" {
+    receiver {
+        i32 = 2147483647;
+        i64 = 2;
+    }
+
+    expect return 4294967294;
+}
+
+test CastCase.narrowed "narrowing to int32 keeps the low 32 bits" {
+    receiver {
+        i64 = 4294967297;
+    }
+
+    expect return 1;
+}
+
+test CastCase.narrowed "narrowing to int32 wraps into the sign bit" {
+    receiver {
+        i64 = 2147483648;
+    }
+
+    expect return -2147483647 - 1;
+}
+
+test CastCase.to_unsigned "a negative int32 reinterprets as uint32" {
+    receiver {
+        i32 = -1;
+    }
+
+    expect return 4294967295;
+}
+
+test CastCase.from_unsigned "uint32 MAX reinterprets as -1" {
+    receiver {
+        u32 = 4294967295;
+    }
+
+    expect return -1;
+}
+
+test CastCase.wide_unsigned_as_signed "uint64 MAX reinterprets as -1" {
+    receiver {
+        u64 = 0;
+    }
+
+    expect return -1;
+}
+
+// 2^53 + 1 is the smallest integer a double cannot represent. It sits exactly halfway between two
+// representable values, so the result names the rounding rule: nearest, ties to even.
+test CastCase.widened_to_double "an int64 too large for a double rounds to nearest, ties to even" {
+    receiver {
+        i64 = 9007199254740993;
+    }
+
+    expect return 9007199254740992.0;
+}
+
+test CastCase.widened_to_float "a float widens to double exactly" {
+    receiver {
+        f = 0.5;
+    }
+
+    expect return 0.5;
+}
+
+test CastCase.truncated "a positive double truncates toward zero" {
+    receiver {
+        d = 3.75;
+    }
+
+    expect return 3;
+}
+
+test CastCase.truncated "a negative double truncates toward zero, not down" {
+    receiver {
+        d = -3.75;
+    }
+
+    expect return -3;
+}
+
+test CastCase.saturated "a double above int32 MAX saturates rather than wrapping" {
+    receiver {
+        d = 1000000.0;
+    }
+
+    expect return 2147483647;
+}
+
+test CastCase.saturated "a double below int32 MIN saturates rather than wrapping" {
+    receiver {
+        d = -1000000.0;
+    }
+
+    expect return -2147483647 - 1;
+}
+
+test CastCase.nan_to_integer "NaN converts to zero" {
+    receiver {
+        d = 0.0;
+        zero = 0.0;
+    }
+
+    expect return 0;
+}
+
+test CastCase.narrowed_is_infinite "a double past float's range narrows to infinity" {
+    receiver {
+        d = 10000000000.0;
+    }
+
+    expect return true;
+}

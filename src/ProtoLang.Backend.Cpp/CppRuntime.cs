@@ -35,6 +35,7 @@ public static class CppRuntime
         writer.WriteLine("#include <cstdint>");
         writer.WriteLine("#include <cstdio>");
         writer.WriteLine("#include <cstdlib>");
+        writer.WriteLine("#include <limits>");
         writer.WriteLine();
         writer.WriteLine("// Requires C++20: the conversion from an unsigned type back to the corresponding");
         writer.WriteLine("// signed type is defined as two's complement (P0907R4). Earlier standards leave that");
@@ -62,6 +63,16 @@ public static class CppRuntime
                 EmitDivideOrFailHelper(writer, signed, suffix);
                 EmitModuloOrFailHelper(writer, signed, suffix);
             }
+
+            writer.WriteLine("// --- explicit conversions (10.3) ---");
+            writer.WriteLine();
+
+            foreach (var (type, suffix, low, high) in FloatToIntegerTargets)
+            {
+                EmitFloatToIntegerHelper(writer, type, suffix, low, high);
+            }
+
+            EmitNarrowToFloatHelper(writer);
         }
 
         writer.WriteLine();
@@ -78,6 +89,110 @@ public static class CppRuntime
         ("::std::uint32_t", "::std::uint32_t", "u32"),
         ("::std::uint64_t", "::std::uint64_t", "u64"),
     ];
+
+    /// <summary>
+    /// Floating-point to integer conversion targets: the C++ type, the ProtoLang helper suffix,
+    /// and the two range guards.
+    /// </summary>
+    /// <remarks>
+    /// The guards are not uniform, because the bound is not always representable as a
+    /// <c>double</c>. Both 32-bit bounds are exact, so a strict comparison is right: a value just
+    /// past the maximum truncates to the maximum anyway. The positive 64-bit bounds are not exact
+    /// -- the nearest <c>double</c> above <c>int64_t</c>'s maximum is 2^63 -- so those guards are
+    /// inclusive against the power of two instead.
+    /// </remarks>
+    private static readonly (string Type, string Suffix, string Low, string High)[] FloatToIntegerTargets =
+    [
+        ("::std::int32_t", "i32", "v < -2147483648.0", "v > 2147483647.0"),
+        ("::std::int64_t", "i64", "v < -9223372036854775808.0", "v >= 9223372036854775808.0"),
+        ("::std::uint32_t", "u32", "v <= 0.0", "v > 4294967295.0"),
+        ("::std::uint64_t", "u64", "v <= 0.0", "v >= 18446744073709551616.0"),
+    ];
+
+    /// <summary>
+    /// Emits a saturating, truncating conversion from <c>double</c> to one integer type.
+    /// </summary>
+    /// <remarks>
+    /// A floating-point value outside the destination integer's range is undefined behavior in
+    /// C++, not a wrapped or clamped result, so the bounds are checked before the conversion
+    /// rather than relying on what the hardware happens to do.
+    /// </remarks>
+    private static void EmitFloatToIntegerHelper(
+        SourceWriter writer,
+        string type,
+        string suffix,
+        string low,
+        string high)
+    {
+        writer.WriteLine("// Truncates toward zero, clamping to the type's bounds. NaN converts to zero.");
+        using (writer.Block($"inline {type} trunc_sat_f64_to_{suffix}(double v)"))
+        {
+            using (writer.Block("if (v != v)"))
+            {
+                writer.WriteLine("return 0;");
+            }
+
+            writer.WriteLine();
+            using (writer.Block($"if ({low})"))
+            {
+                writer.WriteLine($"return ::std::numeric_limits<{type}>::min();");
+            }
+
+            writer.WriteLine();
+            using (writer.Block($"if ({high})"))
+            {
+                writer.WriteLine($"return ::std::numeric_limits<{type}>::max();");
+            }
+
+            writer.WriteLine();
+            writer.WriteLine($"return static_cast<{type}>(v);");
+        }
+
+        writer.WriteLine();
+    }
+
+    /// <summary>
+    /// Emits the narrowing conversion from <c>double</c> to <c>float</c>.
+    /// </summary>
+    /// <remarks>
+    /// A <c>double</c> outside <c>float</c>'s range is undefined behavior in C++, where the
+    /// baseline result is an infinity. The threshold is not <c>FLT_MAX</c>: under round-to-nearest
+    /// a <c>double</c> between <c>FLT_MAX</c> and 2^128 - 2^103 rounds down to <c>FLT_MAX</c>
+    /// rather than overflowing, so guarding at <c>FLT_MAX</c> would produce an infinity where
+    /// every other target produces a finite value.
+    /// </remarks>
+    private static void EmitNarrowToFloatHelper(SourceWriter writer)
+    {
+        writer.WriteLine("// Narrows to float. Out of range yields an infinity rather than undefined behavior.");
+        using (writer.Block("inline float narrow_f64_to_f32(double v)"))
+        {
+            writer.WriteLine("// 2^128 - 2^103: the smallest magnitude that rounds to infinity, not FLT_MAX.");
+            writer.WriteLine("// Spelled as a hex float so the value is exact rather than nearest-parsed.");
+            writer.WriteLine("constexpr double overflow = 0x1.ffffffp+127;");
+            writer.WriteLine();
+            using (writer.Block("if (v != v)"))
+            {
+                writer.WriteLine("return ::std::numeric_limits<float>::quiet_NaN();");
+            }
+
+            writer.WriteLine();
+            using (writer.Block("if (v >= overflow)"))
+            {
+                writer.WriteLine("return ::std::numeric_limits<float>::infinity();");
+            }
+
+            writer.WriteLine();
+            using (writer.Block("if (v <= -overflow)"))
+            {
+                writer.WriteLine("return -::std::numeric_limits<float>::infinity();");
+            }
+
+            writer.WriteLine();
+            writer.WriteLine("return static_cast<float>(v);");
+        }
+
+        writer.WriteLine();
+    }
 
     private static void EmitBinaryHelper(
         SourceWriter writer,

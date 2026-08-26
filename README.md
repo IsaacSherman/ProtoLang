@@ -111,16 +111,16 @@ Implemented:
 
 - Lexer and recursive-descent parser
 - Protobuf descriptor binding via `protoc`
-- Name resolution and type checking against real descriptors, including enum type references
+- Name resolution and type checking against real descriptors, including enum types and values
 - Typed IR carrying resolved types, source locations, and per-operation arithmetic behavior
 - Control flow: `if` / `else if` / `else`, `while`, `break`, `continue`, and `for`-`in`
+- Explicit numeric conversions, `x as int64`, which is what makes mixed-width arithmetic writable
 - C# backend (extension methods) and C++ backend (header-only free functions)
 - Author-written `test` declarations, generated into xUnit tests and a C++ test executable
 - A cross-language conformance suite that runs the same vectors in both backends
 
-Not implemented: maps, presence, explicit casts, mutation, virtual methods, `Result` types, naming
-an enum value in an expression, and the Python backend. Backends reject these rather than emitting
-something whose semantics differ from the spec.
+Not implemented: maps, presence, mutation, virtual methods, `Result` types, `switch`, and the Python
+backend. Backends reject these rather than emitting something whose semantics differ from the spec.
 
 ### Building
 

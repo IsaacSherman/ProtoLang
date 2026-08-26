@@ -85,7 +85,8 @@ failing. A fully equipped machine should report no skips.
 | `floating_point` | IEEE 754 division including by zero: infinities, NaN, and NaN comparison behavior |
 | `control_flow` | `if` / `else if` / `else`, `while`, `while true` with `break`, `continue`, and `for`-`in` (spec 15) |
 | `strings` | String equality, string returns, and literals containing characters both backends must escape (spec 11) |
-| `enum_types` | Enum-typed locals, parameters, and returns |
+| `enum_types` | Enum-typed locals, parameters, and returns, and named enum values in comparisons, returns, branches, and fixtures (spec 12) |
+| `casts` | Explicit conversions: mixed-width arithmetic, integer narrowing and signedness, int-to-float rounding, and float-to-integer truncation, saturation, and NaN (spec 10.3) |
 
 ## Adding a backend
 
@@ -101,12 +102,15 @@ The harness is written so a third backend is a small addition, not a third copy:
 
 ## Not covered yet
 
-- **Enum values cannot be named.** There is no `EnumCase.Level.LEVEL_HIGH` expression, and test
-  fixtures reject enum-typed fields, so no vector can give an enum a non-default value.
-  `enum_types.protolang` therefore proves the type-level plumbing rather than enum behavior.
-- **`uint64` literals above `int64` MAX**, and `int64` MIN, have no direct literal form.
-- **Maps, presence, explicit casts, mutation, and virtual methods** are not implemented in the
-  language, so there is nothing to write a vector against.
+- **`uint64` literals above `int64` MAX**, and `int64` MIN and `int32` MIN, have no direct literal
+  form. Nor do infinities, NaN, or any float needing an exponent: ProtoLang has no exponent syntax,
+  so `casts.protolang` builds large doubles by multiplication and checks an infinity by the property
+  that identifies one rather than comparing against a literal.
+- **Enum values with no declared name.** proto3 enums are open, so a field can hold a number the
+  schema does not name, but a fixture can only set a value that exists. What happens to an unknown
+  value is undecided (spec 12), so there is nothing to pin.
+- **Maps, presence, mutation, and virtual methods** are not implemented in the language, so there is
+  nothing to write a vector against.
 - **The negative case for `expect fail` is not in the suite.** That a passing `expect fail` really
   does detect a method returning normally was verified by hand, by pointing such a test at a
   non-zero divisor and confirming it fails with "the method returned instead of terminating the

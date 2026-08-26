@@ -171,6 +171,15 @@ public sealed record UnaryExpression(
     Expression Operand,
     SourceSpan Span) : Expression(Span);
 
+/// <summary>
+/// An explicit numeric conversion, <c>x as int64</c> (spec 10.3). ProtoLang applies no implicit
+/// numeric conversions, so this is the only way an expression changes width or signedness.
+/// </summary>
+public sealed record CastExpression(
+    Expression Operand,
+    TypeReference TargetType,
+    SourceSpan Span) : Expression(Span);
+
 public sealed record IntegerLiteralExpression(long Value, SourceSpan Span) : Expression(Span);
 
 public sealed record FloatLiteralExpression(double Value, SourceSpan Span) : Expression(Span);

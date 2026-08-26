@@ -1,15 +1,16 @@
-// Conformance vectors for enum type references (issue #1).
+// Conformance vectors for enum types and named enum values.
 //
-// The point of this vector is that the enum type can be NAMED: as a local, as a parameter, and as
-// a return type. Before the binder indexed enum descriptors, only the inferred form worked, so
-// none of the declarations below would compile.
+// Two things are being proved here, and they arrived in that order. First that an enum type can be
+// NAMED -- as a local, as a parameter, and as a return type -- which before the binder indexed enum
+// descriptors was impossible: only the inferred form worked. Second that an enum VALUE can be
+// named, without which an enum could be declared, passed, and returned but never compared against
+// anything meaningful, and no fixture could give an enum field a non-default value.
 //
-// The behavioral coverage is deliberately thin, and not because the vector was rushed. ProtoLang
-// cannot yet name an enum VALUE (there is no TopLevelStatus.LEVEL_HIGH), and test fixtures reject
-// enum-typed fields, so no test can give an enum a non-default value. What these vectors do prove
-// is that both backends map the enum type to the right target name -- protoc nests C# enums inside
-// a Types class and flattens C++ enums with an underscore -- and that a value of that type
-// round-trips through a local, an argument, and a return.
+// The naming is the portable part that is easy to get wrong. protoc nests C# enums inside a Types
+// class and flattens C++ enums with an underscore; for values it goes further, stripping the enum
+// name off the front and PascalCasing what is left for C#, while C++ keeps the .proto spelling and
+// prefixes nested enums with the flattened type name. A top-level enum and a nested one are both
+// exercised because those two C++ spellings differ.
 
 import proto "conformance.proto";
 
@@ -38,6 +39,42 @@ extend EnumCase {
         var mine: protolang.conformance.EnumCase.Level = level;
         return mine == current();
     }
+
+    // A nested enum's value: Outer_Nested_VALUE in C++, Outer.Types.Nested.Value in C#.
+    fn is_high() -> bool {
+        return level == Level.LEVEL_HIGH;
+    }
+
+    // A top-level enum's value, which C++ spells bare rather than prefixed.
+    fn is_ready() -> bool {
+        return status == ConformanceStatus.CONFORMANCE_STATUS_READY;
+    }
+
+    fn is_low_by_qualified_name() -> bool {
+        return level == protolang.conformance.EnumCase.Level.LEVEL_LOW;
+    }
+
+    // A named constant as a returned value and as a branch result, not only as a comparand.
+    fn promoted() -> Level {
+        if level == Level.LEVEL_LOW {
+            return Level.LEVEL_HIGH;
+        }
+
+        return level;
+    }
+
+    fn counts_high() -> int64 {
+        var total: int64 = 0;
+        if level == Level.LEVEL_HIGH {
+            total = total + 1;
+        }
+
+        if other == Level.LEVEL_HIGH {
+            total = total + 1;
+        }
+
+        return total;
+    }
 }
 
 test EnumCase.levels_match "two enum fields at their default compare equal" {
@@ -48,9 +85,18 @@ test EnumCase.levels_match "two enum fields at their default compare equal" {
     expect return true;
 }
 
+test EnumCase.levels_match "two enum fields set to different values compare unequal" {
+    receiver {
+        level = Level.LEVEL_HIGH;
+        other = Level.LEVEL_LOW;
+    }
+
+    expect return false;
+}
+
 test EnumCase.round_trips "an enum survives a round trip through an argument and a return" {
     receiver {
-        count = 1;
+        level = Level.LEVEL_LOW;
     }
 
     expect return true;
@@ -58,8 +104,65 @@ test EnumCase.round_trips "an enum survives a round trip through an argument and
 
 test EnumCase.matches_by_qualified_name "an enum can be named by its fully qualified name" {
     receiver {
-        count = 1;
+        level = Level.LEVEL_HIGH;
     }
 
     expect return true;
+}
+
+test EnumCase.is_high "a field compares equal to the named value it was set to" {
+    receiver {
+        level = Level.LEVEL_HIGH;
+    }
+
+    expect return true;
+}
+
+test EnumCase.is_high "a field left at its default does not compare equal to another value" {
+    receiver {
+        count = 1;
+    }
+
+    expect return false;
+}
+
+test EnumCase.is_ready "a top-level enum value is named the same way a nested one is" {
+    receiver {
+        status = ConformanceStatus.CONFORMANCE_STATUS_READY;
+    }
+
+    expect return true;
+}
+
+test EnumCase.is_low_by_qualified_name "an enum value can be named through its fully qualified type" {
+    receiver {
+        level = Level.LEVEL_LOW;
+    }
+
+    expect return true;
+}
+
+test EnumCase.promoted "a named value is returned from a branch" {
+    receiver {
+        level = Level.LEVEL_LOW;
+    }
+
+    expect return Level.LEVEL_HIGH;
+}
+
+test EnumCase.promoted "a value that needs no promotion is returned unchanged" {
+    receiver {
+        level = Level.LEVEL_UNSPECIFIED;
+    }
+
+    expect return Level.LEVEL_UNSPECIFIED;
+}
+
+test EnumCase.counts_high "named values drive control flow over two fields" {
+    receiver {
+        level = Level.LEVEL_HIGH;
+        other = Level.LEVEL_LOW;
+    }
+
+    expect return 1;
 }

@@ -181,10 +181,12 @@ Open Question:
 
 Reserved keywords, candidate list. Note this list is missing `import`, `proto`, `double`, `float`,
 and `bytes`, all of which the language already uses elsewhere in this document; the implementation
-reserves them too, along with `on_zero` and `fail` (10.2.1).
+reserves them too, along with `on_zero` and `fail` (10.2.1), `as` (10.3), and the `test`, `receiver`,
+`arg`, and `expect` keywords of the unit test syntax (25).
 
 ```text
 and
+as
 bool
 break
 case
@@ -534,33 +536,88 @@ Open Questions:
 
 ### 10.3 Numeric Conversions
 
-The spec must define:
+**Decided: no implicit conversions, and an explicit `as` operator.**
 
-- Implicit numeric widening.
-- Explicit casts.
-- Narrowing conversions.
-- Signed/unsigned conversions.
-- Float/integer conversions.
-
-Recommendation:
-
-- Keep implicit conversions minimal.
-- Require explicit conversion where precision, sign, or range may change.
-
-Decided:
+Normative Requirements:
 
 - There are **no** implicit numeric conversions. Both operands of a binary arithmetic or comparison
   operator must already have the same type, and a returned value must already have the declared
   return type. This is what makes the overflow rule in 10.1 well-defined: the width the result wraps
   to is never the product of a promotion the author did not write.
 - Integer literals are the single exception: a literal adopts the expected type at its use site when
-  the value fits, so `var total: int64 = 0;` needs no suffix or cast.
+  the value fits, so `var total: int64 = 0;` needs no suffix or conversion.
+- An explicit conversion is written `<expression> as <type>`.
+
+```protolang
+extend Order {
+    // quantity is int32 and unit_price_cents is int64, so one of them has to move.
+    fn line_total_cents() -> int64 {
+        return quantity as int64 * unit_price_cents;
+    }
+}
+```
+
+- `as` binds tighter than every binary operator and looser than a prefix operator, so
+  `a as int64 * b` is `(a as int64) * b`, and `-a as int32` negates in the source type and converts
+  the result. Conversions chain left to right.
+- The operand of a conversion carries no type expectation into itself. An integer literal in that
+  position takes its natural `int64` and a floating-point literal its natural `double`, so
+  `3000000000 as int32` is a narrowing conversion that wraps rather than a literal reported as out
+  of range.
+- Both the source and the target must be numeric scalar types: the four integer types, `float`, and
+  `double`. Anything else is `PL0075`, including `bool`, `string`, `bytes`, messages, and enums.
+  Whether an enum can convert to or from an integer is left open in 12, and proto3's open enums make
+  the reverse direction a question of its own.
+- A conversion to the type a value already has is permitted and produces the value unchanged. It
+  states nothing new, but it is not an error either.
+
+Conversion behavior:
+
+| Conversion | Result |
+|---|---|
+| integer to integer | The low bits: the value reduced modulo 2^N, where N is the target width. Consistent with 10.1, and the same rule whether or not signedness changes. |
+| integer to floating point | Rounded to nearest, ties to even. |
+| `float` to `double` | Exact. |
+| `double` to `float` | Rounded to nearest, ties to even; a magnitude too large to represent becomes an infinity. |
+| floating point to integer | Truncated toward zero, consistent with 10.2's division rule. A value outside the target's range clamps to that bound rather than wrapping, and NaN becomes zero. |
+
+The last row is the one that costs something, and the reason it is stated rather than inherited is
+that no two targets agree:
+
+| Target | Native out-of-range float to integer | Why the default is not enough |
+|---|---|---|
+| C# | Unspecified by the language. Saturates on current .NET, but throws under a checked context. | A consumer setting `CheckForOverflowUnderflow` converts a deliberate conversion into an `OverflowException`, and the language guarantees nothing about the unchecked result. |
+| C++ | **Undefined behavior.** | Not "whatever the hardware does": the optimizer may assume the value is in range. |
+| Python | Floors rather than truncating, and raises on NaN. | Neither the rounding direction nor the failure mode matches. |
+
+Saturation is chosen over wrapping because it is total, cheap to check, and produces the answer a
+reader expects from a value that is simply too large; wrapping a magnitude beyond 2^64 is also not
+meaningfully defined without arbitrary-precision arithmetic that no target has.
+
+Backend obligations:
+
+- **C#** emits `unchecked((T)x)` for integer targets, so neither the wrapping nor a consumer's
+  compiler flags are in question. Conversions producing a floating-point type are fully defined in
+  C# and unaffected by checked context, so a plain cast states everything. Floating point to integer
+  routes through a runtime helper that clamps explicitly.
+- **C++** emits `static_cast<T>(x)` for integer targets and for widening to floating point: C++20
+  defines the conversion to a signed type as two's complement (P0907R4), which the generated runtime
+  header already asserts. The two directions C++ leaves undefined -- floating point to integer, and
+  `double` to `float` -- route through runtime helpers. The `double` to `float` threshold is the
+  smallest magnitude that rounds to infinity rather than `FLT_MAX`, because doubles between the two
+  round down to `FLT_MAX`.
+- **Python** will need helpers for every row: it has no fixed-width integers, and its float to
+  integer conversion floors.
+
+Each conversion carries a behavior annotation in the typed IR, resolved by a single compile-time
+policy rather than hard-coded at each site, so the alternatives in the open question below are a
+front-end change and a backend change with no new plumbing.
 
 Open Question:
 
-- Explicit cast syntax is not yet designed. Until it exists, mixed-width arithmetic cannot be
-  written at all, which is a real gap: `int32 * int64` is currently a compile error with no
-  workaround.
+- Whether the conversion behaviors above should be selectable per project rather than fixed. The
+  same question applies to 10.1's overflow rule, and both are tracked together as compile-time
+  arithmetic policy.
 
 ## 11. Strings
 
@@ -588,25 +645,66 @@ Open Questions:
 
 ## 12. Enums
 
-The spec must define:
+**Decided: enum types and enum values are both named through the protobuf type universe.**
 
-- How protobuf enum values are referenced.
-- How unknown enum numeric values are handled.
-- Whether enums can be compared to integers.
-- Whether switch/case over enums is supported.
-
-Candidate syntax:
+An enum type can be named wherever a type is expected, and an enum value is named
+`<enum type>.<VALUE_NAME>`:
 
 ```protolang
-if order.status == OrderStatus.SHIPPED {
-    return true;
+extend Order {
+    fn is_shipped() -> bool {
+        return status == OrderStatus.SHIPPED;
+    }
+
+    fn shipped() -> OrderStatus {
+        return OrderStatus.SHIPPED;
+    }
 }
 ```
 
+Normative Requirements:
+
+- Both the type and the value are resolved by full name or by an unambiguous simple name, including
+  enums nested in messages. A simple name matching more than one type is `PL0074`; a name that is
+  not a value of the named enum is `PL0076`.
+- The value name is the one the `.proto` file declares, exactly as written. ProtoLang does not
+  re-spell it, even though both backends do.
+- A name that is in scope as a value wins over an enum type spelled the same way, so
+  `something.field` stays a field access. Adding an enum to a schema must not silently change what
+  an existing expression means.
+- Enum values are ordinary expressions, so they are equally available in a `test` fixture and in an
+  expectation. A fixture sets an enum field from a named value rather than from a nested block,
+  which is reserved for message fields.
+- Enums compare only for equality. Ordered comparison is rejected, because the numbers behind the
+  values are a wire detail rather than a ranking the schema author asked for.
+
+Backend obligations, because the two targets name a value in unrelated ways and neither spelling is
+derivable from the other:
+
+| ProtoLang | C# | C++ |
+|---|---|---|
+| `TopLevelStatus.TOP_LEVEL_STATUS_OK` | `TopLevelStatus.Ok` | `TOP_LEVEL_STATUS_OK` |
+| `Outer.Nested.NESTED_SOME` | `Outer.Types.Nested.Some` | `Outer_Nested_NESTED_SOME` |
+| `Outer.Inner.Deep.DEEP_NONE` | `Outer.Types.Inner.Types.Deep.None` | `Outer_Inner_Deep_DEEP_NONE` |
+
+- **C#** strips the enum's own name from the front of the value, ignoring case and underscores, and
+  PascalCases what is left. A value that does not carry the prefix keeps its whole name, and one
+  where stripping would leave a leading digit gains an underscore. Backends must reproduce this
+  exactly rather than approximate it: a near-miss names an identifier that does not exist, which
+  fails in the consumer's build rather than in this compiler.
+- **C++** keeps the declared spelling but places values at namespace scope, prefixing a nested
+  enum's values with the flattened enum type name and leaving a top-level enum's values bare.
+  protoc also emits a `static constexpr` member on the containing class, but the namespace-scope
+  constant is the one every enum has.
+- protobuf C++ enums additionally carry `_INT_MIN_SENTINEL_DO_NOT_USE_` values that are not part of
+  the schema and must never be emitted. They will matter again for `switch`.
+
 Open Questions:
 
-- Should enum exhaustiveness be checked?
+- Should enum exhaustiveness be checked? proto3 enums are open -- a field may legally hold a number
+  with no declared value -- so no switch over one is exhaustive at runtime regardless of the schema.
 - Should unknown enum values be representable?
+- Should an enum be convertible to or from an integer? 10.3 rejects the conversion for now.
 
 ## 13. Messages
 
@@ -1034,8 +1132,9 @@ time rather than emitting something whose semantics differ.
 | Virtual methods | No | No | — | Blocked on 17; both backends reject. |
 | Maps | No | No | — | Blocked on 14.2. |
 | Result/error returns | No | No | — | Blocked on 19. |
-| Explicit casts | No | No | — | Blocked on 10.3; no syntax yet. |
-| Conditionals and `while` | No | No | — | Parsed keywords are reserved but unimplemented. |
+| Explicit casts | Yes | Yes | — | `x as int64`; see 10.3 for the per-family rules. |
+| Enum types and values | Yes | Yes | — | Named per 12; both targets re-spell values differently. |
+| Conditionals and `while` | Yes | Yes | — | `if` / `else if` / `else`, `while`, `break`, `continue` (15). |
 | Proto2 presence | No | No | — | Blocked on 21.3. |
 | Proto3 optional | No | No | — | Blocked on 21.3. |
 
@@ -1467,11 +1566,13 @@ This section should be maintained as the authoritative list of open decisions.
 - ~~Integer overflow model.~~ Decided: wrapping (10.1).
 - ~~Division and modulo by zero.~~ Decided: mandatory `on_zero` clause, with `fail` for the case
   where no substitute value is correct (10.2.1). `Result` (19) is explicitly deferred, not blocked.
-- Explicit cast syntax, needed before mixed-width arithmetic is expressible (10.3).
+- ~~Explicit cast syntax.~~ Decided: `x as int64`, numeric scalars only (10.3).
+- ~~Numeric conversion rules.~~ Decided: integer targets wrap, floating point to integer
+  truncates and saturates with NaN mapping to zero (10.3).
 - Division by zero model.
-- Numeric conversion rules.
 - String indexing and comparison semantics.
-- Enum unknown-value behavior.
+- ~~How protobuf enum values are referenced.~~ Decided: `EnumType.VALUE_NAME` (12).
+- Enum unknown-value behavior, and whether an enum converts to or from an integer.
 - Message construction support.
 - Message equality semantics.
 - Repeated field mutation rules.
@@ -1512,3 +1613,9 @@ Use this table to record decisions as the language stabilizes.
 | 2026-08-25 | Testing | `expect fail` runs out of process, and the verdict is an equality check on the child's exit code (25.3) | A terminal failure cannot be observed from inside the process it ends; requiring one exact code stops an unrelated crash from passing as a deliberate stop | Draft |
 | 2026-08-25 | Error reporting | The `on_zero fail` path writes its diagnostic to standard error before terminating, in every backend | Spec 20 bans I/O in method bodies, but this is a fatal-error path rather than behavior, and how a host reports a termination is not something a portable diagnostic can rely on | Draft |
 | 2026-08-25 | Error handling | `on_zero fail` terminates through `Environment.Exit` / `std::_Exit` with exit code 70, not `FailFast` / `abort` (10.2.1) | Crash primitives invoke the platform's error reporting, so generated library code could raise a dialog or a debugger prompt; `abort` is also catchable through `SIGABRT` and so does not deliver the guarantee at all. A fixed code also makes the backends observably identical | Draft |
+| 2026-08-25 | Numeric conversions | Explicit conversions are written `x as int64`, between numeric scalar types only (10.3) | A postfix keyword is unambiguous against the existing grammar and reads as the plain pseudocode the language is meant to be; the alternatives collide with parenthesized expressions or with future message construction. Restricting to numeric scalars keeps the enum and bool questions separate rather than answering them by accident | Draft |
+| 2026-08-25 | Numeric conversions | Integer targets wrap; floating point to integer truncates toward zero, saturates at the target's bounds, and maps NaN to zero (10.3) | Wrapping matches 10.1, so a conversion and an overflow answer the same way. Saturation is total and cheap where wrapping a magnitude beyond 2^64 is not meaningfully defined, and it is the answer a reader expects from a value that is simply too large. Every target disagrees natively -- unspecified in C#, undefined behavior in C++, flooring in Python -- so the result had to be stated rather than inherited | Draft |
+| 2026-08-25 | Numeric conversions | Behavior annotations are resolved by one compile-time policy and stamped onto the typed IR, rather than decided at each emission site | Arithmetic policy is meant to become repository-tracked configuration; putting the answer on the IR keeps the module the whole contract a backend sees, and makes a new option a compile error at every emission site instead of a silently wrong default | Draft |
+| 2026-08-25 | Enums | Enum values are named `EnumType.VALUE_NAME`, resolved by full name or unambiguous simple name, with a value in scope winning over an enum type of the same name (12) | Enum types alone left the feature decorative: a value could be declared, passed, and returned but never compared against anything. Values winning over types means adding an enum to a schema cannot silently change what an existing expression means | Draft |
+| 2026-08-25 | Enums | Backends reproduce protoc's own value naming exactly: prefix-stripped PascalCase for C#, flattened namespace constants for C++ | The two spellings are unrelated and neither is derivable from the other. Approximating either emits an identifier that does not exist, which fails in the consumer's build rather than in this compiler, and only for the schemas nobody tested | Draft |
+| 2026-08-25 | Testing | A `test` fixture may set an enum field from a named value; only message fields require a nested block | An enum field is set from a constant, which is an ordinary expression. Rejecting it left enum behavior untestable, so the feature and its test path had to land together | Draft |

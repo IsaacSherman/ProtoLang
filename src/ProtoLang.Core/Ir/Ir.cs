@@ -182,6 +182,53 @@ public sealed record IrUnary(
     ArithmeticBehavior Behavior,
     SourceSpan Span) : IrExpression(ResultType, Span);
 
+/// <summary>
+/// A named protobuf enum constant, such as <c>TopLevelStatus.TOP_LEVEL_STATUS_OK</c>.
+/// </summary>
+/// <remarks>
+/// Not an <see cref="IrLiteral"/> carrying the number. The backends spell the constant by name, and
+/// the two targets name it in completely different shapes -- protoc strips the enum prefix and
+/// PascalCases for C#, and flattens nested enums into the namespace for C++ -- so the descriptor
+/// has to survive into the backend rather than being reduced to an integer here.
+/// </remarks>
+public sealed record IrEnumValue(EnumValueDescriptor Value, EnumPlType EnumType, SourceSpan Span)
+    : IrExpression(EnumType, Span);
+
+/// <summary>
+/// An explicit numeric conversion (spec 10.3). ProtoLang applies no implicit conversions, so every
+/// one of these was written by the author.
+/// </summary>
+/// <remarks>
+/// <see cref="Kind"/> is what the backends switch on, because the four conversion families need
+/// different treatment in each target and the pair of scalar kinds alone would make every emitter
+/// rediscover the classification.
+/// </remarks>
+public sealed record IrConversion(
+    IrExpression Operand,
+    ScalarType TargetType,
+    ConversionKind Kind,
+    ConversionBehavior Behavior,
+    SourceSpan Span) : IrExpression(TargetType, Span);
+
+/// <summary>The family a conversion belongs to, which is what decides how each backend spells it.</summary>
+public enum ConversionKind
+{
+    /// <summary>Source and target are the same type; the conversion states nothing new.</summary>
+    Identity,
+
+    /// <summary>Between integer types, including across signedness.</summary>
+    IntegerToInteger,
+
+    /// <summary>From an integer type to <c>float</c> or <c>double</c>.</summary>
+    IntegerToFloat,
+
+    /// <summary>Between <c>float</c> and <c>double</c>.</summary>
+    FloatToFloat,
+
+    /// <summary>From <c>float</c> or <c>double</c> to an integer type.</summary>
+    FloatToInteger,
+}
+
 public sealed record IrLiteral(object? Value, PlType LiteralType, SourceSpan Span)
     : IrExpression(LiteralType, Span);
 

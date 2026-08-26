@@ -8,6 +8,12 @@ package protolang.tests;
 enum TopLevelStatus {
   TOP_LEVEL_STATUS_UNKNOWN = 0;
   TOP_LEVEL_STATUS_OK = 1;
+
+  // The two cases protoc's C# prefix stripping does not apply. A value that does not carry the
+  // enum name keeps all of it, and one where stripping would leave a leading digit gains an
+  // underscore instead.
+  OTHER_RESULT = 2;
+  TOP_LEVEL_STATUS_2 = 3;
 }
 
 message Outer {
@@ -32,4 +38,9 @@ message Outer {
   float ratio = 6;
   double amount = 7;
   int64 count = 8;
+
+  // Narrower than count, so an expression mixing the two needs an explicit conversion.
+  int32 small_count = 9;
+  uint32 tally = 10;
+  uint64 big_tally = 11;
 }

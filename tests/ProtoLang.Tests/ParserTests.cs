@@ -306,4 +306,98 @@ public class ParserTests
 
         Assert.Contains(diagnostics, d => d.Code == "PL0010");
     }
+
+    private static Expression ParseSingleReturn(string expression, out DiagnosticBag diagnostics)
+    {
+        var statement = ParseSingleStatement("return " + expression + ";", out diagnostics);
+        return Assert.IsType<ReturnStatement>(statement).Value!;
+    }
+
+    [Fact]
+    public void ParsesACastToAScalarKeywordType()
+    {
+        var expression = ParseSingleReturn("a as int64", out var diagnostics);
+
+        Assert.Empty(diagnostics);
+
+        var cast = Assert.IsType<CastExpression>(expression);
+        Assert.Equal("int64", cast.TargetType.Name);
+        Assert.Equal("a", Assert.IsType<NameExpression>(cast.Operand).Name);
+    }
+
+    [Fact]
+    public void ParsesACastToAQualifiedTypeName()
+    {
+        var expression = ParseSingleReturn("a as pkg.Message", out var diagnostics);
+
+        Assert.Empty(diagnostics);
+        Assert.Equal("pkg.Message", Assert.IsType<CastExpression>(expression).TargetType.Name);
+    }
+
+    /// <summary>
+    /// A cast binds tighter than any binary operator, which is the whole point: the reason casts
+    /// exist is to make the operands of an arithmetic expression agree.
+    /// </summary>
+    [Fact]
+    public void ACastBindsTighterThanAnArithmeticOperator()
+    {
+        var expression = ParseSingleReturn("a as int64 * b", out var diagnostics);
+
+        Assert.Empty(diagnostics);
+
+        var product = Assert.IsType<BinaryExpression>(expression);
+        Assert.Equal(BinaryOperatorKind.Multiply, product.Operator);
+        Assert.IsType<CastExpression>(product.Left);
+        Assert.IsType<NameExpression>(product.Right);
+    }
+
+    /// <summary>
+    /// A cast binds looser than a prefix operator, so the negation happens in the source type and
+    /// the result is converted, not the other way round.
+    /// </summary>
+    [Fact]
+    public void ACastBindsLooserThanUnaryNegation()
+    {
+        var expression = ParseSingleReturn("-a as int32", out var diagnostics);
+
+        Assert.Empty(diagnostics);
+
+        var cast = Assert.IsType<CastExpression>(expression);
+        Assert.Equal(UnaryOperatorKind.Negate, Assert.IsType<UnaryExpression>(cast.Operand).Operator);
+    }
+
+    [Fact]
+    public void ParsesChainedCastsLeftToRight()
+    {
+        var expression = ParseSingleReturn("a as int32 as int64", out var diagnostics);
+
+        Assert.Empty(diagnostics);
+
+        var outer = Assert.IsType<CastExpression>(expression);
+        Assert.Equal("int64", outer.TargetType.Name);
+        Assert.Equal("int32", Assert.IsType<CastExpression>(outer.Operand).TargetType.Name);
+    }
+
+    /// <summary>
+    /// The on_zero fallback parses at unary precedence, which includes casts, so a trailing cast
+    /// applies to the fallback rather than to the quotient.
+    /// </summary>
+    [Fact]
+    public void ACastAfterAnOnZeroFallbackAppliesToTheFallback()
+    {
+        var expression = ParseSingleReturn("a / b on_zero c as int32", out var diagnostics);
+
+        Assert.Empty(diagnostics);
+
+        var division = Assert.IsType<BinaryExpression>(expression);
+        Assert.IsType<CastExpression>(division.OnZero!.Fallback);
+    }
+
+    [Fact]
+    public void ReportsAMissingTypeAfterAs()
+    {
+        ParseSingleReturn("a as 1", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Code == "PL0013");
+    }
 }

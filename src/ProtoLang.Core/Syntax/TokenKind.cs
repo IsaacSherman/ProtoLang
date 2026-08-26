@@ -14,6 +14,7 @@ public enum TokenKind
     // `float`, and `bytes` are absent from that list but already used elsewhere in the
     // spec, so they are reserved here too.
     And,
+    As,
     Bool,
     Break,
     Bytes,

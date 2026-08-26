@@ -46,8 +46,10 @@ public static class CSharpRuntime
         using (writer.Block($"namespace {NamespaceName}"))
         {
             writer.WriteLine("/// <summary>");
-            writer.WriteLine("/// Integer operations whose ProtoLang wrapping semantics C#'s <c>unchecked</c>");
-            writer.WriteLine("/// does not already provide.");
+            writer.WriteLine("/// Numeric operations whose ProtoLang semantics C#'s <c>unchecked</c> does not");
+            writer.WriteLine("/// already provide: division, which traps on MIN / -1 regardless of context, and");
+            writer.WriteLine("/// conversion from floating point to an integer, which the language leaves");
+            writer.WriteLine("/// unspecified when the value is out of range.");
             writer.WriteLine("/// </summary>");
             using (writer.Block("internal static class ProtoLangArithmetic"))
             {
@@ -75,6 +77,12 @@ public static class CSharpRuntime
                     writer.WriteLine();
                     EmitModuloOrFail(writer, type);
                 }
+
+                foreach (var target in FloatToIntegerTargets)
+                {
+                    writer.WriteLine();
+                    EmitFloatToInteger(writer, target);
+                }
             }
         }
 
@@ -88,6 +96,65 @@ public static class CSharpRuntime
         ("uint", false),
         ("ulong", false),
     ];
+
+    /// <summary>
+    /// Floating-point to integer conversion targets: the C# type, the helper name, and the two
+    /// range guards.
+    /// </summary>
+    /// <remarks>
+    /// The guards are not uniform, because the bound is not always representable as a
+    /// <c>double</c>. For the 32-bit types both bounds are exact, so a strict comparison is right:
+    /// a value just past <c>int.MaxValue</c> truncates to <c>int.MaxValue</c> anyway. For the
+    /// 64-bit types the positive bound is not exact -- the nearest <c>double</c> above
+    /// <c>long.MaxValue</c> is 2^63 -- so the guard has to be inclusive against that power of two
+    /// or the conversion would be handed a value it cannot represent.
+    /// </remarks>
+    private static readonly (string Type, string Method, string Low, string High)[] FloatToIntegerTargets =
+    [
+        ("int", "ToInt32", "value < int.MinValue", "value > int.MaxValue"),
+        ("long", "ToInt64", "value < -9223372036854775808.0", "value >= 9223372036854775808.0"),
+        ("uint", "ToUInt32", "value <= 0.0", "value > uint.MaxValue"),
+        ("ulong", "ToUInt64", "value <= 0.0", "value >= 18446744073709551616.0"),
+    ];
+
+    /// <summary>
+    /// Emits a saturating, truncating conversion from <c>double</c> to one integer type.
+    /// </summary>
+    /// <remarks>
+    /// C# leaves an out-of-range floating-point to integer conversion unspecified in an unchecked
+    /// context and throws in a checked one, so neither default is usable: the first is not a
+    /// portable semantic and the second is a property of the consumer's build. Writing the clamp
+    /// out makes the result the same in every target and under every compiler flag.
+    /// </remarks>
+    private static void EmitFloatToInteger(SourceWriter writer, (string Type, string Method, string Low, string High) target)
+    {
+        writer.WriteLine("/// <summary>");
+        writer.WriteLine($"/// Converts to <c>{target.Type}</c>, truncating toward zero and clamping to the");
+        writer.WriteLine("/// type's bounds. NaN converts to zero.");
+        writer.WriteLine("/// </summary>");
+        using (writer.Block($"public static {target.Type} {target.Method}(double value)"))
+        {
+            using (writer.Block("if (double.IsNaN(value))"))
+            {
+                writer.WriteLine("return 0;");
+            }
+
+            writer.WriteLine();
+            using (writer.Block($"if ({target.Low})"))
+            {
+                writer.WriteLine($"return {target.Type}.MinValue;");
+            }
+
+            writer.WriteLine();
+            using (writer.Block($"if ({target.High})"))
+            {
+                writer.WriteLine($"return {target.Type}.MaxValue;");
+            }
+
+            writer.WriteLine();
+            writer.WriteLine($"return unchecked(({target.Type})value);");
+        }
+    }
 
     /// <summary>
     /// Prefix of the line the fail path writes to standard error.
