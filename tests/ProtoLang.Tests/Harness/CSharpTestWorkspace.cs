@@ -39,6 +39,13 @@ internal sealed class CSharpTestWorkspace
 
     public string ResultsDirectory => Path.Combine(Directory, "TestResults");
 
+    /// <summary>
+    /// Adopts an existing directory instead of creating one, for a project the compiler's own
+    /// scaffolding wrote rather than <see cref="WriteProjectFiles"/>. Only <see cref="RunTests"/>
+    /// and <see cref="Build"/> are meaningful in that mode.
+    /// </summary>
+    public static CSharpTestWorkspace At(string directory) => new(directory);
+
     public static CSharpTestWorkspace Create(string label)
     {
         var directory = Path.Combine(Path.GetTempPath(), "protolang-" + label, Guid.NewGuid().ToString("N"));

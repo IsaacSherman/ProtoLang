@@ -80,6 +80,57 @@ internal static class Toolchain
             RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "dotnet.exe" : "dotnet");
     }
 
+    /// <summary>
+    /// Locates cmake, which the generated C++ test project is built with. Visual Studio ships one
+    /// but does not put it on PATH, so an otherwise fully equipped Windows machine would skip.
+    /// </summary>
+    public static string? LocateCMake()
+    {
+        var onPath = ProcessRunner.FindOnPath(
+            RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cmake.exe" : "cmake");
+
+        if (onPath is not null)
+        {
+            return onPath;
+        }
+
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return null;
+        }
+
+        foreach (var candidate in VisualStudioCMakeCandidates())
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> VisualStudioCMakeCandidates()
+    {
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        string[] versions = ["18", "2022", "17"];
+        string[] editions = ["Community", "BuildTools", "Professional", "Enterprise"];
+
+        foreach (var root in new[] { programFiles, programFilesX86 }.Where(root => !string.IsNullOrEmpty(root)))
+        {
+            foreach (var version in versions)
+            {
+                foreach (var edition in editions)
+                {
+                    yield return Path.Combine(
+                        root, "Microsoft Visual Studio", version, edition, "Common7", "IDE",
+                        "CommonExtensions", "Microsoft", "CMake", "CMake", "bin", "cmake.exe");
+                }
+            }
+        }
+    }
+
     public static CppCompiler? LocateCppCompiler()
     {
         if (ProcessRunner.FindOnPath("clang++") is { } clang)

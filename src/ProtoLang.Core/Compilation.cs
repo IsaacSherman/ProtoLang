@@ -1,3 +1,4 @@
+using Google.Protobuf.Reflection;
 using ProtoLang.Binding;
 using ProtoLang.Diagnostics;
 using ProtoLang.Ir;
@@ -5,9 +6,15 @@ using ProtoLang.Syntax;
 
 namespace ProtoLang;
 
+/// <param name="Descriptors">
+/// Every protobuf file backing this compilation, including transitively imported ones, in
+/// dependency order. protoc is asked for <c>--include_imports</c>, so this is the whole closure and
+/// not only the schemas the ProtoLang source named. Empty when binding did not get that far.
+/// </param>
 public sealed record CompilationResult(
     IrModule? Module,
     CompilationUnit? SyntaxTree,
+    IReadOnlyList<FileDescriptor> Descriptors,
     DiagnosticBag Diagnostics)
 {
     public bool Success => Module is not null && !Diagnostics.HasErrors;
@@ -42,7 +49,7 @@ public static class Compilation
 
         if (diagnostics.HasErrors)
         {
-            return new CompilationResult(null, unit, diagnostics);
+            return new CompilationResult(null, unit, [], diagnostics);
         }
 
         var searchPaths = BuildSearchPaths(sourcePath, includePaths);
@@ -55,7 +62,7 @@ public static class Compilation
                 "A ProtoLang file must import at least one protobuf schema.",
                 unit.Span,
                 "Add an 'import proto \"your.proto\";' declaration (spec 5.2).");
-            return new CompilationResult(null, unit, diagnostics);
+            return new CompilationResult(null, unit, [], diagnostics);
         }
 
         var protoFiles = new List<string>();
@@ -77,7 +84,7 @@ public static class Compilation
 
         if (diagnostics.HasErrors)
         {
-            return new CompilationResult(null, unit, diagnostics);
+            return new CompilationResult(null, unit, [], diagnostics);
         }
 
         IReadOnlyList<Google.Protobuf.Reflection.FileDescriptor> descriptors;
@@ -93,15 +100,27 @@ public static class Compilation
                 "protobuf schema could not be loaded",
                 ex.Message,
                 unit.Imports.Count > 0 ? unit.Imports[0].Span : unit.Span);
-            return new CompilationResult(null, unit, diagnostics);
+            return new CompilationResult(null, unit, [], diagnostics);
         }
 
         var module = new Binder(descriptors, diagnostics).Bind(unit);
 
         return diagnostics.HasErrors
-            ? new CompilationResult(null, unit, diagnostics)
-            : new CompilationResult(module, unit, diagnostics);
+            ? new CompilationResult(null, unit, descriptors, diagnostics)
+            : new CompilationResult(module, unit, descriptors, diagnostics);
     }
+
+    /// <summary>
+    /// The directories an <c>import proto</c> path is resolved against, in order: the given include
+    /// paths, then the source file's own directory.
+    /// </summary>
+    /// <remarks>
+    /// Public because callers that need to say where a schema came from -- test project scaffolding
+    /// has to tell a build system the proto root -- must resolve imports the same way the compiler
+    /// did. Reimplementing the fallback rule outside this file is how the two drift apart.
+    /// </remarks>
+    public static IReadOnlyList<string> GetSearchPaths(string sourcePath, IReadOnlyList<string> includePaths)
+        => BuildSearchPaths(sourcePath, includePaths);
 
     private static List<string> BuildSearchPaths(string sourcePath, IReadOnlyList<string> includePaths)
     {
