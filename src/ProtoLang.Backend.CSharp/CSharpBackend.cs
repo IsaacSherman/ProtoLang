@@ -24,7 +24,7 @@ namespace ProtoLang.Backend.CSharp;
 /// property of the generated code rather than of the consumer's build.
 /// </para>
 /// </remarks>
-public sealed class CSharpBackend : ITestBackend
+public sealed class CSharpBackend : ITestProjectScaffold
 {
     private static readonly HashSet<string> ReservedWords = new(StringComparer.Ordinal)
     {
@@ -161,6 +161,11 @@ public sealed class CSharpBackend : ITestBackend
             ]
             : [new GeneratedFile(fileName, writer.ToString())];
     }
+
+    public IReadOnlyList<GeneratedFile> EmitTestProject(
+        ScaffoldOptions options,
+        DiagnosticBag diagnostics)
+        => [new GeneratedFile(CSharpTestProject.FileName, CSharpTestProject.Build(options))];
 
     private static void WriteHeader(SourceWriter writer, BackendOptions options)
     {

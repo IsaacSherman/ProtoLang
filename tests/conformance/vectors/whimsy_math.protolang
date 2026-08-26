@@ -1,0 +1,356 @@
+// Conformance vectors for a slightly larger ProtoLang model.
+//
+// These are intentionally less atomic than most vectors. They exercise protobuf object fixtures,
+// repeated message fields, receiver method calls, arguments, mixed integer widths, explicit casts,
+// float/double conversion, integer wraparound, on_zero fallbacks, strings, booleans, and compound
+// control flow in the same generated test project.
+
+import proto "conformance.proto";
+
+extend WhimsyIngredient {
+    fn sparkle_score(scale: int64) -> int64 {
+        var base: int64 = sparkle * (fizz as int64);
+        var shimmer_bonus: int64 = shimmer as int64 % scale on_zero 0;
+        var moon_penalty: int64 = moon_dust as int64 / scale on_zero 0;
+
+        if cursed {
+            return base - shimmer_bonus - moon_penalty;
+        } else {
+            return base + shimmer_bonus - moon_penalty;
+        }
+    }
+
+    fn wrap_stamp() -> int32 {
+        return (moon_dust as int32 + fizz) * 3;
+    }
+
+    fn buoyancy_whole() -> int64 {
+        var mixed: double = volatility + lift as double;
+        return mixed as int64;
+    }
+}
+
+extend WhimsyCauldronCase {
+    fn total_score() -> int64 {
+        var total: int64 = bias;
+
+        for ingredient in ingredients {
+            if ingredient.name == "skip" {
+                continue;
+            }
+
+            if ingredient.name == "stop" {
+                break;
+            }
+
+            var scale: int64 = divisor;
+            if ingredient.cursed {
+                scale = scale - 1;
+            }
+
+            total = total + ingredient.sparkle_score(scale);
+        }
+
+        return total;
+    }
+
+    fn stamp_hash() -> int32 {
+        var total: uint32 = mask as uint32;
+
+        for ingredient in ingredients {
+            var stamp: uint32 = ingredient.wrap_stamp() as uint32;
+            total = (total + stamp) * 16777619 as uint32;
+        }
+
+        return total as int32;
+    }
+
+    fn storm_index() -> double {
+        var total: double = drift;
+
+        for ingredient in ingredients {
+            total = total + ingredient.volatility * (ingredient.lift as double);
+        }
+
+        return total / (gust as double);
+    }
+
+    fn clipped_drift() -> int64 {
+        var cubed: double = drift * drift * drift;
+        return cubed as int64;
+    }
+
+    fn settled() -> bool {
+        return total_score() >= 0
+            and (storm_index() > 1.0 or gate == 0)
+            and not (mask as int64 == -1);
+    }
+}
+
+test WhimsyIngredient.sparkle_score "adds shimmer and subtracts moon dust for an ordinary ingredient" {
+    receiver {
+        sparkle = 12;
+        fizz = 7;
+        shimmer = 29;
+        moon_dust = 14;
+    }
+
+    arg scale = 5;
+
+    expect return 86;
+}
+
+test WhimsyIngredient.sparkle_score "cursed ingredients subtract the shimmer bonus too" {
+    receiver {
+        sparkle = 12;
+        fizz = 7;
+        shimmer = 29;
+        moon_dust = 14;
+        cursed = true;
+    }
+
+    arg scale = 5;
+
+    expect return 78;
+}
+
+test WhimsyIngredient.sparkle_score "zero scale takes the on_zero fallbacks" {
+    receiver {
+        sparkle = 3;
+        fizz = 4;
+        shimmer = 99;
+        moon_dust = 99;
+    }
+
+    arg scale = 0;
+
+    expect return 12;
+}
+
+test WhimsyIngredient.wrap_stamp "low bits survive a uint64 to int32 cast before wrapping multiplication" {
+    receiver {
+        fizz = 1073741824;
+        moon_dust = 4294967295;
+    }
+
+    expect return -1073741827;
+}
+
+test WhimsyIngredient.buoyancy_whole "float and double arithmetic truncates toward zero" {
+    receiver {
+        volatility = -3.75;
+        lift = 1.25;
+    }
+
+    expect return -2;
+}
+
+test WhimsyCauldronCase.total_score "walks repeated objects with continue, break, and method calls" {
+    receiver {
+        bias = 10;
+        divisor = 5;
+
+        ingredients {
+            name = "first";
+            sparkle = 12;
+            fizz = 7;
+            shimmer = 29;
+            moon_dust = 14;
+        }
+
+        ingredients {
+            name = "skip";
+            sparkle = 999;
+            fizz = 999;
+            shimmer = 999;
+            moon_dust = 999;
+        }
+
+        ingredients {
+            name = "cursed";
+            sparkle = 4;
+            fizz = 6;
+            shimmer = 11;
+            moon_dust = 8;
+            cursed = true;
+        }
+
+        ingredients {
+            name = "stop";
+            sparkle = 1000;
+            fizz = 1000;
+            shimmer = 1000;
+            moon_dust = 1000;
+        }
+
+        // Sits after the "stop" marker so 'break' and 'continue' cannot agree: reaching this
+        // ingredient would add 1003 to the total.
+        ingredients {
+            name = "ghost";
+            sparkle = 500;
+            fizz = 2;
+            shimmer = 3;
+            moon_dust = 4;
+        }
+    }
+
+    expect return 115;
+}
+
+test WhimsyCauldronCase.stamp_hash "hashing stamps exercises unsigned locals and low-bit casts" {
+    receiver {
+        mask = 2166136261;
+
+        ingredients {
+            fizz = 7;
+            moon_dust = 5;
+        }
+
+        ingredients {
+            fizz = 1;
+            moon_dust = 4294967295;
+        }
+    }
+
+    expect return 1775226513;
+}
+
+test WhimsyCauldronCase.storm_index "repeated float and double work lands on the same fraction" {
+    receiver {
+        drift = 1.0;
+        gust = 2.0;
+
+        ingredients {
+            volatility = 3.0;
+            lift = 0.5;
+        }
+
+        ingredients {
+            volatility = -1.0;
+            lift = 2.0;
+        }
+    }
+
+    expect return 0.25;
+}
+
+test WhimsyCauldronCase.clipped_drift "an in-range drift is cubed and truncated" {
+    receiver {
+        drift = 3.0;
+    }
+
+    expect return 27;
+}
+
+test WhimsyCauldronCase.clipped_drift "large positive double-to-int64 conversion saturates" {
+    receiver {
+        drift = 10000000.0;
+    }
+
+    expect return 9223372036854775807;
+}
+
+test WhimsyCauldronCase.clipped_drift "large negative double-to-int64 conversion saturates" {
+    receiver {
+        drift = -10000000.0;
+    }
+
+    expect return -9223372036854775807 - 1;
+}
+
+// The three settled cases below cover the disjunction one operand at a time. A single case with
+// both operands true would leave each of them individually removable without failing anything.
+
+test WhimsyCauldronCase.settled "a stormy cauldron settles even with the gate shut" {
+    receiver {
+        bias = 10;
+        divisor = 5;
+        mask = 123;
+        drift = 1.0;
+        gust = 2.0;
+
+        // Shut, so only storm_index() can satisfy the middle clause.
+        gate = 7;
+
+        ingredients {
+            name = "first";
+            sparkle = 12;
+            fizz = 7;
+            shimmer = 29;
+            moon_dust = 14;
+            volatility = 3.0;
+            lift = 0.5;
+        }
+    }
+
+    expect return true;
+}
+
+test WhimsyCauldronCase.settled "an open gate settles a calm cauldron" {
+    receiver {
+        bias = 10;
+        divisor = 5;
+        mask = 123;
+
+        // Calm, so storm_index() is 0.0 and only the open gate can satisfy the middle clause.
+        drift = 0.0;
+        gust = 2.0;
+        gate = 0;
+
+        ingredients {
+            name = "calm";
+            sparkle = 1;
+            fizz = 1;
+            volatility = 0.0;
+            lift = 0.0;
+        }
+    }
+
+    expect return true;
+}
+
+test WhimsyCauldronCase.settled "a cauldron in debt is unsettled however well it storms" {
+    receiver {
+        // Deep enough in the red that the one ingredient cannot climb back out, so the score
+        // clause decides the result on its own while the other two stay true.
+        bias = -1000;
+        divisor = 5;
+        mask = 123;
+        drift = 1.0;
+        gust = 2.0;
+        gate = 0;
+
+        ingredients {
+            name = "first";
+            sparkle = 12;
+            fizz = 7;
+            shimmer = 29;
+            moon_dust = 14;
+            volatility = 3.0;
+            lift = 0.5;
+        }
+    }
+
+    expect return false;
+}
+
+test WhimsyCauldronCase.settled "a calm cauldron behind a shut gate is unsettled" {
+    receiver {
+        bias = 10;
+        divisor = 5;
+        mask = 123;
+        drift = 0.0;
+        gust = 2.0;
+        gate = 7;
+
+        ingredients {
+            name = "calm";
+            sparkle = 1;
+            fizz = 1;
+            volatility = 0.0;
+            lift = 0.0;
+        }
+    }
+
+    expect return false;
+}

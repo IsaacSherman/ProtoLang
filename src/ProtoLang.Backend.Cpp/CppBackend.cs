@@ -17,7 +17,7 @@ namespace ProtoLang.Backend.Cpp;
 /// identically whether the protobuf codegen is regenerated or vendored. Declarations are emitted
 /// ahead of definitions so methods may call one another in any order.
 /// </remarks>
-public sealed class CppBackend : ITestBackend
+public sealed class CppBackend : ITestProjectScaffold
 {
     private static readonly HashSet<string> ReservedWords = new(StringComparer.Ordinal)
     {
@@ -159,6 +159,11 @@ public sealed class CppBackend : ITestBackend
 
         return [new GeneratedFile(baseName + ".tests.cc", writer.ToString())];
     }
+
+    public IReadOnlyList<GeneratedFile> EmitTestProject(
+        ScaffoldOptions options,
+        DiagnosticBag diagnostics)
+        => [new GeneratedFile(CppTestProject.FileName, CppTestProject.Build(options))];
 
     private static void WriteTestHeader(
         SourceWriter writer,

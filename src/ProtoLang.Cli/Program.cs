@@ -18,6 +18,12 @@ if (!File.Exists(options.SourcePath))
     return 2;
 }
 
+if (options.Scaffold && options.TestOutputDirectory is null)
+{
+    Console.Error.WriteLine("error: --scaffold needs --test-out, because it writes the build file beside the generated tests");
+    return 2;
+}
+
 var result = Compilation.Compile(options.SourcePath, options.IncludePaths);
 PrintDiagnostics(result.Diagnostics);
 
@@ -74,6 +80,24 @@ foreach (var backend in backends)
             File.WriteAllText(path, file.Contents);
             written.Add(path);
         }
+
+        if (options.Scaffold && backend is ITestProjectScaffold scaffold)
+        {
+            var scaffoldOptions = ScaffoldOptions.Create(
+                options.SourcePath,
+                options.IncludePaths,
+                result.Descriptors,
+                outputDirectory,
+                testOutputDirectory,
+                testFiles.Select(file => file.RelativePath).ToList());
+
+            foreach (var file in scaffold.EmitTestProject(scaffoldOptions, backendDiagnostics))
+            {
+                var path = Path.Combine(testOutputDirectory, file.RelativePath);
+                File.WriteAllText(path, file.Contents);
+                written.Add(path);
+            }
+        }
     }
 }
 
@@ -107,6 +131,7 @@ internal sealed record CommandLineOptions(
     IReadOnlyList<string> IncludePaths,
     string OutputDirectory,
     string? TestOutputDirectory,
+    bool Scaffold,
     IReadOnlySet<string> Targets)
 {
     private static readonly string[] KnownTargets = ["csharp", "cpp"];
@@ -117,6 +142,7 @@ internal sealed record CommandLineOptions(
         var includePaths = new List<string>();
         var outputDirectory = "generated";
         string? testOutputDirectory = null;
+        var scaffold = false;
         var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = 0; i < args.Length; i++)
@@ -153,6 +179,10 @@ internal sealed record CommandLineOptions(
                     }
 
                     testOutputDirectory = args[i];
+                    break;
+
+                case "--scaffold":
+                    scaffold = true;
                     break;
 
                 case "-t" or "--target":
@@ -211,7 +241,8 @@ internal sealed record CommandLineOptions(
             }
         }
 
-        return new CommandLineOptions(sourcePath, includePaths, outputDirectory, testOutputDirectory, targets);
+        return new CommandLineOptions(
+            sourcePath, includePaths, outputDirectory, testOutputDirectory, scaffold, targets);
     }
 
     public static void PrintUsage()
@@ -227,6 +258,9 @@ internal sealed record CommandLineOptions(
         Console.Error.WriteLine("                           Each backend writes to <dir>/<target>/.");
         Console.Error.WriteLine("  --test-out <dir>         Optional generated test output directory.");
         Console.Error.WriteLine("                           Each test backend writes to <dir>/<target>/.");
+        Console.Error.WriteLine("  --scaffold               Also write the build file that builds and runs the");
+        Console.Error.WriteLine("                           generated tests: a .csproj for csharp, a CMakeLists.txt");
+        Console.Error.WriteLine("                           for cpp. Requires --test-out.");
         Console.Error.WriteLine("  -t, --target <list>      Comma-separated targets: csharp, cpp (default: all).");
         Console.Error.WriteLine("  -h, --help               Show this help.");
         Console.Error.WriteLine();
