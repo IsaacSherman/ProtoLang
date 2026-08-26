@@ -252,6 +252,45 @@ public class ScaffoldTests
     }
 
     /// <summary>
+    /// A source that extends only well-known types has no schemas of its own, because those ship
+    /// precompiled and are filtered out. The schema target must then be omitted entirely: an
+    /// empty one declares a library with no sources and hands protobuf_generate no .proto files,
+    /// which protobuf's own CMake helper rejects at configure time.
+    /// </summary>
+    [Fact]
+    public void TheEmittedCMakeProjectOmitsTheSchemaTargetWhenThereAreNoSchemas()
+    {
+        var cmake = CppTestProject.Build(CppOptions() with { ProtoFiles = [] });
+
+        Assert.DoesNotContain("add_library", cmake, StringComparison.Ordinal);
+        Assert.DoesNotContain("protobuf_generate", cmake, StringComparison.Ordinal);
+
+        // The driver still needs the well-known type headers, which arrive with protobuf itself.
+        Assert.Contains(
+            "target_link_libraries(simpleScript_tests PRIVATE protobuf::libprotobuf)",
+            cmake,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The C# side survives the same case -- an empty item group builds fine -- but should not carry
+    /// a comment promising a protoc run that has nothing to do.
+    /// </summary>
+    [Fact]
+    public void TheEmittedCSharpProjectOmitsTheProtobufGroupWhenThereAreNoSchemas()
+    {
+        var project = CSharpTestProject.Build(Options() with { ProtoFiles = [] });
+
+        Assert.Empty(XDocument.Parse(project).Descendants("Protobuf"));
+        Assert.DoesNotContain("Grpc.Tools runs protoc", project, StringComparison.Ordinal);
+
+        // Google.Protobuf still has to be referenced: it is where the well-known types come from.
+        Assert.Contains(
+            XDocument.Parse(project).Descendants("PackageReference"),
+            element => (string?)element.Attribute("Include") == "Google.Protobuf");
+    }
+
+    /// <summary>
     /// A schema imported by another schema still has code generated against it, so the build file
     /// has to name it too. Listing only the source's own <c>import proto</c> declarations produces a
     /// project that generates a type it never defines, which fails at build time rather than here.

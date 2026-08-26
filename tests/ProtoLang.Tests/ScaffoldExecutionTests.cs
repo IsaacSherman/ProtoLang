@@ -104,6 +104,58 @@ public class ScaffoldExecutionTests
             + Environment.NewLine + ctest.Output);
     }
 
+    /// <summary>
+    /// A project whose ProtoLang source extends only well-known types has no schemas to generate,
+    /// and must still configure. Content assertions cannot show this: the failure is protobuf's own
+    /// CMake helper rejecting a target with no .proto files, which only cmake itself reports.
+    /// </summary>
+    /// <remarks>
+    /// Built from a stub driver rather than from a real compilation, so it does not depend on protoc
+    /// being able to resolve <c>google/protobuf/*.proto</c> in the first place -- which is a separate
+    /// open problem, and would otherwise make this test skip on exactly the toolchain it targets.
+    /// </remarks>
+    [Fact]
+    public void TheEmittedCMakeProjectConfiguresWithNoSchemasOfItsOwn()
+    {
+        var cmake = Toolchain.LocateCMake();
+        if (cmake is null)
+        {
+            Assert.Skip("No cmake found. Install CMake or Visual Studio's C++ workload.");
+        }
+
+        var protobuf = Toolchain.LocateProtobufCpp();
+        if (protobuf is null)
+        {
+            Assert.Skip(
+                "No protobuf C++ install found. Run 'vcpkg install' or set "
+                + "PROTOLANG_PROTOBUF_CPP_INCLUDE to the include directory.");
+        }
+
+        if (Toolchain.LocateCppCompiler() is null)
+        {
+            Assert.Skip("No C++ compiler found. Install clang++, g++, or Visual Studio C++ Build Tools.");
+        }
+
+        var directory = Path.Combine(
+            Path.GetTempPath(), "protolang-scaffold-noschema", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(directory, "behavior"));
+
+        File.WriteAllText(Path.Combine(directory, "stub.tests.cc"), "int main() { return 0; }" + Environment.NewLine);
+        File.WriteAllText(
+            Path.Combine(directory, CppTestProject.FileName),
+            CppTestProject.Build(new ScaffoldOptions("behavior", [], ["stub.tests.cc"])));
+
+        var configure = RunCMake(
+            cmake, directory,
+            "-S", directory,
+            "-B", Path.Combine(directory, "build"),
+            "-DCMAKE_PREFIX_PATH=" + Directory.GetParent(protobuf.IncludeDirectory)!.FullName);
+
+        Assert.True(
+            configure.ExitCode == 0,
+            $"cmake rejected a project with no schemas of its own.{Environment.NewLine}{configure.Output}");
+    }
+
     private static ProcessResult RunCMake(string cmake, string workingDirectory, params string[] arguments)
         => RunTool(cmake, workingDirectory, arguments);
 

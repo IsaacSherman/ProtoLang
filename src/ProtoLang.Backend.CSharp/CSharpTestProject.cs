@@ -100,22 +100,29 @@ public static class CSharpTestProject
             $"    <Compile Include=\"{Escape(Join(options.BehaviorDirectory, "**/*.cs"))}\" />");
         builder.AppendLine("  </ItemGroup>");
         builder.AppendLine();
-        builder.AppendLine("  <!--");
-        builder.AppendLine("    Protobuf message classes. Grpc.Tools runs protoc during the build, so there is no");
-        builder.AppendLine("    separate protoc step to remember and no generated .cs to keep in sync by hand.");
-        builder.AppendLine("  -->");
-        builder.AppendLine("  <ItemGroup>");
-
-        foreach (var proto in options.ProtoFiles)
+        // A source that extends only well-known types has nothing to generate: those ship
+        // precompiled in Google.Protobuf and are filtered out of the schema list. An empty item
+        // group builds fine, but a comment promising a protoc run above one would be a lie.
+        if (options.ProtoFiles.Count > 0)
         {
-            var include = Escape(Join(proto.ProtoRoot, proto.RelativePath));
-            var root = Escape(Normalize(proto.ProtoRoot));
-            builder.AppendLine(
-                $"    <Protobuf Include=\"{include}\" ProtoRoot=\"{root}\" GrpcServices=\"None\" />");
+            builder.AppendLine("  <!--");
+            builder.AppendLine("    Protobuf message classes. Grpc.Tools runs protoc during the build, so there is no");
+            builder.AppendLine("    separate protoc step to remember and no generated .cs to keep in sync by hand.");
+            builder.AppendLine("  -->");
+            builder.AppendLine("  <ItemGroup>");
+
+            foreach (var proto in options.ProtoFiles)
+            {
+                var include = Escape(Join(proto.ProtoRoot, proto.RelativePath));
+                var root = Escape(Normalize(proto.ProtoRoot));
+                builder.AppendLine(
+                    $"    <Protobuf Include=\"{include}\" ProtoRoot=\"{root}\" GrpcServices=\"None\" />");
+            }
+
+            builder.AppendLine("  </ItemGroup>");
+            builder.AppendLine();
         }
 
-        builder.AppendLine("  </ItemGroup>");
-        builder.AppendLine();
         builder.AppendLine("</Project>");
 
         return builder.ToString();

@@ -72,7 +72,14 @@ public static class CppTestProject
         builder.AppendLine("enable_testing()");
         builder.AppendLine();
 
-        EmitSchemaTarget(builder, options);
+        // A source that extends only well-known types leaves nothing to generate: those ship
+        // precompiled in libprotobuf and are filtered out of the schema list. Emitting the target
+        // anyway would declare a library with no sources and hand protobuf_generate no .proto
+        // files, which is a configure-time error rather than something the build survives.
+        if (options.ProtoFiles.Count > 0)
+        {
+            EmitSchemaTarget(builder, options);
+        }
 
         // Only the C++ sources: a test backend may emit support files alongside its drivers, and
         // an executable per support file would neither compile nor mean anything.
@@ -122,18 +129,34 @@ public static class CppTestProject
     private static void EmitDriver(StringBuilder builder, ScaffoldOptions options, string driver)
     {
         var target = TargetName(driver);
+        var hasSchemaTarget = options.ProtoFiles.Count > 0;
 
         builder.AppendLine($"add_executable({target} {Quote(Normalize(driver))})");
         builder.AppendLine();
-        builder.AppendLine("# Three include roots, all load-bearing: this directory for the driver, the behavior");
-        builder.AppendLine("# directory because the driver includes its ProtoLang header unqualified, and the");
-        builder.AppendLine($"# binary directory, which {SchemaTarget} supplies for the generated .pb.h files.");
+
+        if (hasSchemaTarget)
+        {
+            builder.AppendLine("# Three include roots, all load-bearing: this directory for the driver, the behavior");
+            builder.AppendLine("# directory because the driver includes its ProtoLang header unqualified, and the");
+            builder.AppendLine($"# binary directory, which {SchemaTarget} supplies for the generated .pb.h files.");
+        }
+        else
+        {
+            builder.AppendLine("# Two include roots: this directory for the driver, and the behavior directory");
+            builder.AppendLine("# because the driver includes its ProtoLang header unqualified. Nothing is");
+            builder.AppendLine("# generated here, so there is no binary directory to add; the well-known type");
+            builder.AppendLine("# headers arrive with protobuf::libprotobuf.");
+        }
+
         builder.AppendLine($"target_include_directories({target} PRIVATE");
         builder.AppendLine("    \"${CMAKE_CURRENT_SOURCE_DIR}\"");
         builder.AppendLine($"    {Quote(BehaviorInclude(options.BehaviorDirectory))}");
         builder.AppendLine(")");
         builder.AppendLine();
-        builder.AppendLine($"target_link_libraries({target} PRIVATE {SchemaTarget})");
+        builder.AppendLine(
+            $"target_link_libraries({target} PRIVATE "
+            + (hasSchemaTarget ? SchemaTarget : "protobuf::libprotobuf")
+            + ")");
         builder.AppendLine();
         builder.AppendLine("# The driver runs every test it was generated with and returns non-zero if any");
         builder.AppendLine("# failed, so one ctest entry per driver reports the whole file.");
