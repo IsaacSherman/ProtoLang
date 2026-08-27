@@ -12,6 +12,9 @@ to agree with it.
 tests/conformance/
   protos/conformance.proto     one schema, shared by every vector
   vectors/*.protolang          the vectors themselves
+  vectors/<policy>/            vectors compiled under a non-default language policy
+    protolang.config.xml       what makes them non-default
+    *.protolang
 ```
 
 The harness lives in [`tests/ProtoLang.Tests/Conformance/`](../ProtoLang.Tests/Conformance) and runs
@@ -46,8 +49,16 @@ serialization format of their own.
    the receiver, so two vectors extending the same message would emit that class twice.
    `ConformanceVectorTests.EveryVectorExtendsItsOwnMessage` enforces this.
 2. Drop a `.protolang` file into `vectors/`. It is discovered automatically; nothing needs
-   registering.
+   registering. The search is recursive, so a vector may live in a subdirectory.
 3. Run `dotnet test ProtoLang.slnx`.
+
+To pin behavior under a non-default language policy, put the vector in a subdirectory with its own
+`protolang.config.xml`. Config discovery walks up from the source file and stops at the nearest
+match, so the file governs that directory and nothing else -- which means the corpus exercises real
+discovery rather than a hook that exists only for tests. `vectors/checked/` and
+`vectors/saturating/` are the two that do this today. Vectors compiled under different policies
+still build into the one C# assembly and the one C++ link, because both generated runtime files
+carry every policy and are therefore identical whichever one was selected.
 
 Two constraints are worth knowing before writing one:
 
@@ -88,6 +99,9 @@ failing. A fully equipped machine should report no skips.
 | `enum_types` | Enum-typed locals, parameters, and returns, and named enum values in comparisons, returns, branches, and fixtures (spec 12) |
 | `casts` | Explicit conversions: mixed-width arithmetic, integer narrowing and signedness, int-to-float rounding, and float-to-integer truncation, saturation, and NaN (spec 10.3) |
 | `whimsy_math` | A larger end-to-end fixture with repeated protobuf objects, method calls, arguments, mixed numeric widths, explicit casts, unsigned wrapping, float/double math, strings, booleans, and compound control flow |
+| `presence` | `has` over the three presence kinds a proto3 schema can carry, every guard shape, and the cases that separate explicit presence from a comparison against the default (spec 8.4, 13.1) |
+| `checked/checked_arithmetic` | The checked overflow policy: overflow at each width terminates with exit code 70, and `MIN % -1` does not (spec 10.1, 10.4) |
+| `saturating/saturating_arithmetic` | The saturating overflow policy: clamping at both bounds for every operation and width (spec 10.1, 10.4) |
 
 ## Adding a backend
 
@@ -110,8 +124,11 @@ The harness is written so a third backend is a small addition, not a third copy:
 - **Enum values with no declared name.** proto3 enums are open, so a field can hold a number the
   schema does not name, but a fixture can only set a value that exists. What happens to an unknown
   value is undecided (spec 12), so there is nothing to pin.
-- **Maps, presence, mutation, and virtual methods** are not implemented in the language, so there is
+- **Maps, oneof, mutation, and virtual methods** are not implemented in the language, so there is
   nothing to write a vector against.
+- **The compiler's refusals** are not here and cannot be: a vector has to compile. `PL0078`,
+  `PL0079`, and `PL0080` are covered by `PresenceTests`, and the configuration diagnostics by
+  `ProjectConfigTests`.
 - **The negative case for `expect fail` is not in the suite.** That a passing `expect fail` really
   does detect a method returning normally was verified by hand, by pointing such a test at a
   non-zero divisor and confirming it fails with "the method returned instead of terminating the

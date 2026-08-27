@@ -329,17 +329,10 @@ Open Questions:
 
 ### 8.4 Nullability and Presence
 
-Protobuf presence semantics differ between proto2, proto3, optional fields, messages, wrappers, and repeated fields.
+**Decided: `has <field>` is syntax, and which fields answer it is protobuf's own question.**
 
-The spec must define:
-
-- How field presence is tested.
-- Whether absent scalar fields are distinguishable from default values.
-- How optional fields are read.
-- How optional fields are assigned.
-- How message-valued fields are initialized.
-
-Candidate syntax:
+Protobuf presence semantics differ between proto2, proto3, optional fields, messages, wrappers, and
+repeated fields. ProtoLang does not re-derive those rules; it asks the descriptor.
 
 ```protolang
 if has customer.email {
@@ -347,10 +340,37 @@ if has customer.email {
 }
 ```
 
-Open Questions:
+Normative Requirements:
 
-- Should `has field` be syntax, a built-in function, or generated method access?
-- Should implicit default values be allowed in expressions?
+- `has <field>` is a prefix expression of type `bool`. It binds at the same precedence as `not`, so
+  `has a.b` tests `b` and `has a and has a.b` groups as written.
+- Its operand must name a protobuf field. A local, a parameter, a literal, and a method result
+  always hold a value, so there is no question to ask about them (`PL0080`).
+- Asking about `a.b` reads `a`, so `a` is subject to 13.1 like any other read.
+- A field admits the question exactly when protobuf says it has presence. That is one rule covering
+  every case in the table below, rather than four rules the compiler could get out of step with a
+  schema.
+- `has` on a field with no presence is `PL0079`. It is not `false`: the field has no answer, and
+  returning one would be a different question silently substituted for the one asked.
+
+| Field kind | Presence | Unset reads as |
+|---|---|---|
+| Singular message | Yes, always | Nothing -- the read requires a guard (13.1) |
+| proto3 singular scalar or enum | **No** | The type's zero, indistinguishable from a set zero |
+| proto3 `optional` scalar or enum | Yes | The type's zero, distinguishable by `has` |
+| proto2 singular field | Yes | The field's declared default |
+| Repeated field | No | An empty collection |
+| Map field | No | Not supported at all (14.2) |
+
+- An `optional` scalar set to its zero value, or an `optional` string set to empty, is **set**.
+  `has` reports presence, not difference from the default.
+- Reading a scalar never needs a guard, under any syntax version. Both targets have always agreed
+  about an unset scalar; only message fields diverged.
+
+Open Question:
+
+- `oneof` has presence per case as well as per field, and nothing here addresses the case
+  discriminator. No syntax, no IR node, no diagnostic.
 
 ## 9. Expressions and Operators
 
@@ -376,8 +396,13 @@ Candidate operator set:
 +  -  *  /  %
 == != < <= > >=
 and or not
+has
 =
 ```
+
+`has` is a prefix operator on a field, producing `bool` (8.4). It sits at the same precedence as
+`not`, and unlike every other operator its operand is a field rather than a value -- reading the
+value is exactly what it must not do.
 
 Open Questions:
 
@@ -445,11 +470,30 @@ Backend obligations:
 Note that `unchecked` in C# does **not** cover division: `long.MinValue / -1` traps at the hardware
 level regardless of context. `/` and `%` therefore require helpers in C# as well as in C++.
 
+**Decided: the overflow rule is selectable per project, and wrapping is the default.**
+
+`Arithmetic/Overflow` in `protolang.config.xml` (10.4) selects one of three answers. Every mode is
+reproduced identically by every backend; no mode means "whatever this target does natively".
+
+| Mode | Signed `+` `-` `*`, unary `-` | `MIN / -1` | `MIN % -1` |
+|---|---|---|---|
+| `Wrapping` (default) | Reduced modulo 2^N | `MIN` | `0` |
+| `Checked` | Terminal failure: a diagnostic on standard error, then exit code 70, exactly as 10.2.1 | Terminal failure | `0` |
+| `Saturating` | Clamps to the bound the true result exceeded | `MAX` | `0` |
+
+The remainder is the same under every mode because `MIN % -1` is `0`, which every type can
+represent. Only the quotient is unrepresentable, so only the quotient can fail. `Checked` fails when
+the mathematical result does not fit, not when the instruction would trap.
+
+Wrapping remains the default because it is what unmodified C# does. `checked` arithmetic is often
+described as C#'s behavior, but a C# author reaches it only through the `checked` keyword or a
+`CheckForOverflowUnderflow` build property.
+
 Open Question:
 
-- The syntax for declaring a non-default arithmetic behavior per file, per method, or per
-  expression is not yet designed. The typed IR already carries a per-operation behavior
-  annotation, so adding `Checked` or `Saturate` is a front-end and backend change only.
+- Whether a non-default behavior should also be declarable per file, per method, or per expression,
+  rather than only per project. The typed IR already carries a per-operation annotation, so the
+  plumbing exists; what is missing is a syntax worth having.
 
 ### 10.2 Division
 
@@ -618,11 +662,69 @@ Each conversion carries a behavior annotation in the typed IR, resolved by a sin
 policy rather than hard-coded at each site, so the alternatives in the open question below are a
 front-end change and a backend change with no new plumbing.
 
+`Arithmetic/Conversion` in `protolang.config.xml` (10.4) names this behavior. It has one legal
+value today, `WrapOrSaturate`, which is the table above. It is stated rather than left implicit so
+that the whole language-dependent contract is readable in one file, and so that a second value is
+an addition rather than a discovery.
+
 Open Question:
 
-- Whether the conversion behaviors above should be selectable per project rather than fixed. The
-  same question applies to 10.1's overflow rule, and both are tracked together as compile-time
-  arithmetic policy.
+- Whether a second conversion behavior is worth having. A checked conversion -- terminating rather
+  than clamping, matching 10.1's `Checked` -- is the obvious candidate, and nothing above rules it
+  out.
+
+### 10.4 Compile-Time Policy
+
+**Decided: language-dependent preferences live in a repository-tracked file, and the file wins.**
+
+Some questions in this specification have more than one defensible answer, and which one a project
+wants is a property of the project rather than of the language. Those answers live in
+`protolang.config.xml`, next to the code they govern.
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<ProtoLang>
+  <Arithmetic>
+    <Overflow>Wrapping</Overflow>            <!-- Wrapping | Checked | Saturating (10.1) -->
+    <Conversion>WrapOrSaturate</Conversion>  <!-- WrapOrSaturate (10.3) -->
+    <DivideByZero>RequireOnZero</DivideByZero><!-- RequireOnZero (10.2.1) -->
+  </Arithmetic>
+  <Presence>
+    <UnsetMessageRead>RequireGuard</UnsetMessageRead><!-- RequireGuard (13.1) -->
+  </Presence>
+</ProtoLang>
+```
+
+Normative Requirements:
+
+- The compiler searches for `protolang.config.xml` in the source file's directory and every
+  directory above it, nearest first, the way `.editorconfig` is found. A project states its policy
+  once; a subdirectory may state a different one.
+- A setting absent from the file takes its default. A file absent entirely is the same as a file
+  stating nothing.
+- Values are matched exactly, including case. An unknown element (`PL2001`), an unknown value
+  (`PL2002`), a malformed file (`PL2003`), or a setting stated twice (`PL2004`) is an error, and the
+  compilation stops. A project that states a policy and is then silently ignored is worse off than
+  one that states nothing.
+- **The file wins.** A command-line flag that contradicts a setting the file states is refused, not
+  applied. An explicit override flag lifts the refusal, so trying another policy stays one command
+  away while leaving a trace nobody can mistake for the project's own answer.
+- A flag may set what the file does not state, since a default left in place is not an answer the
+  project gave.
+- Every mode of every setting must produce identical observable behavior in every backend. A mode
+  must never mean "use whatever this target does", unless that target behavior has been specified
+  here and reproduced everywhere else.
+
+Settings with a single legal value are listed anyway. The file's purpose is to enumerate every
+language-dependent preference, including the settled ones, so the whole contract is readable in one
+place. `docs/reference-semantics.md` is the companion table: what each value means in each backend,
+and which of them are C#'s own behavior rather than something ProtoLang invented.
+
+Open Questions:
+
+- Whether a language version (27.1) belongs in this file rather than in each source file.
+- Whether a backend may add settings of its own, and if so how a third-party backend's settings
+  avoid colliding with the language's.
 
 ## 11. Strings
 
@@ -715,21 +817,51 @@ Open Questions:
 
 ### 13.1 Field Access
 
-Candidate syntax:
-
 ```protolang
 customer.name
 order.customer.address.city
 ```
 
-The spec must define behavior for:
+**Decided: using the value of a singular message field requires established presence.**
 
-- Missing message fields.
-- Default scalar values.
-- Optional fields.
-- Oneof fields.
-- Repeated fields.
-- Map fields.
+This is the one place the initial backends disagreed silently. Reading an unset `Timestamp` field
+raises `NullReferenceException` in C# and returns the default instance -- so, zero -- in C++. Both
+are the correct idiomatic translation for their runtime. Neither can be made to match the other
+without a runtime check in every target, so the situation is made unrepresentable instead, which is
+the same choice `on_zero` makes for a zero divisor (10.2.1).
+
+Normative Requirements:
+
+- Using the **value** of a singular message-typed field is an error (`PL0078`) unless its presence
+  has been established on every path reaching the use.
+- "Using the value" is reading a field through it, calling a method on it, passing it as an
+  argument, or binding it to a local. Each launders the same divergence, so the rule is stated once
+  about the value rather than four times about its uses.
+- Presence is established by `has` (8.4), in any of these shapes:
+  - inside `if has f { ... }`;
+  - in the `else` of `if not has f { ... } else { ... }`;
+  - after `if not has f { return ...; }`, or any guard whose branch cannot complete normally;
+  - in the right operand of `and` when the left proved it, and after `or` on the false side.
+- A fact, once established, holds for the remainder of the method. ProtoLang cannot assign to a
+  field (18), so nothing shown to be set can become unset. A guard before a loop therefore holds
+  inside it.
+- A message field reached through a value that has no name -- a method result -- cannot be guarded,
+  and is `PL0078`. Binding the intermediate to a local first gives it the name a guard needs.
+- The receiver, parameters, locals, and `for` bindings are present by construction and are never
+  guarded. Every message value in the language comes from one of those or from a guarded read.
+- Reading a **scalar** field never requires a guard. An unset proto3 scalar reads as the type's
+  zero, an unset proto2 scalar as its declared default, and both targets have always agreed.
+- Reading a **repeated** field never requires a guard. An unset one is empty.
+- Because the guard is a compile-time requirement, a guarded read emits the plain accessor chain in
+  every backend. The rule costs nothing at runtime.
+
+`Presence/UnsetMessageRead` in `protolang.config.xml` (10.4) names this behavior. It has one legal
+value today, `RequireGuard`.
+
+Open Questions:
+
+- Oneof fields, which have a case discriminator this says nothing about.
+- Map fields, which are not supported at all (14.2).
 
 ### 13.2 Message Construction
 
@@ -1061,10 +1193,30 @@ The spec must define, or require each backend to define:
 
 ### 21.3 Protobuf Editions and Syntax Versions
 
-Open Questions:
+**Decided: proto2, proto3, and editions are all supported, and the compiler does not branch on the
+version.**
 
-- Which protobuf syntax versions are supported: proto2, proto3, Editions?
-- How does ProtoLang handle explicit presence in newer protobuf versions?
+The version mattered because presence rules differ by it. Once presence is a first-class question
+(8.4), the compiler asks the descriptor rather than the syntax version, and
+`FieldDescriptor.HasPresence` answers correctly for every one of them -- including editions, where
+presence is a resolved feature rather than a property of the syntax line. A version check would be
+a second, worse copy of a rule the protobuf runtime already implements.
+
+Both non-proto3 cases were checked rather than assumed: protoc 31.1 generates C# for a proto2 file
+and for an `edition = "2023"` file. The C# generator historically refused proto2, which is the only
+reason this was ever in doubt.
+
+Implementation Note:
+
+- `FileDescriptor.Syntax` is deprecated in current protobuf runtimes, and its deprecation note says
+  to use feature resolution instead. That is exactly what `HasPresence` consults, so taking the
+  version out of the compiler follows the runtime's own advice rather than merely avoiding a
+  warning.
+
+Open Question:
+
+- Whether a future edition could change a rule this specification states, and how the compiler would
+  notice. Nothing here reads edition-specific features other than through `HasPresence`.
 
 ## 22. IR and Compiler Architecture
 
@@ -1093,7 +1245,8 @@ The IR should preserve:
 - Source locations for diagnostics.
 - Resolved protobuf type references.
 - Exact numeric operation kinds.
-- Presence checks.
+- Presence checks. `IrFieldPresence` carries the field descriptor rather than a lowered boolean,
+  because the two targets spell the test in unrelated ways.
 - Field access semantics.
 - Mutability intent.
 - Error-result behavior.
@@ -1127,7 +1280,10 @@ time rather than emitting something whose semantics differ.
 | Feature | C# | C++ | Python | Notes |
 |---|---:|---:|---:|---|
 | Attached methods | Yes | Yes | — | C#: extension methods. C++: free functions. |
-| Wrapping integer arithmetic | Yes | Yes | — | `unchecked(...)` / unsigned round-trip helpers. |
+| Wrapping integer arithmetic | Yes | Yes | — | `unchecked(...)` / unsigned round-trip helpers. The default policy. |
+| Checked integer arithmetic | Yes | Yes | — | Terminates with exit code 70 on overflow. Selected by `Arithmetic/Overflow` (10.4). |
+| Saturating integer arithmetic | Yes | Yes | — | Clamps to the exceeded bound. Selected by `Arithmetic/Overflow` (10.4). |
+| Compile-time policy file | Yes | Yes | — | `protolang.config.xml`, found by walking up from the source (10.4). |
 | Checked division (`on_zero`) | Yes | Yes | — | Runtime zero check in both; see 10.2.1. |
 | `on_zero fail` | Yes | Yes | — | `Environment.Exit(70)` / `std::_Exit(70)`, after a diagnostic on stderr (10.2.1). |
 | IEEE 754 float division | Yes | Yes | — | Native in both. Python will need a helper. |
@@ -1140,8 +1296,12 @@ time rather than emitting something whose semantics differ.
 | Explicit casts | Yes | Yes | — | `x as int64`; see 10.3 for the per-family rules. |
 | Enum types and values | Yes | Yes | — | Named per 12; both targets re-spell values differently. |
 | Conditionals and `while` | Yes | Yes | — | `if` / `else if` / `else`, `while`, `break`, `continue` (15). |
-| Proto2 presence | No | No | — | Blocked on 21.3. |
-| Proto3 optional | No | No | — | Blocked on 21.3. |
+| Field presence (`has`) | Yes | Yes | — | `x != null` or `HasX` in C#; `has_x()` in C++ (8.4). |
+| Unset message-field guard | Yes | Yes | — | Compile-time (`PL0078`), so neither backend emits a runtime check (13.1). |
+| Proto2 presence | Yes | Yes | — | Via `FieldDescriptor.HasPresence`; no syntax-version branch (21.3). |
+| Proto3 optional | Yes | Yes | — | Same mechanism. |
+| Editions | Yes | Yes | — | Same mechanism; presence is a resolved feature (21.3). |
+| Oneof | No | No | — | Blocked on the open question in 8.4. |
 
 ## 24. Generated API Strategy
 
@@ -1449,6 +1609,18 @@ message
 optional help text
 ```
 
+Code ranges:
+
+| Range | Owner |
+|---|---|
+| `PL0001`–`PL0999` | The compiler front end: lexer, parser, binder |
+| `PL1001`–`PL1099` | The C# backend |
+| `PL1101`–`PL1199` | The C++ backend |
+| `PL2001`–`PL2999` | The driver and the configuration file (10.4) |
+
+A configuration diagnostic names `protolang.config.xml` and the line and column inside it, rather
+than a position in a `.protolang` source.
+
 Open Questions:
 
 - Should diagnostic codes be part of the compatibility contract?
@@ -1564,7 +1736,14 @@ This section should be maintained as the authoritative list of open decisions.
 - Helper functions.
 - Complete scalar type support.
 - Decimal support.
-- Nullability and presence syntax.
+- ~~Nullability and presence syntax.~~ Decided: `has <field>`, with the field's own presence
+  rules taken from the protobuf descriptor (8.4).
+- ~~What reading an unset message field means.~~ Decided: it requires an established presence
+  test, so the two backends have nothing to disagree about (13.1).
+- ~~Which protobuf syntax versions are supported.~~ Decided: proto2, proto3, and editions, with
+  no version check in the compiler (21.3).
+- ~~Whether arithmetic behavior is selectable per project.~~ Decided: `protolang.config.xml`,
+  with the file winning over command-line flags (10.4).
 - Boolean operator spelling.
 - Assignment expression vs statement.
 - Evaluation order details.
@@ -1574,7 +1753,6 @@ This section should be maintained as the authoritative list of open decisions.
 - ~~Explicit cast syntax.~~ Decided: `x as int64`, numeric scalars only (10.3).
 - ~~Numeric conversion rules.~~ Decided: integer targets wrap, floating point to integer
   truncates and saturates with NaN mapping to zero (10.3).
-- Division by zero model.
 - String indexing and comparison semantics.
 - ~~How protobuf enum values are referenced.~~ Decided: `EnumType.VALUE_NAME` (12).
 - Enum unknown-value behavior, and whether an enum converts to or from an integer.
@@ -1624,3 +1802,9 @@ Use this table to record decisions as the language stabilizes.
 | 2026-08-25 | Enums | Enum values are named `EnumType.VALUE_NAME`, resolved by full name or unambiguous simple name, with a value in scope winning over an enum type of the same name (12) | Enum types alone left the feature decorative: a value could be declared, passed, and returned but never compared against anything. Values winning over types means adding an enum to a schema cannot silently change what an existing expression means | Draft |
 | 2026-08-25 | Enums | Backends reproduce protoc's own value naming exactly: prefix-stripped PascalCase for C#, flattened namespace constants for C++ | The two spellings are unrelated and neither is derivable from the other. Approximating either emits an identifier that does not exist, which fails in the consumer's build rather than in this compiler, and only for the schemas nobody tested | Draft |
 | 2026-08-25 | Testing | A `test` fixture may set an enum field from a named value; only message fields require a nested block | An enum field is set from a constant, which is an ordinary expression. Rejecting it left enum behavior untestable, so the feature and its test path had to land together | Draft |
+| 2026-08-27 | Compile-time policy | Language-dependent preferences live in a repository-tracked `protolang.config.xml`, found by walking up from the source; the file wins over command-line flags unless an explicit override is passed (10.4) | Semantics that depend on who typed the command are not reproducible. Flags stay useful for experiments, but a project's answer has to be the one checked in beside the code it governs. Settings with a single legal value are listed anyway, so the whole contract is readable in one place and a second value is an addition rather than a discovery | Draft |
+| 2026-08-27 | Numeric semantics | Integer overflow is selectable per project: `Wrapping` (default), `Checked`, or `Saturating`, each reproduced identically by every backend (10.1) | Wrapping stays the default because it is what unmodified C# does -- `checked` in C# is reached only through the keyword or a build property, so calling checked arithmetic "C# standard behavior" had it backwards. `MIN % -1` is 0 under every mode, because 0 is representable; only the quotient can fail | Draft |
+| 2026-08-27 | Presence | `has <field>` is syntax, and which fields answer it comes from `FieldDescriptor.HasPresence` rather than from rules this compiler re-derives (8.4) | One rule covers singular messages, proto3 implicit and `optional` scalars, proto2 fields, repeated fields, and editions. A hand-written version would be a second, worse copy of something the protobuf runtime already implements, and would drift from it | Draft |
+| 2026-08-27 | Presence | Using the value of a singular message field requires an established presence test; without one it is PL0078 (13.1) | C# yields null and throws, C++ yields the default instance and returns zero, and neither can be made to match the other without a runtime check in every target. Making the situation unrepresentable is what `on_zero` does for a zero divisor, and it costs nothing at runtime: a guarded read emits the same accessor chain it always did. The rule is on the value rather than on reading through it, because binding to a local or passing as an argument launders the same divergence | Draft |
+| 2026-08-27 | Presence | The analysis is a plain set of access paths with no fixpoint, and guard clauses fall out of the existing all-paths-return reachability predicate (13.1) | Presence facts are monotone within a method, because ProtoLang cannot assign to a field, so nothing shown to be set can become unset. If receiver mutation ever arrives (18), that is the assumption to revisit | Draft |
+| 2026-08-27 | Protobuf interop | proto2, proto3, and editions are all supported, and the compiler does not branch on the syntax version (21.3) | The version was standing in for presence, and presence now has a first-class answer. `FileDescriptor.Syntax` is deprecated in current runtimes with a note pointing at feature resolution, which is what `HasPresence` consults; protoc 31.1 was checked to generate C# for both proto2 and edition 2023 rather than assumed to | Draft |

@@ -51,11 +51,15 @@ rows are the working list.
 `Arithmetic/Overflow` selects among three answers to the same question. Every mode is reproduced
 identically by every backend; none of them means "whatever this target does natively".
 
-| Mode | Signed `+` `-` `*`, unary `-` | `MIN / -1` |
-|---|---|---|
-| `Wrapping` (default) | Reduced modulo 2^N. | `MIN`, and `0` for `%`. |
-| `Checked` | Terminal failure: diagnostic on stderr, exit 70. Same mechanism as `on_zero fail`. | Terminal failure. |
-| `Saturating` | Clamps to the bound the true result exceeded. | `MAX`. |
+| Mode | Signed `+` `-` `*`, unary `-` | `MIN / -1` | `MIN % -1` |
+|---|---|---|---|
+| `Wrapping` (default) | Reduced modulo 2^N. | `MIN` | `0` |
+| `Checked` | Terminal failure: diagnostic on stderr, exit 70. Same mechanism as `on_zero fail`. | Terminal failure | `0` |
+| `Saturating` | Clamps to the bound the true result exceeded. | `MAX` | `0` |
+
+The remainder column is the same under every mode, and that is the rule rather than an exception:
+`Checked` fails when the mathematical result is not representable, not when the instruction would
+trap. `MIN % -1` is `0`, which every type can hold. Only the quotient, `2^63`, cannot.
 
 `Wrapping` is the default because it is what C# does natively. Note that this is the opposite of the
 guess in [#20](https://github.com/IsaacSherman/ProtoLang/issues/20), which read "C# standard
@@ -107,12 +111,13 @@ C++, from the same source, with nothing in either generated file that looks wron
 | proto3 implicit-presence scalar -- presence test | No `HasFoo` is generated. | `PL0079`. The diagnostic exists because the question has no answer on the wire, not because it is hard to implement. | No `has_foo()` is generated. | `--` | 8.4 |
 | proto3 `optional` scalar, unset | Returns the zero value; `HasFoo` is false. | Returns the zero value; no guard required. `has foo` distinguishes unset from a set zero. | `foo()` returns the zero value; `has_foo()` is false. | `--` | 8.4, 21.3 |
 | proto2 optional scalar, unset | Returns the field's **declared default**, not the type's zero. | The declared default. This was never part of the message-field divergence: both targets already agree. | Matches natively. | `--` | 21.3 |
+| Which syntax versions work | protoc 31.1 generates C# for proto2, proto3, and editions. Its C# generator historically refused proto2, which is why this was checked rather than assumed. | proto2, proto3, and editions are all supported, and the compiler does not branch on the version: `HasPresence` answers the only question the version was standing in for. | Nothing; C++ never had the restriction. | `--` | 21.3 |
 | Repeated field, empty | An empty `RepeatedField<T>`. Never null. | Iterates zero times. | An empty `RepeatedField` / `RepeatedPtrField`. | `--` | 14.1 |
 | Repeated field -- presence test | No `HasFoo`; repeated fields have no presence. | `PL0079`. | No `has_foo()`. | `--` | 14.1 |
 | Repeated field element | Always present. | Always present. A `for` loop binding needs no guard, because it is an element rather than a field. | Always present. | `--` | 14.1 |
 | Receiver, parameters, locals | Always present. | Always present; never guarded. The only way to obtain a message value is the receiver, a parameter, a loop binding, or a guarded field read, and all four are present by construction. | Always present. | `--` | 13.1 |
 | Map field | Supported. | Unsupported: `PL0038` on access, `PL0060` in a test fixture. | Unsupported. | `--` | 14.2 |
-| `oneof` | A `FooCase` enum plus per-case accessors. | *Not yet pinned.* No syntax, no IR node, no diagnostic. | *Not yet pinned.* | `--` | 8.4 |
+| `oneof` | A `FooCase` enum plus per-case accessors. | *Not yet pinned.* `has` covers a oneof member's presence, but nothing addresses the case discriminator, and no vector covers a oneof at all. | *Not yet pinned.* | `--` | 8.4 |
 | Message equality | Field-wise `Equals`. | *Not yet pinned.* `==` on two message values is not supported. | *Not yet pinned.* | `--` | 13.3 |
 
 ## Departures from C#

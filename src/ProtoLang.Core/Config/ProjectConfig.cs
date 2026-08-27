@@ -86,6 +86,39 @@ public sealed record ProjectConfig(
     public string? Path { get; init; }
 
     /// <summary>
+    /// Applies a command-line override to one setting, or refuses it.
+    /// </summary>
+    /// <remarks>
+    /// The file wins. A flag that contradicts a setting the project states is refused rather than
+    /// silently applied, because the point of tracking policy in the repository is that generated
+    /// code means the same thing however it was built. <paramref name="allowOverride"/> exists so
+    /// that trying another policy stays one flag away, while leaving a trace in the command that
+    /// nobody can mistake for the project's own answer.
+    /// </remarks>
+    /// <param name="conflict">
+    /// Null on success. Otherwise a sentence naming both answers, for the driver to print.
+    /// </param>
+    public bool TryOverrideOverflow(
+        OverflowPolicy overflow,
+        bool allowOverride,
+        out ProjectConfig result,
+        out string? conflict)
+    {
+        if (!allowOverride && ExplicitKeys.Contains("Arithmetic/Overflow") && Overflow != overflow)
+        {
+            result = this;
+            conflict =
+                $"--arithmetic-overflow {overflow.ToString().ToLowerInvariant()} contradicts "
+                + $"Arithmetic/Overflow = {Overflow} in {Path}";
+            return false;
+        }
+
+        result = this with { Overflow = overflow };
+        conflict = null;
+        return true;
+    }
+
+    /// <summary>
     /// Searches <paramref name="startDirectory"/> and each directory above it for
     /// <see cref="FileName"/>, the way <c>.editorconfig</c> and <c>Directory.Build.props</c> are
     /// found. Returns the nearest one, or null.

@@ -121,12 +121,15 @@ Implemented:
 - Typed IR carrying resolved types, source locations, and per-operation arithmetic behavior
 - Control flow: `if` / `else if` / `else`, `while`, `break`, `continue`, and `for`-`in`
 - Explicit numeric conversions, `x as int64`, which is what makes mixed-width arithmetic writable
+- Field presence, `has field`, over proto2, proto3 with and without `optional`, and editions
+- A compile-time policy file, `protolang.config.xml`, selecting wrapping, checked, or saturating
+  integer overflow
 - C# backend (extension methods) and C++ backend (header-only free functions)
 - Author-written `test` declarations, generated into xUnit tests and a C++ test executable,
   with `--scaffold` emitting the `.csproj` and `CMakeLists.txt` that build and run them
 - A cross-language conformance suite that runs the same vectors in both backends
 
-Not implemented: maps, presence, mutation, virtual methods, `Result` types, `switch`, and the Python
+Not implemented: maps, oneof, mutation, virtual methods, `Result` types, `switch`, and the Python
 backend. Backends reject these rather than emitting something whose semantics differ from the spec.
 
 ### Building
@@ -151,6 +154,49 @@ The well-known schemas -- `google/protobuf/timestamp.proto`, `duration.proto`, a
 found automatically beside whichever protoc is used, so a schema that imports one needs no `-I` of
 its own. They are resolved for the compiler without being generated: both runtimes already ship
 them, so they never appear in an emitted project.
+
+### Project Configuration
+
+Some questions have more than one defensible answer, and which one you want is a property of your
+project rather than of the language. Those answers live in `protolang.config.xml`, next to the code
+they govern. The compiler looks for it in the source file's directory and every directory above it,
+nearest first -- the way `.editorconfig` is found -- so a repository states its policy once.
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<ProtoLang>
+  <Arithmetic>
+    <Overflow>Wrapping</Overflow>             <!-- Wrapping | Checked | Saturating -->
+    <Conversion>WrapOrSaturate</Conversion>
+    <DivideByZero>RequireOnZero</DivideByZero>
+  </Arithmetic>
+  <Presence>
+    <UnsetMessageRead>RequireGuard</UnsetMessageRead>
+  </Presence>
+</ProtoLang>
+```
+
+Commit it. That is the point: the semantics of your generated code should travel with the
+repository, not with whoever remembered which flags to type.
+
+Three of those settings have exactly one legal value today. They are listed anyway, so the whole
+language-dependent contract is readable in one file rather than spread between a specification and
+a set of defaults nobody wrote down.
+
+**The file wins.** Every setting also has a command-line flag, for trying something without
+committing to it, but a flag that contradicts the file is refused rather than quietly applied:
+
+```
+error: --arithmetic-overflow saturating contradicts Arithmetic/Overflow = Checked in ...
+       The config file wins, so that a build means the same thing however it was run.
+       Pass --override-config to use the flag anyway.
+```
+
+Every mode of every setting produces identical observable behavior in both backends. No mode means
+"whatever C# or C++ happens to do" -- `checked` overflow terminates with the same exit code and the
+same message in both, and `saturating` clamps to the same bound. See
+[docs/reference-semantics.md](docs/reference-semantics.md) for what each value means in each target,
+and spec 10.4 for the rules.
 
 ### Generation Commands
 
@@ -190,6 +236,10 @@ The compiler options used in those commands are:
 | `--test-out <dir>` | Root directory for generated test artifacts. Each test backend writes below `<dir>/<target>/`. |
 | `--scaffold` | Also write the build file that builds and runs the generated tests. Requires `--test-out`. |
 | `-t`, `--target <list>` | Comma-separated backend list: `csharp`, `cpp`. Defaults to all current backends. |
+| `--config <file>` | Use this `protolang.config.xml` instead of searching for one. |
+| `--no-config` | Ignore any config file and use the built-in defaults. |
+| `--arithmetic-overflow <mode>` | `wrapping` (default), `checked`, or `saturating`. |
+| `--override-config` | Let a policy flag win over a setting the config file states. |
 
 To generate the protobuf message classes consumed by generated ProtoLang code, run `protoc`
 separately. For example:

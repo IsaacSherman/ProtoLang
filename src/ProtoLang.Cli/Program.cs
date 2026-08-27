@@ -187,18 +187,16 @@ static ProjectConfig? ResolveConfig(CommandLineOptions options, DiagnosticBag di
         return config;
     }
 
-    if (config.ExplicitKeys.Contains("Arithmetic/Overflow") && !options.OverrideConfig)
+    if (!config.TryOverrideOverflow(overflow, options.OverrideConfig, out var overridden, out var conflict))
     {
-        Console.Error.WriteLine(
-            $"error: --arithmetic-overflow {overflow.ToString().ToLowerInvariant()} contradicts "
-            + $"Arithmetic/Overflow = {config.Overflow} in {config.Path}");
+        Console.Error.WriteLine($"error: {conflict}");
         Console.Error.WriteLine(
             "       The config file wins, so that a build means the same thing however it was run.");
         Console.Error.WriteLine("       Pass --override-config to use the flag anyway.");
         return null;
     }
 
-    return config with { Overflow = overflow };
+    return overridden;
 }
 
 static void PrintDiagnostics(DiagnosticBag diagnostics)
