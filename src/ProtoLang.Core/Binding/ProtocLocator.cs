@@ -29,7 +29,7 @@ public static class ProtocLocator
             return onPath;
         }
 
-        return FindInNuGetCache();
+        return FindBundledProtoc();
     }
 
     private static string ExecutableName =>
@@ -90,10 +90,78 @@ public static class ProtocLocator
     }
 
     /// <summary>
+    /// The directories holding the well-known .proto schemas that ship alongside a protoc install,
+    /// suitable for passing to protoc as additional --proto_path entries.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// protoc only resolves google/protobuf/*.proto from descriptors compiled into the binary from
+    /// version 33 onwards. Older builds -- including the Grpc.Tools one <see cref="FindBundledProtoc"/>
+    /// falls back to -- need the schemas passed on the command line, so a schema importing Timestamp
+    /// fails to compile on the toolchain that requires no installation at all.
+    /// </para>
+    /// <para>
+    /// Grpc.Tools solves this for its own protoc runs the same way, passing its bundled include
+    /// directory as Protobuf_StandardImportsPath on every invocation. The package ships those
+    /// schemas because its protoc needs them.
+    /// </para>
+    /// </remarks>
+    /// <param name="protocPath">Full path to a protoc executable.</param>
+    public static IReadOnlyList<string> FindWellKnownTypeIncludePaths(string protocPath)
+    {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(protocPath));
+        if (string.IsNullOrEmpty(directory))
+        {
+            return [];
+        }
+
+        var candidates = new[]
+        {
+            // The layout of protoc's own release archives: bin/protoc beside include/.
+            Path.Combine(directory, "..", "include"),
+
+            // Grpc.Tools puts protoc at <version>/tools/<rid>/ and the schemas at
+            // <version>/build/native/include.
+            Path.Combine(directory, "..", "..", "build", "native", "include"),
+        };
+
+        var found = new List<string>();
+
+        foreach (var candidate in candidates)
+        {
+            string full;
+            try
+            {
+                full = Path.GetFullPath(candidate);
+            }
+            catch (ArgumentException)
+            {
+                continue;
+            }
+
+            // Require a schema every protobuf distribution carries rather than trusting the
+            // directory name, so a wrong guess never becomes a --proto_path pointing at nothing.
+            if (File.Exists(Path.Combine(full, "google", "protobuf", "descriptor.proto"))
+                && !found.Contains(full, StringComparer.OrdinalIgnoreCase))
+            {
+                found.Add(full);
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>
     /// Grpc.Tools ships prebuilt protoc binaries per RID. If the package is already restored we
     /// can use it without asking the developer to install protoc separately.
     /// </summary>
-    private static string? FindInNuGetCache()
+    /// <remarks>
+    /// Public because this is the protoc a machine with nothing installed actually gets, and it is
+    /// the one that cannot resolve well-known imports on its own. A test that means to cover that
+    /// path has to name it: whichever protoc happens to be first on PATH may be recent enough to
+    /// resolve them unaided, which would make the test pass without proving anything.
+    /// </remarks>
+    public static string? FindBundledProtoc()
     {
         var rid = GetRuntimeIdentifier();
         if (rid is null)

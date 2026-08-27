@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package protolang.wkt;
+
+option csharp_namespace = "ProtoLang.Wkt";
+
+// Fields drawn from protobuf's own vocabulary. Nothing here declares where those schemas live: the
+// point of the fixture is that the compiler resolves them without being told.
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+message Event {
+  google.protobuf.Timestamp starts_at = 1;
+  google.protobuf.Duration length = 2;
+}

@@ -9,6 +9,11 @@ package protolang.conformance;
 // names its extension class after the receiver, so two vector files extending the same message
 // would emit duplicate class declarations into the one assembly the C# vectors are built as.
 
+// well_known.protolang -- protobuf's own vocabulary as ordinary field types. Nothing names where
+// these live: both protoc runs are expected to find them on their own.
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
 // integer_overflow.protolang -- wrapping arithmetic (spec 10.1).
 message OverflowCase {
   int32 i32_left = 1;
@@ -102,4 +107,13 @@ message WhimsyCauldronCase {
   double drift = 5;
   float gust = 6;
   int32 gate = 7;
+}
+
+// well_known.protolang -- reading through message-typed fields that neither backend generates,
+// because the protobuf runtime already carries them.
+message WellKnownCase {
+  google.protobuf.Timestamp starts_at = 1;
+  google.protobuf.Duration length = 2;
+  repeated google.protobuf.Timestamp checkpoints = 3;
+  int64 nanos_per_second = 4;
 }

@@ -141,6 +141,11 @@ The compiler needs a `protoc` executable, because it consumes protobuf descripto
 reparsing `.proto` files itself (spec 21.1). It looks at `PROTOLANG_PROTOC`, then `PATH`, then a
 restored `Grpc.Tools` NuGet package, so a separate protoc install is usually unnecessary.
 
+The well-known schemas -- `google/protobuf/timestamp.proto`, `duration.proto`, and the rest -- are
+found automatically beside whichever protoc is used, so a schema that imports one needs no `-I` of
+its own. They are resolved for the compiler without being generated: both runtimes already ship
+them, so they never appear in an emitted project.
+
 ### Generation Commands
 
 The ProtoLang compiler generates behavior and test artifacts. Protobuf message classes are still

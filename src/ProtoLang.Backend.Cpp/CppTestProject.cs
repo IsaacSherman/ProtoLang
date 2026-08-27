@@ -121,6 +121,10 @@ public static class CppTestProject
             builder.AppendLine($"        {Quote(root.Length == 0 ? "." : root)}");
         }
 
+        // Last, so a schema vendoring its own copy still wins. A schema that imports a well-known
+        // type needs those resolvable here too, and protoc only carries them internally from
+        // version 33 on -- older ones have to be handed the directory protobuf installs them in.
+        builder.AppendLine("        \"${Protobuf_INCLUDE_DIRS}\"");
         builder.AppendLine("    PROTOC_OUT_DIR \"${CMAKE_CURRENT_BINARY_DIR}\"");
         builder.AppendLine(")");
         builder.AppendLine();

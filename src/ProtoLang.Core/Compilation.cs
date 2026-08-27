@@ -65,17 +65,38 @@ public static class Compilation
             return new CompilationResult(null, unit, [], diagnostics);
         }
 
+        // Resolved before the imports are checked, because the loader knows about include
+        // directories the caller never named: protoc's own bundled well-known schemas. An
+        // 'import proto "google/protobuf/timestamp.proto"' resolves for protoc but exists nowhere
+        // under the user's proto roots, so checking it against those alone would reject it.
+        try
+        {
+            loader ??= DescriptorLoader.CreateDefault();
+        }
+        catch (DescriptorLoadException ex)
+        {
+            diagnostics.Error(
+                "PL0003",
+                "protobuf schema could not be loaded",
+                ex.Message,
+                unit.Imports[0].Span);
+            return new CompilationResult(null, unit, [], diagnostics);
+        }
+
+        var resolvePaths = new List<string>(searchPaths);
+        resolvePaths.AddRange(loader.ImplicitIncludePaths);
+
         var protoFiles = new List<string>();
         foreach (var import in unit.Imports)
         {
-            if (ResolveImport(import.Path, searchPaths) is null)
+            if (ResolveImport(import.Path, resolvePaths) is null)
             {
                 diagnostics.Error(
                     "PL0002",
                     "proto file not found",
                     $"Could not find '{import.Path}' in any include directory.",
                     import.Span,
-                    "Searched: " + string.Join(", ", searchPaths));
+                    "Searched: " + string.Join(", ", resolvePaths));
                 continue;
             }
 
@@ -90,7 +111,6 @@ public static class Compilation
         IReadOnlyList<Google.Protobuf.Reflection.FileDescriptor> descriptors;
         try
         {
-            loader ??= DescriptorLoader.CreateDefault();
             descriptors = loader.Load(protoFiles, searchPaths);
         }
         catch (DescriptorLoadException ex)
@@ -115,9 +135,17 @@ public static class Compilation
     /// paths, then the source file's own directory.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Public because callers that need to say where a schema came from -- test project scaffolding
     /// has to tell a build system the proto root -- must resolve imports the same way the compiler
     /// did. Reimplementing the fallback rule outside this file is how the two drift apart.
+    /// </para>
+    /// <para>
+    /// Deliberately excludes the well-known schemas protoc resolves on its own, even though imports
+    /// are checked against those too. The question this answers is where the user's schemas live,
+    /// and scaffolding turns the answer into proto roots in a build file -- which must never come
+    /// out pointing into a NuGet cache.
+    /// </para>
     /// </remarks>
     public static IReadOnlyList<string> GetSearchPaths(string sourcePath, IReadOnlyList<string> includePaths)
         => BuildSearchPaths(sourcePath, includePaths);
