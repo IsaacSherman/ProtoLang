@@ -5,20 +5,30 @@
 // never emitted. The vector deliberately only *uses* well-known types and does not extend one --
 // extending is its own question, with its own diagnostic.
 //
-// Every message field read below is set in every case. An unset singular message field does not
-// mean the same thing in both targets, so a vector that left one out would be testing that
-// divergence rather than the arithmetic it claims to.
+// Every message field read below is guarded. That used to be a note explaining that they were all
+// *set* instead, because an unset one meant different things in the two targets and this vector
+// would have been testing that divergence rather than the arithmetic it claims to. The guards are
+// now the language's own requirement (spec 13.1), so the workaround is gone and the fixtures below
+// are free to leave a field out -- presence.protolang is where that is covered on purpose.
 
 import proto "conformance.proto";
 
 extend WellKnownCase {
     fn ends_at_seconds() -> int64 {
+        if not has starts_at or not has length {
+            return 0;
+        }
+
         return starts_at.seconds + length.seconds;
     }
 
     // Mixes the int32 'nanos' with the int64 'seconds', so the cast is load-bearing rather than
     // decorative.
     fn start_nanos_total() -> int64 {
+        if not has starts_at {
+            return 0;
+        }
+
         return starts_at.seconds * nanos_per_second + (starts_at.nanos as int64);
     }
 
@@ -48,7 +58,11 @@ extend WellKnownCase {
     }
 
     fn sub_second_precision() -> bool {
-        return starts_at.nanos != 0 or length.nanos != 0;
+        if has starts_at and starts_at.nanos != 0 {
+            return true;
+        }
+
+        return has length and length.nanos != 0;
     }
 }
 

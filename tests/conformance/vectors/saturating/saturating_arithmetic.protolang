@@ -1,0 +1,241 @@
+// Conformance vectors for the saturating overflow policy (spec 10.1, 10.4).
+//
+// The config file beside this one selects it, the same way the checked directory does. Where those
+// vectors are mostly 'expect fail', these are all ordinary returns: saturation is total, so every
+// operation has a value and the interesting question is which bound it lands on.
+//
+// The bound follows from the operands rather than from the wrapped result -- an addition can only
+// overflow when its operands share a sign, a product's sign is the exclusive-or of its operands' --
+// so both directions are covered for each operation rather than just the one that overflows upward.
+
+import proto "conformance.proto";
+
+extend SaturatingOverflowCase {
+    fn i32_sum() -> int32 {
+        return i32_left + i32_right;
+    }
+
+    fn i32_difference() -> int32 {
+        return i32_left - i32_right;
+    }
+
+    fn i32_product() -> int32 {
+        return i32_left * i32_right;
+    }
+
+    fn i32_negated() -> int32 {
+        return -i32_left;
+    }
+
+    fn i64_sum() -> int64 {
+        return i64_left + i64_right;
+    }
+
+    fn i64_product() -> int64 {
+        return i64_left * i64_right;
+    }
+
+    fn i64_negated() -> int64 {
+        return -i64_left;
+    }
+
+    fn i64_quotient() -> int64 {
+        return i64_left / i64_right on_zero 0;
+    }
+
+    fn i64_remainder() -> int64 {
+        return i64_left % i64_right on_zero 0;
+    }
+
+    fn u32_sum() -> uint32 {
+        return u32_left + u32_right;
+    }
+
+    fn u32_difference() -> uint32 {
+        return u32_left - u32_right;
+    }
+
+    fn u64_product() -> uint64 {
+        return u64_left * u64_right;
+    }
+}
+
+// --- values that fit are untouched by the policy ---
+
+test SaturatingOverflowCase.i32_sum "an addition that fits is not clamped" {
+    receiver {
+        i32_left = 2000000000;
+        i32_right = 100000000;
+    }
+
+    expect return 2100000000;
+}
+
+test SaturatingOverflowCase.i64_quotient "a division that fits truncates toward zero as always" {
+    receiver {
+        i64_left = -7;
+        i64_right = 2;
+    }
+
+    expect return -3;
+}
+
+test SaturatingOverflowCase.i64_quotient "a zero divisor still takes the on_zero fallback" {
+    receiver {
+        i64_left = 5;
+        i64_right = 0;
+    }
+
+    expect return 0;
+}
+
+// --- clamping upward ---
+
+test SaturatingOverflowCase.i32_sum "int32 addition past MAX clamps to MAX" {
+    receiver {
+        i32_left = 2147483647;
+        i32_right = 1;
+    }
+
+    expect return 2147483647;
+}
+
+test SaturatingOverflowCase.i32_product "int32 multiplication past MAX clamps to MAX" {
+    receiver {
+        i32_left = 46341;
+        i32_right = 46341;
+    }
+
+    expect return 2147483647;
+}
+
+test SaturatingOverflowCase.i32_negated "negating int32 MIN clamps to MAX" {
+    receiver {
+        i32_left = -2147483647 - 1;
+    }
+
+    expect return 2147483647;
+}
+
+test SaturatingOverflowCase.i64_sum "int64 addition past MAX clamps to MAX" {
+    receiver {
+        i64_left = 9223372036854775807;
+        i64_right = 1;
+    }
+
+    expect return 9223372036854775807;
+}
+
+test SaturatingOverflowCase.i64_product "int64 multiplication past MAX clamps to MAX" {
+    receiver {
+        i64_left = 4294967296;
+        i64_right = 4294967296;
+    }
+
+    expect return 9223372036854775807;
+}
+
+test SaturatingOverflowCase.i64_negated "negating int64 MIN clamps to MAX" {
+    receiver {
+        i64_left = -9223372036854775807 - 1;
+    }
+
+    expect return 9223372036854775807;
+}
+
+// The one division that overflows. Its quotient is 2^63, so it lands on MAX.
+test SaturatingOverflowCase.i64_quotient "MIN / -1 clamps to MAX" {
+    receiver {
+        i64_left = -9223372036854775807 - 1;
+        i64_right = -1;
+    }
+
+    expect return 9223372036854775807;
+}
+
+// The remainder of that same division is 0, which is representable, so no policy touches it.
+test SaturatingOverflowCase.i64_remainder "MIN % -1 is zero under saturation too" {
+    receiver {
+        i64_left = -9223372036854775807 - 1;
+        i64_right = -1;
+    }
+
+    expect return 0;
+}
+
+test SaturatingOverflowCase.u32_sum "uint32 addition past MAX clamps to MAX" {
+    receiver {
+        u32_left = 4294967295;
+        u32_right = 1;
+    }
+
+    expect return 4294967295;
+}
+
+// uint64 MAX has no literal form -- it is above int64 MAX -- so it is built the way casts.protolang
+// builds values it cannot write: 2 * int64 MAX is one short of it.
+test SaturatingOverflowCase.u64_product "uint64 multiplication past MAX clamps to MAX" {
+    receiver {
+        u64_left = 4294967296;
+        u64_right = 4294967296;
+    }
+
+    expect return 9223372036854775807 as uint64 * 2 + 1;
+}
+
+// --- clamping downward ---
+
+test SaturatingOverflowCase.i32_difference "int32 subtraction past MIN clamps to MIN" {
+    receiver {
+        i32_left = -2147483647;
+        i32_right = 2;
+    }
+
+    expect return -2147483647 - 1;
+}
+
+test SaturatingOverflowCase.i32_sum "int32 addition past MIN clamps to MIN" {
+    receiver {
+        i32_left = -2147483647 - 1;
+        i32_right = -1;
+    }
+
+    expect return -2147483647 - 1;
+}
+
+test SaturatingOverflowCase.i32_product "a negative product past MIN clamps to MIN" {
+    receiver {
+        i32_left = 2147483647;
+        i32_right = -2;
+    }
+
+    expect return -2147483647 - 1;
+}
+
+test SaturatingOverflowCase.i64_product "a negative product past MIN clamps to MIN" {
+    receiver {
+        i64_left = -9223372036854775807 - 1;
+        i64_right = 2;
+    }
+
+    expect return -9223372036854775807 - 1;
+}
+
+// Unsigned arithmetic can only leave the range at one end, so the lower clamp is zero.
+test SaturatingOverflowCase.u32_difference "uint32 subtraction below zero clamps to zero" {
+    receiver {
+        u32_left = 0;
+        u32_right = 1;
+    }
+
+    expect return 0;
+}
+
+test SaturatingOverflowCase.u32_difference "an unsigned subtraction that fits is not clamped" {
+    receiver {
+        u32_left = 10;
+        u32_right = 4;
+    }
+
+    expect return 6;
+}

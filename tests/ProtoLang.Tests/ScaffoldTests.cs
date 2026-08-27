@@ -328,6 +328,10 @@ public class ScaffoldTests
 
             extend Caller {
                 fn target_value() -> int64 {
+                    if not has target {
+                        return 0;
+                    }
+
                     return target.value;
                 }
             }
@@ -364,6 +368,10 @@ public class ScaffoldTests
 
             extend Caller {
                 fn target_value() -> int64 {
+                    if not has target {
+                        return 0;
+                    }
+
                     return target.value;
                 }
             }

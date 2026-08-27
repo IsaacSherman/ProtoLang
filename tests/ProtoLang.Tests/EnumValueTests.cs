@@ -108,6 +108,10 @@ public class EnumValueTests
             """
             extend Outer {
                 fn f() -> Deep {
+                    if not has inner {
+                        return Deep.DEEP_NONE;
+                    }
+
                     var TopLevelStatus: Inner = inner;
                     return TopLevelStatus.deep;
                 }

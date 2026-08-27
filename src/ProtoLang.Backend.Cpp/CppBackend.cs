@@ -617,6 +617,10 @@ public sealed class CppBackend : ITestProjectScaffold
         IrLocalReference local => Escape(local.Local.Name),
         IrParameterReference parameter => Escape(parameter.Parameter.Name),
         IrFieldAccess field => $"{Expression(field.Receiver)}.{field.Field.Name}()",
+
+        // Uniform in C++, unlike C#: protoc emits has_x() for every field with presence,
+        // message-typed or not.
+        IrFieldPresence presence => $"{Expression(presence.Receiver)}.has_{presence.Field.Name}()",
         IrMethodCall call => EmitCall(call),
         IrBinary binary => EmitBinary(binary),
         IrIntegerDivision division => EmitIntegerDivision(division),

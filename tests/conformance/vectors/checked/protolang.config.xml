@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  The checked overflow policy, for the vectors in this directory only.
+
+  Config discovery walks up from the source file and stops at the nearest match, so this file
+  governs checked_arithmetic.protolang and nothing else. The corpus therefore exercises the real
+  discovery path rather than a test-only hook, and proves that vectors compiled under different
+  policies still build into one assembly.
+-->
+
+<ProtoLang>
+  <Arithmetic>
+    <Overflow>Checked</Overflow>
+  </Arithmetic>
+</ProtoLang>

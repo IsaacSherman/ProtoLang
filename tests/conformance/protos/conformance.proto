@@ -117,3 +117,52 @@ message WellKnownCase {
   repeated google.protobuf.Timestamp checkpoints = 3;
   int64 nanos_per_second = 4;
 }
+
+// presence.protolang -- field presence and the guard rule (spec 8.4, 13.1).
+//
+// Deliberately mixes the three presence kinds a proto3 schema can have, because they are not the
+// same question. A singular message field has presence without asking for it; a scalar declared
+// 'optional' has explicit presence and generates a HasX; a plain scalar has none at all, and an
+// unset one is indistinguishable from a set zero.
+message PresenceCase {
+  google.protobuf.Timestamp starts_at = 1;
+  PresenceInner inner = 2;
+
+  optional int64 tuning = 3;
+  optional string label = 4;
+
+  // No 'optional': an unset value and 0 are the same value here, which is what makes
+  // 'has implicit_count' a compile error rather than a question with an answer.
+  int64 implicit_count = 5;
+
+  repeated int64 readings = 6;
+}
+
+message PresenceInner {
+  google.protobuf.Timestamp stamp = 1;
+  int64 weight = 2;
+}
+
+// checked/checked_arithmetic.protolang -- the checked overflow policy (spec 10.4).
+message CheckedOverflowCase {
+  int32 i32_left = 1;
+  int32 i32_right = 2;
+  int64 i64_left = 3;
+  int64 i64_right = 4;
+  uint32 u32_left = 5;
+  uint32 u32_right = 6;
+  uint64 u64_left = 7;
+  uint64 u64_right = 8;
+}
+
+// saturating/saturating_arithmetic.protolang -- the saturating overflow policy (spec 10.4).
+message SaturatingOverflowCase {
+  int32 i32_left = 1;
+  int32 i32_right = 2;
+  int64 i64_left = 3;
+  int64 i64_right = 4;
+  uint32 u32_left = 5;
+  uint32 u32_right = 6;
+  uint64 u64_left = 7;
+  uint64 u64_right = 8;
+}

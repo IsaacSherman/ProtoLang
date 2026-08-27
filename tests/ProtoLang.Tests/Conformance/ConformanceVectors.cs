@@ -58,9 +58,20 @@ internal static class ConformanceVectors
     public static IReadOnlyList<string> DeclaredIdentities(IEnumerable<IrTest> tests)
         => tests.Select(test => test.Identity).ToList();
 
+    /// <summary>
+    /// Every <c>.protolang</c> file under <c>vectors/</c>, at any depth.
+    /// </summary>
+    /// <remarks>
+    /// The search is recursive because a subdirectory is how a vector selects a non-default
+    /// language policy: it carries its own <c>protolang.config.xml</c>, and the compiler's ordinary
+    /// upward search finds it. That means the corpus exercises real config discovery rather than a
+    /// hook that exists only for tests, and it keeps the vectors compiled under different policies
+    /// in the same assembly and the same link as everything else -- which is the property that
+    /// makes a per-project policy safe to have at all.
+    /// </remarks>
     private static IReadOnlyList<ConformanceVector> Discover()
         => Directory.Exists(VectorDirectory)
-            ? Directory.GetFiles(VectorDirectory, "*.protolang")
+            ? Directory.GetFiles(VectorDirectory, "*.protolang", SearchOption.AllDirectories)
                 .OrderBy(path => path, StringComparer.Ordinal)
                 .Select(path => new ConformanceVector(Path.GetFileNameWithoutExtension(path), path))
                 .ToList()

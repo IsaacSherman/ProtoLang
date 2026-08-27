@@ -1,0 +1,263 @@
+// Conformance vectors for field presence and the guard rule (spec 8.4, 13.1).
+//
+// This is the vector well_known.protolang could not be. Its header used to explain that every
+// message field it read was set on purpose, because an unset one "does not mean the same thing in
+// both targets" -- C# yields null and throws, C++ yields the default instance and returns zero.
+// The corpus avoided the divergence rather than covering it.
+//
+// It is covered here by being unrepresentable: reading a message field without establishing its
+// presence is PL0078, so the two backends have nothing left to disagree about. What these vectors
+// pin is that the three presence kinds a proto3 schema can carry are genuinely different, and that
+// each guard shape means what it says in both targets.
+
+import proto "conformance.proto";
+
+extend PresenceCase {
+    // The plain guard. Without the 'if', the read is a compile error.
+    fn start_seconds() -> int64 {
+        if has starts_at {
+            return starts_at.seconds;
+        }
+
+        return -1;
+    }
+
+    // The guard-clause shape. The early return means the rest of the method runs only where
+    // 'starts_at' is set, so the read below needs no 'if' of its own.
+    fn start_seconds_or_zero() -> int64 {
+        if not has starts_at {
+            return 0;
+        }
+
+        return starts_at.seconds;
+    }
+
+    // 'and' short-circuits, so the right operand may read through what the left one proved.
+    // Reaching 'inner.stamp' at all requires 'inner', which is what makes the first test load
+    // bearing rather than decorative.
+    fn inner_stamp_seconds() -> int64 {
+        if has inner and has inner.stamp {
+            return inner.stamp.seconds;
+        }
+
+        return -1;
+    }
+
+    // A message field one level down, guarded through a nested 'if' rather than an 'and'.
+    fn inner_weight() -> int64 {
+        if has inner {
+            return inner.weight;
+        }
+
+        return -1;
+    }
+
+    // Explicit presence on a scalar: the whole point of proto3 'optional'. Note the vector that
+    // sets this to zero -- 'has' is not a test for a non-default value.
+    fn tuning_is_set() -> bool {
+        return has tuning;
+    }
+
+    // Reading it needs no guard. An unset scalar reads as its zero in both targets, which they
+    // have always agreed about; only message fields ever diverged.
+    fn tuning_value() -> int64 {
+        return tuning;
+    }
+
+    fn label_is_set() -> bool {
+        return has label;
+    }
+
+    // No 'optional' on this field, so it has no presence to ask about and nothing to guard.
+    fn implicit_count_value() -> int64 {
+        return implicit_count;
+    }
+
+    // A repeated field has no presence either. An unset one is an empty one, and the loop simply
+    // runs zero times.
+    fn reading_total() -> int64 {
+        var total: int64 = 0;
+
+        for reading in readings {
+            total = total + reading;
+        }
+
+        return total;
+    }
+}
+
+test PresenceCase.start_seconds "a set message field reads through" {
+    receiver {
+        starts_at { seconds = 1700000000; }
+    }
+
+    expect return 1700000000;
+}
+
+test PresenceCase.start_seconds "an unset message field takes the guard's other branch" {
+    receiver {
+        implicit_count = 1;
+    }
+
+    expect return -1;
+}
+
+test PresenceCase.start_seconds_or_zero "an early-return guard proves presence for what follows" {
+    receiver {
+        starts_at { seconds = 42; }
+    }
+
+    expect return 42;
+}
+
+test PresenceCase.start_seconds_or_zero "and returns from the guard when the field is unset" {
+    receiver {
+        implicit_count = 1;
+    }
+
+    expect return 0;
+}
+
+// The three cases below are separate on purpose. A single one with everything set would leave
+// either half of the 'and' removable without failing anything.
+
+test PresenceCase.inner_stamp_seconds "both levels set" {
+    receiver {
+        inner {
+            stamp { seconds = 900; }
+            weight = 5;
+        }
+    }
+
+    expect return 900;
+}
+
+test PresenceCase.inner_stamp_seconds "the outer message set, the inner one not" {
+    receiver {
+        inner {
+            weight = 5;
+        }
+    }
+
+    expect return -1;
+}
+
+test PresenceCase.inner_stamp_seconds "neither set" {
+    receiver {
+        implicit_count = 1;
+    }
+
+    expect return -1;
+}
+
+test PresenceCase.inner_weight "a scalar read through a guarded message field" {
+    receiver {
+        inner {
+            weight = 12;
+        }
+    }
+
+    expect return 12;
+}
+
+test PresenceCase.inner_weight "an unset message field is not a zero-filled one" {
+    receiver {
+        implicit_count = 1;
+    }
+
+    expect return -1;
+}
+
+test PresenceCase.tuning_is_set "an optional scalar that was never set" {
+    receiver {
+        implicit_count = 1;
+    }
+
+    expect return false;
+}
+
+test PresenceCase.tuning_is_set "an optional scalar set to a non-zero value" {
+    receiver {
+        tuning = 5;
+    }
+
+    expect return true;
+}
+
+// The case that separates explicit presence from a comparison against the default. Both backends
+// have to report this as set, which they can only do by carrying the presence bit rather than by
+// looking at the value.
+test PresenceCase.tuning_is_set "an optional scalar set to zero is still set" {
+    receiver {
+        tuning = 0;
+    }
+
+    expect return true;
+}
+
+test PresenceCase.tuning_value "an unset optional scalar reads as zero" {
+    receiver {
+        implicit_count = 1;
+    }
+
+    expect return 0;
+}
+
+test PresenceCase.tuning_value "a set optional scalar reads as its value" {
+    receiver {
+        tuning = -17;
+    }
+
+    expect return -17;
+}
+
+test PresenceCase.label_is_set "an unset optional string" {
+    receiver {
+        implicit_count = 1;
+    }
+
+    expect return false;
+}
+
+// The string counterpart of the zero case above: an empty string is a value, not an absence.
+test PresenceCase.label_is_set "an optional string set to empty is still set" {
+    receiver {
+        label = "";
+    }
+
+    expect return true;
+}
+
+test PresenceCase.implicit_count_value "an unset implicit-presence scalar reads as zero" {
+    receiver {
+        tuning = 1;
+    }
+
+    expect return 0;
+}
+
+test PresenceCase.implicit_count_value "a set implicit-presence scalar reads as its value" {
+    receiver {
+        implicit_count = 7;
+    }
+
+    expect return 7;
+}
+
+test PresenceCase.reading_total "an unset repeated field iterates zero times" {
+    receiver {
+        implicit_count = 1;
+    }
+
+    expect return 0;
+}
+
+test PresenceCase.reading_total "a populated repeated field sums" {
+    receiver {
+        readings = 3;
+        readings = 4;
+        readings = 5;
+    }
+
+    expect return 12;
+}

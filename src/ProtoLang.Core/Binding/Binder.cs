@@ -686,11 +686,139 @@ public sealed class Binder
 
         foreach (var statement in block.Statements)
         {
-            statements.Add(BindStatement(statement, scope, context));
+            var bound = BindStatement(statement, scope, context);
+            statements.Add(bound);
+
+            // A guard clause establishes presence for everything after it, not only inside its own
+            // branch: 'if not has x { return 0; }' leaves x set for the rest of the block.
+            context = context with { Present = Advance(context.Present, bound) };
         }
 
         return new IrBlock(statements, block.Span);
     }
+
+    /// <summary>
+    /// The presence facts that hold after <paramref name="statement"/>, given those that held
+    /// before it.
+    /// </summary>
+    /// <remarks>
+    /// Only an <c>if</c> adds anything, and only when one of its branches cannot complete normally.
+    /// <see cref="NeverFallsThrough"/> is the same predicate the all-paths-return check uses, which
+    /// is what makes the early-return guard work without a second reachability analysis.
+    /// </remarks>
+    private static IReadOnlySet<string> Advance(IReadOnlySet<string> before, IrStatement statement)
+    {
+        if (statement is not IrIf conditional)
+        {
+            return before;
+        }
+
+        var (whenTrue, whenFalse) = PresenceFacts(conditional.Condition);
+
+        if (NeverFallsThrough(conditional.Then))
+        {
+            before = Union(before, whenFalse);
+        }
+
+        if (conditional.Else is not null && NeverFallsThrough(conditional.Else))
+        {
+            before = Union(before, whenTrue);
+        }
+
+        return before;
+    }
+
+    /// <summary>
+    /// The presence facts a condition establishes, for the case where it is true and for the case
+    /// where it is false.
+    /// </summary>
+    /// <remarks>
+    /// <c>and</c> proves both of its operands when true and neither when false; <c>or</c> is its
+    /// mirror. Anything this does not recognise contributes nothing, which is always sound: an
+    /// unrecognised condition costs a diagnostic the author can silence with an explicit guard,
+    /// never a missed one.
+    /// </remarks>
+    private static (IReadOnlySet<string> WhenTrue, IReadOnlySet<string> WhenFalse) PresenceFacts(
+        IrExpression condition)
+    {
+        switch (condition)
+        {
+            case IrFieldPresence presence when PresencePath(presence.Receiver, presence.Field) is { } path:
+                return (new HashSet<string>(StringComparer.Ordinal) { path }, EmptyPresence);
+
+            case IrUnary { Operator: IrUnaryOperator.LogicalNot } negation:
+            {
+                var (whenTrue, whenFalse) = PresenceFacts(negation.Operand);
+                return (whenFalse, whenTrue);
+            }
+
+            case IrBinary { Operator: IrBinaryOperator.LogicalAnd } conjunction:
+            {
+                var left = PresenceFacts(conjunction.Left);
+                var right = PresenceFacts(conjunction.Right);
+                return (Union(left.WhenTrue, right.WhenTrue), EmptyPresence);
+            }
+
+            case IrBinary { Operator: IrBinaryOperator.LogicalOr } disjunction:
+            {
+                var left = PresenceFacts(disjunction.Left);
+                var right = PresenceFacts(disjunction.Right);
+                return (EmptyPresence, Union(left.WhenFalse, right.WhenFalse));
+            }
+
+            default:
+                return (EmptyPresence, EmptyPresence);
+        }
+    }
+
+    private static IReadOnlySet<string> Union(IReadOnlySet<string> left, IReadOnlySet<string> right)
+    {
+        if (right.Count == 0)
+        {
+            return left;
+        }
+
+        if (left.Count == 0)
+        {
+            return right;
+        }
+
+        var union = new HashSet<string>(left, StringComparer.Ordinal);
+        union.UnionWith(right);
+        return union;
+    }
+
+    /// <summary>
+    /// A stable key for the field <paramref name="field"/> reached through
+    /// <paramref name="receiver"/>, or null when the receiver is not something a presence test can
+    /// name.
+    /// </summary>
+    /// <remarks>
+    /// The roots -- the receiver, a parameter, a local, a loop binding -- are present by
+    /// construction, so they need no key of their own beyond something unique. Local and parameter
+    /// names are unique within a method, because shadowing is rejected at declaration.
+    /// </remarks>
+    private static string? PresencePath(IrExpression receiver, FieldDescriptor field)
+        => PresenceRoot(receiver) is { } root ? $"{root}.{field.Name}" : null;
+
+    private static string? PresenceRoot(IrExpression expression) => expression switch
+    {
+        IrThis => "this",
+        IrLocalReference local => $"local:{local.Local.Name}",
+        IrParameterReference parameter => $"param:{parameter.Parameter.Name}",
+
+        // Only a singular message field extends a path; a scalar cannot be read through, and a
+        // repeated field is reached by iteration rather than by name.
+        IrFieldAccess field when IsSingularMessage(field.Field) => PresencePath(field.Receiver, field.Field),
+
+        // A method result is present by construction -- every message value in the language comes
+        // from a root or a guarded read -- but it has no name, so nothing reached through it can be
+        // guarded. BindFieldAccess turns that into a diagnostic with a way out.
+        _ => null,
+    };
+
+    private static bool IsSingularMessage(FieldDescriptor field)
+        => !field.IsRepeated && !field.IsMap && field.FieldType is FieldType.Message or FieldType.Group;
 
     private IrStatement BindStatement(Statement statement, Scope scope, MethodContext context) => statement switch
     {
@@ -842,10 +970,14 @@ public sealed class Binder
     private IrStatement BindIf(IfStatement statement, Scope scope, MethodContext context)
     {
         var condition = BindCondition(statement.Condition, scope, context, "if");
-        var then = BindBlock(statement.Then, scope, context);
+        var (whenTrue, whenFalse) = PresenceFacts(condition);
+
+        var then = BindBlock(statement.Then, scope, context with { Present = Union(context.Present, whenTrue) });
 
         // The parser only ever puts a block or a nested 'if' here, and BindStatement handles both.
-        var elseBranch = statement.Else is null ? null : BindStatement(statement.Else, scope, context);
+        var elseBranch = statement.Else is null
+            ? null
+            : BindStatement(statement.Else, scope, context with { Present = Union(context.Present, whenFalse) });
 
         return new IrIf(condition, then, elseBranch, statement.Span);
     }
@@ -956,6 +1088,7 @@ public sealed class Binder
             InvocationExpression invocation => BindInvocation(invocation, scope, context),
             BinaryExpression binary => BindBinary(binary, scope, context, expectedType),
             UnaryExpression unary => BindUnary(unary, scope, context, expectedType),
+            HasExpression has => BindHas(has, scope, context),
             CastExpression cast => BindCast(cast, scope, context),
             ErrorExpression error => new IrLiteral(null, ErrorType.Instance, error.Span),
             _ => throw new ArgumentOutOfRangeException(nameof(expression), expression, "Unhandled expression."),
@@ -1079,7 +1212,8 @@ public sealed class Binder
             var field = context.Receiver.FindFieldByName(name.Name);
             if (field is not null)
             {
-                return BindFieldAccess(new IrThis(new MessageType(context.Receiver), name.Span), field, name.Span);
+                return BindFieldAccess(
+                    new IrThis(new MessageType(context.Receiver), name.Span), field, name.Span, context);
             }
         }
 
@@ -1092,7 +1226,28 @@ public sealed class Binder
         return new IrLiteral(null, ErrorType.Instance, name.Span);
     }
 
-    private IrExpression BindFieldAccess(IrExpression receiver, FieldDescriptor field, SourceSpan span)
+    /// <summary>
+    /// Binds a field read, and enforces the presence rule for message-typed fields (spec 13.1).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Reading an unset singular message field is the one place the two backends disagreed
+    /// silently: C# yields null and throws at the next access, C++ yields the default instance and
+    /// returns zero. Neither is wrong for its runtime, and neither can be made to match the other
+    /// without a runtime check in every target, so the situation is made unrepresentable instead --
+    /// the same choice <c>on_zero</c> makes for a zero divisor.
+    /// </para>
+    /// <para>
+    /// The check is on the *value*, not on reading through it. Binding the field to a local or
+    /// passing it as an argument launders exactly the same divergence, and this is the one point
+    /// every one of those paths goes through.
+    /// </para>
+    /// </remarks>
+    private IrExpression BindFieldAccess(
+        IrExpression receiver,
+        FieldDescriptor field,
+        SourceSpan span,
+        MethodContext context)
     {
         if (field.IsMap)
         {
@@ -1102,6 +1257,34 @@ public sealed class Binder
                 $"Field '{field.Name}' is a map, which this compiler version does not support.",
                 span);
             return new IrLiteral(null, ErrorType.Instance, span);
+        }
+
+        if (IsSingularMessage(field))
+        {
+            var path = PresencePath(receiver, field);
+
+            if (path is null)
+            {
+                _diagnostics.Error(
+                    "PL0078",
+                    "message field may be unset",
+                    $"'{field.Name}' is reached through a value that has no name, so its presence "
+                    + "cannot be established.",
+                    span,
+                    "Bind the intermediate value to a local first, then guard the field: "
+                    + $"'var m: M = ...; if has m.{field.Name} {{ ... }}'.");
+            }
+            else if (!context.Present.Contains(path))
+            {
+                _diagnostics.Error(
+                    "PL0078",
+                    "message field may be unset",
+                    $"'{field.Name}' is a message field, which may be unset. Reading it would mean "
+                    + "different things in different backends.",
+                    span,
+                    $"Guard it: 'if has {field.Name} {{ ... }}', or return early with "
+                    + $"'if not has {field.Name} {{ ... }}' (spec 13.1).");
+            }
         }
 
         return new IrFieldAccess(receiver, field, TypeFactory.FromField(field), span);
@@ -1228,7 +1411,7 @@ public sealed class Binder
         var field = messageType.Descriptor.FindFieldByName(member.Name);
         if (field is not null)
         {
-            return BindFieldAccess(receiver, field, member.Span);
+            return BindFieldAccess(receiver, field, member.Span, context);
         }
 
         if (_methods.ContainsKey((messageType.Descriptor.FullName, member.Name)))
@@ -1349,6 +1532,114 @@ public sealed class Binder
         return new IrMethodCall(receiver, signature, arguments, invocation.Span);
     }
 
+    /// <summary>
+    /// Binds a presence test, <c>has customer.email</c> (spec 8.4).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The operand is a field, not an arbitrary expression: <c>has</c> asks whether a field is set,
+    /// and there is no such question to ask about a local, a literal, or a method result. Its
+    /// receiver, though, is an ordinary expression bound the ordinary way -- asking about
+    /// <c>a.b</c> means reading <c>a</c>, so <c>a</c> needs its own guard.
+    /// </para>
+    /// <para>
+    /// Which fields admit the question is <see cref="FieldDescriptor.HasPresence"/>'s answer, and
+    /// deliberately not this compiler's. It is already correct for proto2, for proto3 with and
+    /// without <c>optional</c>, and for editions, which is why supporting presence properly turned
+    /// out to need no syntax-version check at all (spec 21.3).
+    /// </para>
+    /// </remarks>
+    private IrExpression BindHas(HasExpression has, Scope scope, MethodContext context)
+    {
+        IrExpression receiver;
+        FieldDescriptor? field;
+        string name;
+
+        switch (has.Operand)
+        {
+            case NameExpression bare when context.AllowImplicitReceiverFields
+                    && scope.LookupLocal(bare.Name) is null
+                    && scope.LookupParameter(bare.Name) is null:
+                receiver = new IrThis(new MessageType(context.Receiver), bare.Span);
+                field = context.Receiver.FindFieldByName(bare.Name);
+                name = bare.Name;
+                break;
+
+            case MemberAccessExpression member:
+            {
+                var target = BindExpression(member.Receiver, scope, context, null);
+
+                if (target.Type is ErrorType)
+                {
+                    return new IrLiteral(null, ErrorType.Instance, has.Span);
+                }
+
+                if (target.Type is not MessageType message)
+                {
+                    _diagnostics.Error(
+                        "PL0080",
+                        "'has' needs a field",
+                        $"'{target.Type.DisplayName}' is not a message, so it has no fields to test.",
+                        has.Span);
+                    return new IrLiteral(null, ErrorType.Instance, has.Span);
+                }
+
+                receiver = target;
+                field = message.Descriptor.FindFieldByName(member.Name);
+                name = member.Name;
+                break;
+            }
+
+            default:
+                _diagnostics.Error(
+                    "PL0080",
+                    "'has' needs a field",
+                    "The operand of 'has' must name a protobuf field.",
+                    has.Span,
+                    "Only a field can be unset. A local, a parameter, and a method result always "
+                    + "hold a value, so there is nothing to ask about.");
+                return new IrLiteral(null, ErrorType.Instance, has.Span);
+        }
+
+        if (field is null)
+        {
+            _diagnostics.Error(
+                "PL0041",
+                "unknown field",
+                $"'{name}' is not a field of '{(receiver.Type as MessageType)?.Descriptor.FullName}'.",
+                has.Span);
+            return new IrLiteral(null, ErrorType.Instance, has.Span);
+        }
+
+        if (field.IsMap)
+        {
+            _diagnostics.Error(
+                "PL0038",
+                "maps are not supported",
+                $"'{name}' is a map field.",
+                has.Span);
+            return new IrLiteral(null, ErrorType.Instance, has.Span);
+        }
+
+        if (!field.HasPresence)
+        {
+            _diagnostics.Error(
+                "PL0079",
+                "field has no presence",
+                $"'{name}' cannot be tested for presence.",
+                has.Span,
+                field.IsRepeated
+                    ? "A repeated field has no presence; an unset one is an empty one. Compare its "
+                      + "length, or iterate it and let the loop run zero times (spec 14.1)."
+                    : "This field has implicit presence, so an unset value and the type's default "
+                      + "are the same value on the wire. Declaring it 'optional' in the .proto "
+                      + "gives it explicit presence (spec 8.4).");
+            return new IrLiteral(null, ErrorType.Instance, has.Span);
+        }
+
+        return new IrFieldPresence(receiver, field, has.Span);
+    }
+
     private IrExpression BindBinary(
         BinaryExpression binary,
         Scope scope,
@@ -1367,7 +1658,20 @@ public sealed class Binder
         var operandHint = isComparison || isLogical ? null : expectedType;
 
         var left = BindExpression(binary.Left, scope, context, operandHint);
-        var right = BindExpression(binary.Right, scope, context, left.Type is ErrorType ? operandHint : left.Type);
+
+        // 'has a and has a.b' has to type-check: 'and' short-circuits, so the right operand only
+        // runs where the left one held, and asking about a.b means reading a.
+        var rightContext = isLogical
+            ? context with
+            {
+                Present = binary.Operator == BinaryOperatorKind.LogicalAnd
+                    ? Union(context.Present, PresenceFacts(left).WhenTrue)
+                    : Union(context.Present, PresenceFacts(left).WhenFalse),
+            }
+            : context;
+
+        var right = BindExpression(
+            binary.Right, scope, rightContext, left.Type is ErrorType ? operandHint : left.Type);
 
         // An untyped integer literal on the left should take its type from the right operand.
         if (binary.Left is IntegerLiteralExpression && right.Type is ScalarType && !TypesMatch(left.Type, right.Type))
@@ -1642,7 +1946,23 @@ public sealed class Binder
         PlType ReturnType,
         IReadOnlyList<IrParameter> Parameters,
         bool AllowImplicitReceiverFields = true,
-        int LoopDepth = 0);
+        int LoopDepth = 0)
+    {
+        /// <summary>
+        /// Access paths whose presence has been established on every path reaching the statement
+        /// being bound (spec 13.1).
+        /// </summary>
+        /// <remarks>
+        /// A set rather than a lattice, and no fixpoint over loops, because presence facts are
+        /// monotone within a method: ProtoLang cannot assign to a field, so nothing that has been
+        /// shown to be set can become unset before the method ends. If receiver mutation ever
+        /// arrives (spec 18), this is the assumption that has to be revisited.
+        /// </remarks>
+        public IReadOnlySet<string> Present { get; init; } = EmptyPresence;
+    }
+
+    private static readonly IReadOnlySet<string> EmptyPresence =
+        new HashSet<string>(StringComparer.Ordinal);
 
     private sealed class Scope
     {

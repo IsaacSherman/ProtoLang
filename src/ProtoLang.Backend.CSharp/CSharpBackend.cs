@@ -545,6 +545,7 @@ public sealed class CSharpBackend : ITestProjectScaffold
         IrLocalReference local => Escape(local.Local.Name),
         IrParameterReference parameter => Escape(parameter.Parameter.Name),
         IrFieldAccess field => $"{Expression(field.Receiver, receiverName)}.{NameConventions.ToPascalCase(field.Field.Name)}",
+            IrFieldPresence presence => EmitPresence(presence, receiverName),
         IrMethodCall call => EmitCall(call, receiverName),
         IrBinary binary => EmitBinary(binary, receiverName),
         IrIntegerDivision division => EmitIntegerDivision(division, receiverName),
@@ -582,6 +583,25 @@ public sealed class CSharpBackend : ITestProjectScaffold
         }
 
         return string.Join('_', parts) + "ProtoLangExtensions";
+    }
+
+    /// <summary>
+    /// Emits a presence test (spec 8.4).
+    /// </summary>
+    /// <remarks>
+    /// protoc's C# generator emits <c>HasXxx</c> only for a field carried in a oneof, real or the
+    /// synthetic one a proto3 <c>optional</c> creates. A message-typed field has presence without
+    /// one, and expresses it by being a nullable reference, so the two cases need different
+    /// spellings. Both are what a C# author would write by hand.
+    /// </remarks>
+    private static string EmitPresence(IrFieldPresence presence, string receiverName)
+    {
+        var receiver = Expression(presence.Receiver, receiverName);
+        var property = NameConventions.ToPascalCase(presence.Field.Name);
+
+        return presence.Field.FieldType is FieldType.Message or FieldType.Group
+            ? $"({receiver}.{property} != null)"
+            : $"{receiver}.Has{property}";
     }
 
     private static string EmitBinary(IrBinary binary, string receiverName)
