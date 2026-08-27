@@ -1,0 +1,156 @@
+// Conformance vectors for protobuf's well-known types.
+//
+// These read through message-typed fields that neither backend generates: Timestamp and Duration
+// arrive precompiled with the protobuf runtime, so both targets are working against types ProtoLang
+// never emitted. The vector deliberately only *uses* well-known types and does not extend one --
+// extending is its own question, with its own diagnostic.
+//
+// Every message field read below is set in every case. An unset singular message field does not
+// mean the same thing in both targets, so a vector that left one out would be testing that
+// divergence rather than the arithmetic it claims to.
+
+import proto "conformance.proto";
+
+extend WellKnownCase {
+    fn ends_at_seconds() -> int64 {
+        return starts_at.seconds + length.seconds;
+    }
+
+    // Mixes the int32 'nanos' with the int64 'seconds', so the cast is load-bearing rather than
+    // decorative.
+    fn start_nanos_total() -> int64 {
+        return starts_at.seconds * nanos_per_second + (starts_at.nanos as int64);
+    }
+
+    fn checkpoint_span_seconds() -> int64 {
+        var earliest: int64 = 0;
+        var latest: int64 = 0;
+        var count: int64 = 0;
+
+        for checkpoint in checkpoints {
+            if count == 0 {
+                earliest = checkpoint.seconds;
+                latest = checkpoint.seconds;
+            }
+
+            if checkpoint.seconds < earliest {
+                earliest = checkpoint.seconds;
+            }
+
+            if checkpoint.seconds > latest {
+                latest = checkpoint.seconds;
+            }
+
+            count = count + 1;
+        }
+
+        return latest - earliest;
+    }
+
+    fn sub_second_precision() -> bool {
+        return starts_at.nanos != 0 or length.nanos != 0;
+    }
+}
+
+test WellKnownCase.ends_at_seconds "a duration advances a timestamp" {
+    receiver {
+        starts_at { seconds = 1700000000; nanos = 250000000; }
+        length { seconds = 3600; }
+    }
+
+    expect return 1700003600;
+}
+
+test WellKnownCase.ends_at_seconds "a negative duration walks a timestamp backwards" {
+    receiver {
+        starts_at { seconds = 1700000000; }
+        length { seconds = -3600; }
+    }
+
+    expect return 1699996400;
+}
+
+test WellKnownCase.start_nanos_total "seconds and nanos combine across integer widths" {
+    receiver {
+        starts_at { seconds = 90; nanos = 500000000; }
+        length { seconds = 0; }
+        nanos_per_second = 1000000000;
+    }
+
+    expect return 90500000000;
+}
+
+test WellKnownCase.start_nanos_total "a negative timestamp keeps its nanos positive" {
+    receiver {
+        starts_at { seconds = -2; nanos = 750000000; }
+        length { seconds = 0; }
+        nanos_per_second = 1000000000;
+    }
+
+    expect return -1250000000;
+}
+
+test WellKnownCase.checkpoint_span_seconds "the span runs from the earliest checkpoint to the latest" {
+    receiver {
+        starts_at { seconds = 0; }
+        length { seconds = 0; }
+
+        // Deliberately out of order, so a version that assumed sorted input would disagree.
+        checkpoints { seconds = 500; }
+        checkpoints { seconds = 100; }
+        checkpoints { seconds = 900; }
+        checkpoints { seconds = 300; }
+    }
+
+    expect return 800;
+}
+
+test WellKnownCase.checkpoint_span_seconds "one checkpoint spans nothing" {
+    receiver {
+        starts_at { seconds = 0; }
+        length { seconds = 0; }
+
+        checkpoints { seconds = 42; }
+    }
+
+    expect return 0;
+}
+
+test WellKnownCase.checkpoint_span_seconds "no checkpoints spans nothing" {
+    receiver {
+        starts_at { seconds = 0; }
+        length { seconds = 0; }
+    }
+
+    expect return 0;
+}
+
+// The two operands below are covered one at a time. A single case with both true would leave either
+// of them individually removable without failing anything.
+
+test WellKnownCase.sub_second_precision "nanos on the timestamp alone count" {
+    receiver {
+        starts_at { seconds = 5; nanos = 1; }
+        length { seconds = 5; nanos = 0; }
+    }
+
+    expect return true;
+}
+
+test WellKnownCase.sub_second_precision "nanos on the duration alone count" {
+    receiver {
+        starts_at { seconds = 5; nanos = 0; }
+        length { seconds = 5; nanos = 1; }
+    }
+
+    expect return true;
+}
+
+test WellKnownCase.sub_second_precision "whole seconds on both sides do not" {
+    receiver {
+        starts_at { seconds = 5; nanos = 0; }
+        length { seconds = 5; nanos = 0; }
+    }
+
+    expect return false;
+}

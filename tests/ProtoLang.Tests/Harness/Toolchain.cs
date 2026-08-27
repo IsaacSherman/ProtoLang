@@ -222,6 +222,15 @@ internal static class Toolchain
     {
         var startInfo = ProcessRunner.Create(protoc);
         startInfo.ArgumentList.Add($"--proto_path={protoPath}");
+
+        // The same trailing well-known include the compiler passes. Without it a schema importing
+        // google/protobuf/*.proto compiles in ProtoLang and then fails here, generating the message
+        // classes -- which would look like a compiler bug rather than a harness one.
+        foreach (var wellKnown in ProtocLocator.FindWellKnownTypeIncludePaths(protoc))
+        {
+            startInfo.ArgumentList.Add($"--proto_path={wellKnown}");
+        }
+
         startInfo.ArgumentList.Add($"--{outputFlag}={outputDirectory}");
 
         foreach (var file in protoFiles)

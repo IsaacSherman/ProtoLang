@@ -19,7 +19,23 @@ public sealed class DescriptorLoader
 {
     private readonly string _protocPath;
 
-    public DescriptorLoader(string protocPath) => _protocPath = protocPath;
+    public DescriptorLoader(string protocPath)
+    {
+        _protocPath = protocPath;
+        ImplicitIncludePaths = ProtocLocator.FindWellKnownTypeIncludePaths(protocPath);
+    }
+
+    /// <summary>
+    /// Include directories this loader adds to every protoc run on top of the caller's, holding the
+    /// well-known schemas that ship beside the located protoc. Empty when the install carries none.
+    /// </summary>
+    /// <remarks>
+    /// Exposed because a caller that reports on unresolved imports has to search the same places
+    /// protoc will. <see cref="Compilation"/> checks that every import exists before running protoc,
+    /// and would otherwise reject an <c>import proto "google/protobuf/timestamp.proto"</c> that
+    /// protoc resolves perfectly well.
+    /// </remarks>
+    public IReadOnlyList<string> ImplicitIncludePaths { get; }
 
     /// <summary>
     /// Creates a loader using <see cref="ProtocLocator"/>.
@@ -104,6 +120,12 @@ public sealed class DescriptorLoader
         startInfo.ArgumentList.Add("--include_source_info");
 
         foreach (var includePath in includePaths)
+        {
+            startInfo.ArgumentList.Add($"--proto_path={includePath}");
+        }
+
+        // Trailing, so a project vendoring its own copy of a well-known schema still wins.
+        foreach (var includePath in ImplicitIncludePaths)
         {
             startInfo.ArgumentList.Add($"--proto_path={includePath}");
         }

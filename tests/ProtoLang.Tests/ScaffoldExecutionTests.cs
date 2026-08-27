@@ -2,6 +2,7 @@ using ProtoLang.Backend;
 using ProtoLang.Backend.Cpp;
 using ProtoLang.Backend.CSharp;
 using ProtoLang.Diagnostics;
+using ProtoLang.Tests.Conformance;
 using ProtoLang.Tests.Harness;
 using Xunit;
 
@@ -72,8 +73,56 @@ public class ScaffoldExecutionTests
             Assert.Skip("No C++ compiler found. Install clang++, g++, or Visual Studio C++ Build Tools.");
         }
 
-        var layout = ScaffoldLayout.Emit(new CppBackend(), "scaffold-cpp");
+        BuildAndRun(cmake, protobuf, ScaffoldLayout.Emit(new CppBackend(), "scaffold-cpp"));
+    }
 
+    /// <summary>
+    /// A schema importing a well-known type has to keep building once the compiler can resolve one.
+    /// The emitted project must not generate Timestamp -- libprotobuf already carries it -- while
+    /// build-time protoc still has to find the schema to compile the importing file at all.
+    /// </summary>
+    /// <remarks>
+    /// Worth a cmake run rather than a content assertion, because that balance lives entirely in
+    /// what protoc does with IMPORT_DIRS. A CMakeLists that names the wrong directories still reads
+    /// perfectly well.
+    /// </remarks>
+    [Fact]
+    public void TheEmittedCMakeProjectBuildsASchemaThatImportsWellKnownTypes()
+    {
+        var cmake = Toolchain.LocateCMake();
+        if (cmake is null)
+        {
+            Assert.Skip("No cmake found. Install CMake or Visual Studio's C++ workload.");
+        }
+
+        var protobuf = Toolchain.LocateProtobufCpp();
+        if (protobuf is null)
+        {
+            Assert.Skip(
+                "No protobuf C++ install found. Run 'vcpkg install' or set "
+                + "PROTOLANG_PROTOBUF_CPP_INCLUDE to the include directory.");
+        }
+
+        if (Toolchain.LocateCppCompiler() is null)
+        {
+            Assert.Skip("No C++ compiler found. Install clang++, g++, or Visual Studio C++ Build Tools.");
+        }
+
+        var layout = ScaffoldLayout.Emit(
+            new CppBackend(),
+            "scaffold-cpp-wellknown",
+            Path.Combine(ConformanceVectors.VectorDirectory, "well_known.protolang"),
+            ConformanceVectors.ProtoDirectory);
+
+        Assert.DoesNotContain(
+            "google/protobuf/",
+            File.ReadAllText(Path.Combine(layout.TestDirectory, CppTestProject.FileName)));
+
+        BuildAndRun(cmake, protobuf, layout);
+    }
+
+    private static void BuildAndRun(string cmake, ProtobufCppInstall protobuf, ScaffoldLayout layout)
+    {
         // The include directory's parent is the install prefix: find_package looks for the config
         // package under <prefix>/share, beside <prefix>/include.
         var prefix = Directory.GetParent(protobuf.IncludeDirectory)!.FullName;
@@ -194,8 +243,15 @@ internal sealed record ScaffoldLayout(
     string TestDirectory,
     int ExpectedTestCount)
 {
-    public static ScaffoldLayout Emit(ITestProjectScaffold backend, string label)
+    public static ScaffoldLayout Emit(
+        ITestProjectScaffold backend,
+        string label,
+        string? sourcePath = null,
+        string? protoDirectory = null)
     {
+        sourcePath ??= TestPaths.SimpleScript;
+        protoDirectory ??= TestPaths.ExampleProtoDirectory;
+
         var root = Path.Combine(Path.GetTempPath(), "protolang-" + label, Guid.NewGuid().ToString("N"));
 
         // Mirrors 'protolangc -o <root>/generated --test-out <root>/generated/tests'.
@@ -204,13 +260,13 @@ internal sealed record ScaffoldLayout(
         Directory.CreateDirectory(behaviorDirectory);
         Directory.CreateDirectory(testDirectory);
 
-        var result = Compilation.Compile(TestPaths.SimpleScript, [TestPaths.ExampleProtoDirectory]);
+        var result = Compilation.Compile(sourcePath, [protoDirectory]);
         Assert.True(
             result.Success,
-            "the example did not compile: " + string.Join("; ", result.Diagnostics.Select(d => d.ToString())));
+            "the source did not compile: " + string.Join("; ", result.Diagnostics.Select(d => d.ToString())));
 
         var diagnostics = new DiagnosticBag();
-        var options = new BackendOptions(Path.GetFileName(TestPaths.SimpleScript));
+        var options = new BackendOptions(Path.GetFileName(sourcePath));
 
         Write(behaviorDirectory, backend.Emit(result.Module!, options, diagnostics));
 
@@ -218,8 +274,8 @@ internal sealed record ScaffoldLayout(
         Write(testDirectory, testFiles);
 
         var scaffold = ScaffoldOptions.Create(
-            TestPaths.SimpleScript,
-            [TestPaths.ExampleProtoDirectory],
+            sourcePath,
+            [protoDirectory],
             result.Descriptors,
             behaviorDirectory,
             testDirectory,

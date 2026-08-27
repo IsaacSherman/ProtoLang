@@ -231,6 +231,29 @@ public class ScaffoldTests
         Assert.Contains("protobuf_generate(", cmake, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Build-time protoc has to resolve google/protobuf/*.proto to compile a schema that imports
+    /// one. protoc carries those internally only from version 33 on, so older installs need the
+    /// directory protobuf puts them in -- and it goes last, so a schema vendoring its own copy wins.
+    /// </summary>
+    /// <remarks>
+    /// A content assertion on purpose. Every protobuf install new enough to test against resolves
+    /// the well-known schemas without this, so no execution test on a modern toolchain can tell
+    /// whether the line is there. Asserting on the text at least stops it being dropped silently.
+    /// </remarks>
+    [Fact]
+    public void TheEmittedCMakeProjectLetsBuildTimeProtocFindTheWellKnownSchemas()
+    {
+        var cmake = CppTestProject.Build(CppOptions());
+
+        var importDirs = cmake.IndexOf("IMPORT_DIRS", StringComparison.Ordinal);
+        var wellKnown = cmake.IndexOf("${Protobuf_INCLUDE_DIRS}", StringComparison.Ordinal);
+        var outDir = cmake.IndexOf("PROTOC_OUT_DIR", StringComparison.Ordinal);
+
+        Assert.True(wellKnown > importDirs, "the well-known include is not among the import dirs");
+        Assert.True(wellKnown < outDir, "the well-known include is not the last import dir");
+    }
+
     /// <summary>Every driver needs a target and a ctest entry, or it is built and never run.</summary>
     [Fact]
     public void TheEmittedCMakeProjectRunsEveryDriver()
