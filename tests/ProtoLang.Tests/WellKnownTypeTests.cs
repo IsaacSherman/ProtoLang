@@ -1,6 +1,7 @@
 using ProtoLang.Backend;
 using ProtoLang.Binding;
 using ProtoLang.Diagnostics;
+using ProtoLang.Tests.Harness;
 using Xunit;
 
 namespace ProtoLang.Tests;
@@ -26,6 +27,29 @@ public class WellKnownTypeTests
         var includes = ProtocLocator.FindWellKnownTypeIncludePaths(protoc);
 
         Assert.NotEmpty(includes);
+        Assert.Contains(
+            includes,
+            include => File.Exists(Path.Combine(include, "google", "protobuf", "timestamp.proto")));
+    }
+
+    /// <summary>
+    /// A second install, filed differently. Grpc.Tools is not the only protoc that needs the
+    /// schemas handed to it, and every layout that ships them puts them somewhere else: beside the
+    /// binary for a release archive, under the prefix for vcpkg and its kin.
+    /// </summary>
+    [Fact]
+    public void AProtobufInstallLaidOutByPackageExposesItsSchemasToo()
+    {
+        var protobuf = Toolchain.LocateProtobufCpp();
+        if (protobuf?.ProtocPath is null)
+        {
+            Assert.Skip(
+                "No protobuf C++ install found. Run 'vcpkg install' or set "
+                + "PROTOLANG_PROTOBUF_CPP_INCLUDE to the include directory.");
+        }
+
+        var includes = ProtocLocator.FindWellKnownTypeIncludePaths(protobuf.ProtocPath);
+
         Assert.Contains(
             includes,
             include => File.Exists(Path.Combine(include, "google", "protobuf", "timestamp.proto")));
