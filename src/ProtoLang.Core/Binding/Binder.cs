@@ -92,6 +92,7 @@ public sealed class Binder
             }
 
             resolvedExtends.Add((extend, receiver));
+            WarnIfWellKnown(receiver, extend);
 
             foreach (var method in extend.Methods)
             {
@@ -125,6 +126,47 @@ public sealed class Binder
         }
 
         return new IrModule(methods, tests);
+    }
+
+    /// <summary>
+    /// Extending a well-known type is allowed, but it is not self-contained the way extending a
+    /// project's own message is, and nothing in the source says so.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A project's message and its ProtoLang behavior are generated together, so a consumer given
+    /// the message classes gets the behavior with them. Timestamp does not work that way: the
+    /// consumer already has it from their protobuf runtime, without the extensions. Code written
+    /// against it therefore only compiles for consumers who also reference the library holding the
+    /// generated behavior, which makes that library a real dependency rather than something assumed
+    /// present because protobuf is.
+    /// </para>
+    /// <para>
+    /// A warning rather than an error, because the code is valid and the emission strategy is sound.
+    /// ProtoLang only ever generates extensions, never types, so extending Timestamp does not touch
+    /// Timestamp -- which is also why the extension form travels further than a member function
+    /// would. In the spirit of PL0056 on an unreachable on_zero: something true about the program
+    /// that the program itself cannot say.
+    /// </para>
+    /// </remarks>
+    private void WarnIfWellKnown(MessageDescriptor receiver, ExtendDeclaration extend)
+    {
+        // The same rule ScaffoldOptions applies when deciding which schemas an emitted project
+        // should generate, and for the same reason: these arrive with the runtime.
+        if (!receiver.File.Name.StartsWith("google/protobuf/", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _diagnostics.Warning(
+            "PL0077",
+            "extending a well-known type",
+            $"'{receiver.Name}' comes from the protobuf runtime, so consumers have it without this "
+            + "behavior. The generated extensions have to ship as their own library for anyone to "
+            + "call them.",
+            extend.Span,
+            "Two libraries that both extend this type also emit their extension classes into a "
+            + "namespace neither owns, and a consumer referencing both gets an ambiguous call.");
     }
 
     private MessageDescriptor? ResolveMessage(string name, SourceSpan span)

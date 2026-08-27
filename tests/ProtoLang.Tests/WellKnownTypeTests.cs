@@ -1,5 +1,6 @@
 using ProtoLang.Backend;
 using ProtoLang.Binding;
+using ProtoLang.Diagnostics;
 using Xunit;
 
 namespace ProtoLang.Tests;
@@ -129,6 +130,60 @@ public class WellKnownTypeTests
         Assert.DoesNotContain(
             options.ProtoFiles,
             file => file.RelativePath.StartsWith("google/protobuf/", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Extending a well-known type is allowed and still compiles. The warning exists because the
+    /// generated behavior has to ship as its own library, which is not something the source says.
+    /// </summary>
+    [Fact]
+    public void ExtendingAWellKnownTypeWarnsWithoutRejectingIt()
+    {
+        var path = TestPaths.WriteTempScript(
+            """
+            import proto "google/protobuf/timestamp.proto";
+
+            extend Timestamp {
+                fn millis() -> int64 {
+                    return seconds * 1000;
+                }
+            }
+            """);
+
+        var result = Compilation.Compile(path, [TestPaths.FixtureProtoDirectory], BundledLoader());
+
+        Assert.True(result.Success, Describe(result));
+        Assert.Contains(result.Module!.Methods, method => method.Signature.Name == "millis");
+
+        var warning = Assert.Single(result.Diagnostics, d => d.Code == "PL0077");
+        Assert.Equal(DiagnosticSeverity.Warning, warning.Severity);
+    }
+
+    /// <summary>
+    /// Without this, a check that matched every extend would look exactly as correct as one that
+    /// matched the right ones.
+    /// </summary>
+    [Fact]
+    public void ExtendingAnOrdinaryMessageDoesNotWarn()
+    {
+        var path = TestPaths.WriteTempScript(
+            """
+            import proto "wkt_event.proto";
+
+            extend Event {
+                fn ends_at_seconds() -> int64 {
+                    return starts_at.seconds + length.seconds;
+                }
+            }
+            """);
+
+        var result = Compilation.Compile(path, [TestPaths.FixtureProtoDirectory], BundledLoader());
+
+        Assert.True(result.Success, Describe(result));
+
+        // The receiver is the project's own message even though its fields are well-known types.
+        // Reading one is not extending it.
+        Assert.DoesNotContain(result.Diagnostics, d => d.Code == "PL0077");
     }
 
     private static DescriptorLoader BundledLoader() => new(RequireBundledProtoc());
