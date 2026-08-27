@@ -406,6 +406,11 @@ Open Question:
 
 Numeric behavior is one of the highest-risk portability areas.
 
+The decisions below are collected, alongside the presence rules and everything else the targets
+disagree about, in [docs/reference-semantics.md](docs/reference-semantics.md). That table is where
+the C# reference behavior for each operation is written down and where each backend's obligation to
+reproduce it is stated. This section remains normative; the table is a reading aid.
+
 ### 10.1 Integer Overflow
 
 **Decided: wrapping is the default.**

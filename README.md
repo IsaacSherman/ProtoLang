@@ -102,6 +102,12 @@ That document separates:
 
 The project is still early, so the spec intentionally captures unresolved decisions rather than pretending the language is finished.
 
+Alongside it, [docs/reference-semantics.md](docs/reference-semantics.md) collects the behavior of
+every operation the targets disagree about, in one table: what C# does, what ProtoLang guarantees,
+and what each other backend has to emit to match. C# is the reference, and the rows that depart from
+it say why. The spec stays normative; that file is the reference the spec's decisions are read out
+of.
+
 ## Status
 
 There is now a working compiler for a small slice of the language. It takes the example in
