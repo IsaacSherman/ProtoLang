@@ -646,14 +646,11 @@ public sealed class CppBackend : ITestProjectScaffold
 
         if (binary.IsArithmetic && binary.ResultType is ScalarType { IsInteger: true } scalar)
         {
-            return binary.Behavior switch
-            {
-                ArithmeticBehavior.Wrap =>
-                    $"{RuntimeNamespace}::wrap_{ArithmeticHelperName(binary.Operator)}_{HelperSuffix(scalar)}"
-                    + $"({left}, {right})",
-                _ => throw new ArgumentOutOfRangeException(
-                    nameof(binary), binary.Behavior, "Unhandled arithmetic behavior."),
-            };
+            // Never a bare operator, under any policy: signed overflow is undefined behavior, so
+            // even the wrapping case has to be spelled out in the unsigned domain.
+            var stem = CppRuntime.Stem(binary.Behavior);
+            return $"{RuntimeNamespace}::{stem}_{ArithmeticHelperName(binary.Operator)}_{HelperSuffix(scalar)}"
+                + $"({left}, {right})";
         }
 
         return $"({left} {OperatorText(binary.Operator)} {right})";
@@ -661,12 +658,6 @@ public sealed class CppBackend : ITestProjectScaffold
 
     private static string EmitIntegerDivision(IrIntegerDivision division)
     {
-        if (division.Behavior != ArithmeticBehavior.Wrap)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(division), division.Behavior, "Unhandled arithmetic behavior.");
-        }
-
         if (division.ResultType is not ScalarType scalar)
         {
             throw new ArgumentOutOfRangeException(
@@ -675,15 +666,16 @@ public sealed class CppBackend : ITestProjectScaffold
 
         var left = Expression(division.Left);
         var right = Expression(division.Right);
-        var stem = division.Operator == IrBinaryOperator.Modulo ? "mod" : "div";
+        var stem = CppRuntime.Stem(division.Behavior)
+            + (division.Operator == IrBinaryOperator.Modulo ? "_mod" : "_div");
         var suffix = HelperSuffix(scalar);
 
         return division.ZeroBehavior switch
         {
-            ZeroDivisorBehavior.Unreachable => $"{RuntimeNamespace}::wrap_{stem}_{suffix}({left}, {right})",
-            ZeroDivisorBehavior.Fail => $"{RuntimeNamespace}::wrap_{stem}_or_fail_{suffix}({left}, {right})",
+            ZeroDivisorBehavior.Unreachable => $"{RuntimeNamespace}::{stem}_{suffix}({left}, {right})",
+            ZeroDivisorBehavior.Fail => $"{RuntimeNamespace}::{stem}_or_fail_{suffix}({left}, {right})",
             ZeroDivisorBehavior.Fallback =>
-                $"{RuntimeNamespace}::wrap_{stem}_or_{suffix}({left}, {right}, {Expression(division.OnZero!)})",
+                $"{RuntimeNamespace}::{stem}_or_{suffix}({left}, {right}, {Expression(division.OnZero!)})",
             _ => throw new ArgumentOutOfRangeException(
                 nameof(division), division.ZeroBehavior, "Unhandled zero-divisor behavior."),
         };
@@ -696,7 +688,7 @@ public sealed class CppBackend : ITestProjectScaffold
         if (unary.Operator == IrUnaryOperator.Negate)
         {
             return unary.ResultType is ScalarType { IsInteger: true } scalar
-                ? $"{RuntimeNamespace}::wrap_neg_{HelperSuffix(scalar)}({operand})"
+                ? $"{RuntimeNamespace}::{CppRuntime.Stem(unary.Behavior)}_neg_{HelperSuffix(scalar)}({operand})"
                 : $"(-{operand})";
         }
 

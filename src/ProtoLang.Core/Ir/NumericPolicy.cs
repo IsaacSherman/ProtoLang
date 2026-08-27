@@ -1,3 +1,4 @@
+using ProtoLang.Config;
 using ProtoLang.Types;
 
 namespace ProtoLang.Ir;
@@ -7,11 +8,9 @@ namespace ProtoLang.Ir;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Every question has exactly one answer today, matching what 10.1 and 10.3 already decide. The
-/// point of routing through here anyway is that the answers are about to stop being constants: the
-/// compiler is meant to expose arithmetic policy as repository-tracked configuration, so that a
-/// project can choose checked or saturating arithmetic without any backend inheriting a native
-/// default.
+/// The answers come from the project's <c>protolang.config.xml</c> (spec 10.4), so a project can
+/// choose checked or saturating arithmetic without any backend inheriting a native default. A mode
+/// never means "whatever this target does"; every mode is reproduced identically everywhere.
 /// </para>
 /// <para>
 /// The binder stamps the answer onto the IR rather than handing backends a policy object. That
@@ -22,24 +21,41 @@ namespace ProtoLang.Ir;
 /// </remarks>
 public sealed class NumericPolicy
 {
-    /// <summary>The behavior the language specifies today.</summary>
-    public static NumericPolicy Default { get; } = new();
+    private readonly ProjectConfig _config;
+
+    public NumericPolicy(ProjectConfig config) => _config = config;
+
+    /// <summary>The behavior a project gets when it configures nothing.</summary>
+    public static NumericPolicy Default { get; } = new(ProjectConfig.Default);
 
     /// <summary>Overflow behavior for <c>+</c>, <c>-</c>, and <c>*</c> (spec 10.1).</summary>
     public ArithmeticBehavior ResolveArithmetic(IrBinaryOperator op, ScalarType type)
-        => ArithmeticBehavior.Wrap;
+        => FromOverflow();
 
     /// <summary>Overflow behavior for unary negation, where negating MIN has no representable result.</summary>
-    public ArithmeticBehavior ResolveNegation(ScalarType type) => ArithmeticBehavior.Wrap;
+    public ArithmeticBehavior ResolveNegation(ScalarType type) => FromOverflow();
 
     /// <summary>
     /// Overflow behavior for integer <c>/</c> and <c>%</c>, which is a separate question from the
     /// zero divisor: <c>MIN / -1</c> overflows even though neither operand is zero (spec 10.2).
     /// </summary>
     public ArithmeticBehavior ResolveDivision(IrBinaryOperator op, ScalarType type)
-        => ArithmeticBehavior.Wrap;
+        => FromOverflow();
 
     /// <summary>Behavior of an explicit conversion whose source value does not fit (spec 10.3).</summary>
-    public ConversionBehavior ResolveConversion(ScalarType from, ScalarType to)
-        => ConversionBehavior.WrapOrSaturate;
+    public ConversionBehavior ResolveConversion(ScalarType from, ScalarType to) => _config.Conversion switch
+    {
+        ConversionPolicy.WrapOrSaturate => ConversionBehavior.WrapOrSaturate,
+        _ => throw new ArgumentOutOfRangeException(
+            nameof(from), _config.Conversion, "Unhandled conversion policy."),
+    };
+
+    private ArithmeticBehavior FromOverflow() => _config.Overflow switch
+    {
+        OverflowPolicy.Wrapping => ArithmeticBehavior.Wrap,
+        OverflowPolicy.Checked => ArithmeticBehavior.Check,
+        OverflowPolicy.Saturating => ArithmeticBehavior.Saturate,
+        _ => throw new ArgumentOutOfRangeException(
+            nameof(_config.Overflow), _config.Overflow, "Unhandled overflow policy."),
+    };
 }

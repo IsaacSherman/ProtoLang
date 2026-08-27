@@ -1,4 +1,5 @@
 using Google.Protobuf.Reflection;
+using ProtoLang.Config;
 using ProtoLang.Diagnostics;
 using ProtoLang.Ir;
 using ProtoLang.Syntax;
@@ -20,11 +21,17 @@ public sealed class Binder
     private readonly Dictionary<string, List<EnumDescriptor>> _enumsBySimpleName = new(StringComparer.Ordinal);
     private readonly Dictionary<(string Receiver, string Method), IrMethodSignature> _methods = new();
     private readonly NumericPolicy _policy;
+    private readonly ProjectConfig _config;
 
-    public Binder(IReadOnlyList<FileDescriptor> files, DiagnosticBag diagnostics, NumericPolicy? policy = null)
+    public Binder(
+        IReadOnlyList<FileDescriptor> files,
+        DiagnosticBag diagnostics,
+        NumericPolicy? policy = null,
+        ProjectConfig? config = null)
     {
         _diagnostics = diagnostics;
-        _policy = policy ?? NumericPolicy.Default;
+        _config = config ?? ProjectConfig.Default;
+        _policy = policy ?? new NumericPolicy(_config);
 
         foreach (var file in files)
         {

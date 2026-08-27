@@ -593,14 +593,24 @@ public sealed class CSharpBackend : ITestProjectScaffold
         // Integer / and % arrive as IrIntegerDivision, so only + - * reach here.
         if (binary.IsArithmetic && binary.ResultType is ScalarType { IsInteger: true })
         {
-            if (binary.Behavior != ArithmeticBehavior.Wrap)
+            // Wrapping is the one policy C# can state inline: unchecked() gives both the semantics
+            // and the grouping parentheses. The other two need to inspect the result, so they go
+            // through the runtime.
+            if (binary.Behavior == ArithmeticBehavior.Wrap)
             {
-                throw new ArgumentOutOfRangeException(
-                    nameof(binary), binary.Behavior, "Unhandled arithmetic behavior.");
+                return $"unchecked({left} {op} {right})";
             }
 
-            // unchecked() gives both the semantics and the grouping parentheses.
-            return $"unchecked({left} {op} {right})";
+            var helper = binary.Operator switch
+            {
+                IrBinaryOperator.Add => "Add",
+                IrBinaryOperator.Subtract => "Subtract",
+                IrBinaryOperator.Multiply => "Multiply",
+                _ => throw new ArgumentOutOfRangeException(
+                    nameof(binary), binary.Operator, "Not an overflowing binary operator."),
+            };
+
+            return $"{CSharpRuntime.TypeName}.{CSharpRuntime.Stem(binary.Behavior)}{helper}({left}, {right})";
         }
 
         return $"({left} {op} {right})";
@@ -608,15 +618,10 @@ public sealed class CSharpBackend : ITestProjectScaffold
 
     private static string EmitIntegerDivision(IrIntegerDivision division, string receiverName)
     {
-        if (division.Behavior != ArithmeticBehavior.Wrap)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(division), division.Behavior, "Unhandled arithmetic behavior.");
-        }
-
         var left = Expression(division.Left, receiverName);
         var right = Expression(division.Right, receiverName);
-        var stem = division.Operator == IrBinaryOperator.Modulo ? "WrapModulo" : "WrapDivide";
+        var stem = CSharpRuntime.Stem(division.Behavior)
+            + (division.Operator == IrBinaryOperator.Modulo ? "Modulo" : "Divide");
 
         // Every form goes through a helper, even Unreachable: MIN / -1 traps at the hardware level
         // regardless of unchecked.
@@ -637,9 +642,14 @@ public sealed class CSharpBackend : ITestProjectScaffold
 
         if (unary.Operator == IrUnaryOperator.Negate)
         {
-            return unary.ResultType is ScalarType { IsInteger: true }
+            if (unary.ResultType is not ScalarType { IsInteger: true })
+            {
+                return $"(-{operand})";
+            }
+
+            return unary.Behavior == ArithmeticBehavior.Wrap
                 ? $"unchecked(-{operand})"
-                : $"(-{operand})";
+                : $"{CSharpRuntime.TypeName}.{CSharpRuntime.Stem(unary.Behavior)}Negate({operand})";
         }
 
         return $"(!{operand})";

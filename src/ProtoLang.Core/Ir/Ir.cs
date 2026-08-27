@@ -93,6 +93,21 @@ public sealed record IrFieldAccess(
     PlType FieldType,
     SourceSpan Span) : IrExpression(FieldType, Span);
 
+/// <summary>
+/// A presence test on one field (spec 8.4). Satisfies the "presence checks" requirement in 22.2,
+/// which the IR previously had no way to express.
+/// </summary>
+/// <remarks>
+/// The two backends spell this in unrelated ways -- a null test on a property in C#, a
+/// <c>has_x()</c> call in C++ -- and for message fields protoc's C# generator emits no
+/// <c>HasX</c> at all, so the descriptor has to survive into the backend rather than being reduced
+/// to a boolean expression here.
+/// </remarks>
+public sealed record IrFieldPresence(
+    IrExpression Receiver,
+    FieldDescriptor Field,
+    SourceSpan Span) : IrExpression(ScalarType.BoolType, Span);
+
 public sealed record IrMethodCall(
     IrExpression Receiver,
     IrMethodSignature Target,

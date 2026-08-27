@@ -1,5 +1,6 @@
 using Google.Protobuf.Reflection;
 using ProtoLang.Binding;
+using ProtoLang.Config;
 using ProtoLang.Diagnostics;
 using ProtoLang.Ir;
 using ProtoLang.Syntax;
@@ -11,11 +12,17 @@ namespace ProtoLang;
 /// dependency order. protoc is asked for <c>--include_imports</c>, so this is the whole closure and
 /// not only the schemas the ProtoLang source named. Empty when binding did not get that far.
 /// </param>
+/// <param name="Config">
+/// The policy this compilation ran under, whether discovered, supplied, or defaulted. Callers that
+/// report what was generated need it, because the same source produces different code under a
+/// different policy and a build log that does not say which one is not reproducible.
+/// </param>
 public sealed record CompilationResult(
     IrModule? Module,
     CompilationUnit? SyntaxTree,
     IReadOnlyList<FileDescriptor> Descriptors,
-    DiagnosticBag Diagnostics)
+    DiagnosticBag Diagnostics,
+    ProjectConfig Config)
 {
     public bool Success => Module is not null && !Diagnostics.HasErrors;
 }
@@ -35,12 +42,40 @@ public static class Compilation
     /// directory containing the source file is always searched as a fallback.
     /// </param>
     /// <param name="loader">Descriptor loader; defaults to a protoc-backed one.</param>
+    /// <param name="config">
+    /// The project's language policy (spec 10.4). When null, <c>protolang.config.xml</c> is
+    /// searched for in the source's directory and every directory above it; when nothing is found,
+    /// <see cref="ProjectConfig.Default"/> applies.
+    /// </param>
     public static CompilationResult Compile(
         string sourcePath,
         IReadOnlyList<string> includePaths,
-        DescriptorLoader? loader = null)
+        DescriptorLoader? loader = null,
+        ProjectConfig? config = null)
     {
         var diagnostics = new DiagnosticBag();
+
+        if (config is null)
+        {
+            var sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(sourcePath));
+            var discovered = sourceDirectory is null ? null : ProjectConfig.Discover(sourceDirectory);
+
+            if (discovered is not null)
+            {
+                config = ProjectConfig.Load(discovered, diagnostics);
+                if (config is null)
+                {
+                    // A project that states a policy and is then silently ignored is worse off than
+                    // one that states nothing, so a bad config file stops the compilation.
+                    return new CompilationResult(null, null, [], diagnostics, ProjectConfig.Default);
+                }
+            }
+            else
+            {
+                config = ProjectConfig.Default;
+            }
+        }
+
         var text = File.ReadAllText(sourcePath);
         var fileName = Path.GetFileName(sourcePath);
 
@@ -49,7 +84,7 @@ public static class Compilation
 
         if (diagnostics.HasErrors)
         {
-            return new CompilationResult(null, unit, [], diagnostics);
+            return new CompilationResult(null, unit, [], diagnostics, config);
         }
 
         var searchPaths = BuildSearchPaths(sourcePath, includePaths);
@@ -62,7 +97,7 @@ public static class Compilation
                 "A ProtoLang file must import at least one protobuf schema.",
                 unit.Span,
                 "Add an 'import proto \"your.proto\";' declaration (spec 5.2).");
-            return new CompilationResult(null, unit, [], diagnostics);
+            return new CompilationResult(null, unit, [], diagnostics, config);
         }
 
         // Resolved before the imports are checked, because the loader knows about include
@@ -80,7 +115,7 @@ public static class Compilation
                 "protobuf schema could not be loaded",
                 ex.Message,
                 unit.Imports[0].Span);
-            return new CompilationResult(null, unit, [], diagnostics);
+            return new CompilationResult(null, unit, [], diagnostics, config);
         }
 
         var resolvePaths = new List<string>(searchPaths);
@@ -105,7 +140,7 @@ public static class Compilation
 
         if (diagnostics.HasErrors)
         {
-            return new CompilationResult(null, unit, [], diagnostics);
+            return new CompilationResult(null, unit, [], diagnostics, config);
         }
 
         IReadOnlyList<Google.Protobuf.Reflection.FileDescriptor> descriptors;
@@ -120,14 +155,14 @@ public static class Compilation
                 "protobuf schema could not be loaded",
                 ex.Message,
                 unit.Imports.Count > 0 ? unit.Imports[0].Span : unit.Span);
-            return new CompilationResult(null, unit, [], diagnostics);
+            return new CompilationResult(null, unit, [], diagnostics, config);
         }
 
-        var module = new Binder(descriptors, diagnostics).Bind(unit);
+        var module = new Binder(descriptors, diagnostics, new NumericPolicy(config), config).Bind(unit);
 
         return diagnostics.HasErrors
-            ? new CompilationResult(null, unit, descriptors, diagnostics)
-            : new CompilationResult(module, unit, descriptors, diagnostics);
+            ? new CompilationResult(null, unit, descriptors, diagnostics, config)
+            : new CompilationResult(module, unit, descriptors, diagnostics, config);
     }
 
     /// <summary>

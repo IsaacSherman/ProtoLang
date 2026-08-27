@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  ProtoLang project configuration (spec 10.4).
+
+  Every language-dependent preference lives here, including the ones that currently have only one
+  legal value. The point is that a reader can see the whole contract in one file, and that the
+  semantics of this repository's generated code travel with the repository rather than with whoever
+  remembered which command-line flags to type.
+
+  docs/reference-semantics.md explains what each value means in each backend, and which of them are
+  C#'s own behavior rather than something ProtoLang invented.
+
+  The compiler searches for this file in the source directory and every directory above it, nearest
+  first. A command-line flag may not silently override a setting stated here without saying so; the
+  compiler refuses the conflict unless the override flag is passed.
+-->
+
+<ProtoLang>
+
+  <Arithmetic>
+    <!--
+      Wrapping | Checked | Saturating
+
+      Overflow of +, -, * and unary - on integer types. 'Wrapping' reduces modulo 2^N, 'Checked'
+      terminates with exit code 70, and 'Saturating' clamps to the bound the result exceeded.
+
+      Wrapping is the default because it is what unmodified C# does: 'checked' arithmetic in C# is
+      reached only through the keyword or a CheckForOverflowUnderflow build property.
+    -->
+    <Overflow>Wrapping</Overflow>
+
+    <!--
+      WrapOrSaturate
+
+      Explicit 'as' conversions whose value does not fit: integer targets take the low bits, and a
+      floating-point source truncates toward zero, clamps to the target's bounds, and maps NaN to
+      zero. One legal value today.
+    -->
+    <Conversion>WrapOrSaturate</Conversion>
+
+    <!--
+      RequireOnZero
+
+      Integer / and % with a zero divisor. The author states the answer with an 'on_zero' clause;
+      there is no mode that inherits the target's behavior, because the three targets produce an
+      exception, a SIGFPE, and a silent zero respectively. One legal value today.
+    -->
+    <DivideByZero>RequireOnZero</DivideByZero>
+  </Arithmetic>
+
+  <Presence>
+    <!--
+      RequireGuard
+
+      Using the value of a singular message-typed field requires an established presence test.
+      Without one it is a compile error (PL0078) rather than a NullReferenceException in C# and a
+      zero in C++. One legal value today.
+    -->
+    <UnsetMessageRead>RequireGuard</UnsetMessageRead>
+  </Presence>
+
+</ProtoLang>

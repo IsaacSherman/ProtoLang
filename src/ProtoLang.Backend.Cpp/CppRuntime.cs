@@ -1,14 +1,30 @@
+using ProtoLang.Backend;
+using ProtoLang.Ir;
+
 namespace ProtoLang.Backend.Cpp;
 
 /// <summary>
 /// The fixed C++ support header emitted alongside generated code.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Signed integer overflow is undefined behavior in C++, not wraparound. Compilers exploit that:
 /// an optimizer is entitled to assume it never happens and delete the code that would follow.
 /// ProtoLang's wrapping semantics therefore cannot be expressed as bare <c>a + b</c>; every
 /// operation routes through these helpers, which perform the arithmetic in the unsigned domain
 /// where modular behavior is well-defined.
+/// </para>
+/// <para>
+/// All three overflow policies are emitted whichever one the project selected. The header is
+/// therefore identical for every compilation, which is what lets sources built under different
+/// policies share one translation unit, and every helper is <c>inline</c> so the linker discards
+/// what nothing calls.
+/// </para>
+/// <para>
+/// Overflow is detected by hand rather than through <c>__builtin_add_overflow</c>, which MSVC does
+/// not provide. The predicates below are the portable forms, factored out so that the three policy
+/// wrappers agree with each other by construction rather than by three separate proofs.
+/// </para>
 /// </remarks>
 public static class CppRuntime
 {
@@ -46,22 +62,28 @@ public static class CppRuntime
         using (writer.Block("namespace protolang_runtime"))
         {
             EmitFailHelper(writer);
+            EmitFailOverflowHelper(writer);
 
             foreach (var (signed, unsigned, suffix) in IntegerTypes)
             {
                 writer.WriteLine($"// --- {signed} ---");
                 writer.WriteLine();
 
-                EmitBinaryHelper(writer, "add", "+", signed, unsigned, suffix);
-                EmitBinaryHelper(writer, "sub", "-", signed, unsigned, suffix);
-                EmitBinaryHelper(writer, "mul", "*", signed, unsigned, suffix);
-                EmitNegateHelper(writer, signed, unsigned, suffix);
-                EmitDivideHelper(writer, signed, unsigned, suffix);
-                EmitModuloHelper(writer, signed, suffix);
-                EmitDivideOrHelper(writer, signed, suffix);
-                EmitModuloOrHelper(writer, signed, suffix);
-                EmitDivideOrFailHelper(writer, signed, suffix);
-                EmitModuloOrFailHelper(writer, signed, suffix);
+                EmitOverflowPredicates(writer, signed, unsigned, suffix);
+
+                foreach (var behavior in Behaviors)
+                {
+                    EmitBinaryHelper(writer, behavior, "add", "+", "addition", signed, unsigned, suffix);
+                    EmitBinaryHelper(writer, behavior, "sub", "-", "subtraction", signed, unsigned, suffix);
+                    EmitBinaryHelper(writer, behavior, "mul", "*", "multiplication", signed, unsigned, suffix);
+                    EmitNegateHelper(writer, behavior, signed, unsigned, suffix);
+                    EmitDivideHelper(writer, behavior, signed, unsigned, suffix);
+                    EmitModuloHelper(writer, behavior, signed, suffix);
+                    EmitDivideOrHelper(writer, behavior, signed, suffix);
+                    EmitModuloOrHelper(writer, behavior, signed, suffix);
+                    EmitDivideOrFailHelper(writer, behavior, signed, suffix);
+                    EmitModuloOrFailHelper(writer, behavior, signed, suffix);
+                }
             }
 
             writer.WriteLine("// --- explicit conversions (10.3) ---");
@@ -194,32 +216,433 @@ public static class CppRuntime
         writer.WriteLine();
     }
 
-    private static void EmitBinaryHelper(
-        SourceWriter writer,
-        string name,
-        string op,
-        string signed,
-        string unsigned,
-        string suffix)
+    private static readonly ArithmeticBehavior[] Behaviors =
+    [
+        ArithmeticBehavior.Wrap,
+        ArithmeticBehavior.Check,
+        ArithmeticBehavior.Saturate,
+    ];
+
+    /// <summary>The helper-name prefix for one overflow policy.</summary>
+    public static string Stem(ArithmeticBehavior behavior) => behavior switch
     {
-        using (writer.Block($"inline {signed} wrap_{name}_{suffix}({signed} a, {signed} b)"))
+        ArithmeticBehavior.Wrap => "wrap",
+        ArithmeticBehavior.Check => "checked",
+        ArithmeticBehavior.Saturate => "sat",
+        _ => throw new ArgumentOutOfRangeException(nameof(behavior), behavior, "Unhandled arithmetic behavior."),
+    };
+
+    /// <summary>Whether a helper suffix names a signed type.</summary>
+    private static bool IsSigned(string suffix) => suffix[0] == 'i';
+
+    /// <summary>
+    /// Emits the four <c>*_overflows_*</c> predicates for one type.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// These answer "would the mathematical result leave the range?" and nothing else, so all three
+    /// policies share them. Each is written in the unsigned domain, where the arithmetic itself is
+    /// defined, and then tested against the signed interpretation.
+    /// </para>
+    /// <para>
+    /// Written by hand rather than through <c>__builtin_add_overflow</c>, which MSVC does not
+    /// provide. Factoring them out is what makes the three policy wrappers agree with each other by
+    /// construction rather than by three separate proofs.
+    /// </para>
+    /// <para>
+    /// Multiplication is the one that resists a one-line rule. The usual test -- multiply, divide
+    /// back, compare -- is correct except that the division itself can trap on <c>MIN / -1</c>, so
+    /// the two <c>-1</c> cases are answered before any division happens.
+    /// </para>
+    /// </remarks>
+    private static void EmitOverflowPredicates(SourceWriter writer, string signed, string unsigned, string suffix)
+    {
+        var min = $"::std::numeric_limits<{signed}>::min()";
+        var max = $"::std::numeric_limits<{signed}>::max()";
+
+        using (writer.Block($"inline bool add_overflows_{suffix}({signed} a, {signed} b)"))
         {
-            writer.WriteLine(
-                $"return static_cast<{signed}>(static_cast<{unsigned}>(a) {op} static_cast<{unsigned}>(b));");
+            if (IsSigned(suffix))
+            {
+                writer.WriteLine("// Overflow only when the operands share a sign that the result does not.");
+                writer.WriteLine(
+                    $"const {signed} r = static_cast<{signed}>(static_cast<{unsigned}>(a) + static_cast<{unsigned}>(b));");
+                writer.WriteLine("return ((a ^ r) & (b ^ r)) < 0;");
+            }
+            else
+            {
+                writer.WriteLine($"return static_cast<{unsigned}>(a + b) < a;");
+            }
+        }
+
+        writer.WriteLine();
+
+        using (writer.Block($"inline bool sub_overflows_{suffix}({signed} a, {signed} b)"))
+        {
+            if (IsSigned(suffix))
+            {
+                writer.WriteLine("// Overflow only when the operands differ in sign and the result takes b's.");
+                writer.WriteLine(
+                    $"const {signed} r = static_cast<{signed}>(static_cast<{unsigned}>(a) - static_cast<{unsigned}>(b));");
+                writer.WriteLine("return ((a ^ b) & (a ^ r)) < 0;");
+            }
+            else
+            {
+                writer.WriteLine("return a < b;");
+            }
+        }
+
+        writer.WriteLine();
+
+        using (writer.Block($"inline bool mul_overflows_{suffix}({signed} a, {signed} b)"))
+        {
+            using (writer.Block("if (a == 0 || b == 0)"))
+            {
+                writer.WriteLine("return false;");
+            }
+
+            writer.WriteLine();
+
+            if (IsSigned(suffix))
+            {
+                writer.WriteLine("// Answered before the division below, which would itself trap on MIN / -1.");
+                using (writer.Block("if (a == -1)"))
+                {
+                    writer.WriteLine($"return b == {min};");
+                }
+
+                writer.WriteLine();
+                using (writer.Block("if (b == -1)"))
+                {
+                    writer.WriteLine($"return a == {min};");
+                }
+
+                writer.WriteLine();
+                writer.WriteLine(
+                    $"const {signed} r = static_cast<{signed}>(static_cast<{unsigned}>(a) * static_cast<{unsigned}>(b));");
+                writer.WriteLine("return r / a != b;");
+            }
+            else
+            {
+                writer.WriteLine($"return b > {max} / a;");
+            }
+        }
+
+        writer.WriteLine();
+
+        using (writer.Block($"inline bool neg_overflows_{suffix}({signed} a)"))
+        {
+            if (IsSigned(suffix))
+            {
+                writer.WriteLine($"return a == {min};");
+            }
+            else
+            {
+                writer.WriteLine("// Any non-zero unsigned value negates to something unrepresentable. No call");
+                writer.WriteLine("// site can reach this: negating an unsigned value is PL0052.");
+                writer.WriteLine("return a != 0;");
+            }
         }
 
         writer.WriteLine();
     }
 
-    private static void EmitNegateHelper(SourceWriter writer, string signed, string unsigned, string suffix)
+    /// <summary>Emits <c>add</c>, <c>sub</c>, or <c>mul</c> for one type under one policy.</summary>
+    private static void EmitBinaryHelper(
+        SourceWriter writer,
+        ArithmeticBehavior behavior,
+        string name,
+        string op,
+        string description,
+        string signed,
+        string unsigned,
+        string suffix)
     {
-        using (writer.Block($"inline {signed} wrap_neg_{suffix}({signed} a)"))
+        var stem = Stem(behavior);
+        var wrapped =
+            $"static_cast<{signed}>(static_cast<{unsigned}>(a) {op} static_cast<{unsigned}>(b))";
+
+        writer.WriteLine($"// {char.ToUpperInvariant(description[0])}{description[1..]}, {Describe(behavior)}.");
+        using (writer.Block($"inline {signed} {stem}_{name}_{suffix}({signed} a, {signed} b)"))
         {
+            if (behavior != ArithmeticBehavior.Wrap)
+            {
+                using (writer.Block($"if ({name}_overflows_{suffix}(a, b))"))
+                {
+                    writer.WriteLine(behavior == ArithmeticBehavior.Check
+                        ? $"fail_overflow(\"{description}\");"
+                        : SaturationBound(signed, suffix, name));
+                }
+
+                writer.WriteLine();
+            }
+
+            writer.WriteLine($"return {wrapped};");
+        }
+
+        writer.WriteLine();
+    }
+
+    /// <summary>
+    /// The clamp for an operation already established to overflow.
+    /// </summary>
+    /// <remarks>
+    /// Derived from the operands rather than from the wrapped result. Addition overflows only when
+    /// both operands share a sign, so either one names the bound; subtraction overflows away from
+    /// <c>b</c>'s sign; a product's sign is the exclusive-or of its operands', neither of which
+    /// can be zero here. Unsigned arithmetic can only leave the range at one end.
+    /// </remarks>
+    private static string SaturationBound(string signed, string suffix, string name)
+    {
+        var min = $"::std::numeric_limits<{signed}>::min()";
+        var max = $"::std::numeric_limits<{signed}>::max()";
+
+        if (!IsSigned(suffix))
+        {
+            return name == "sub" ? $"return {min};" : $"return {max};";
+        }
+
+        return name switch
+        {
+            "add" => $"return b > 0 ? {max} : {min};",
+            "sub" => $"return b > 0 ? {min} : {max};",
+            "mul" => $"return (a < 0) != (b < 0) ? {min} : {max};",
+            _ => throw new ArgumentOutOfRangeException(nameof(name), name, "Not a saturating binary operation."),
+        };
+    }
+
+    private static void EmitNegateHelper(
+        SourceWriter writer,
+        ArithmeticBehavior behavior,
+        string signed,
+        string unsigned,
+        string suffix)
+    {
+        var stem = Stem(behavior);
+
+        writer.WriteLine($"// Negation, {Describe(behavior)}.");
+        using (writer.Block($"inline {signed} {stem}_neg_{suffix}({signed} a)"))
+        {
+            if (behavior != ArithmeticBehavior.Wrap)
+            {
+                using (writer.Block($"if (neg_overflows_{suffix}(a))"))
+                {
+                    writer.WriteLine(behavior == ArithmeticBehavior.Check
+                        ? "fail_overflow(\"negation\");"
+                        : $"return ::std::numeric_limits<{signed}>::max();");
+                }
+
+                writer.WriteLine();
+            }
+
             writer.WriteLine($"return static_cast<{signed}>(0u - static_cast<{unsigned}>(a));");
         }
 
         writer.WriteLine();
     }
+
+    /// <summary>
+    /// Emits the termination helper behind the checked overflow policy.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <c>fail</c> only because the two say different things: one reports a divisor
+    /// that was zero, the other a result that did not fit. Both stop the process the same way and
+    /// with the same exit code, so a test can pin either through <c>expect fail</c>.
+    /// </remarks>
+    private static void EmitFailOverflowHelper(SourceWriter writer)
+    {
+        writer.WriteLine("// Reached only under the checked overflow policy, where the project declared that");
+        writer.WriteLine("// an unrepresentable result is not to be papered over.");
+        using (writer.Block("[[noreturn]] inline void fail_overflow(const char* operation)"))
+        {
+            writer.WriteLine("::std::fputs(\"ProtoLang: \", stderr);");
+            writer.WriteLine("::std::fputs(operation, stderr);");
+            writer.WriteLine("::std::fputs(\" overflowed\\n\", stderr);");
+            writer.WriteLine("::std::fflush(stderr);");
+            writer.WriteLine($"::std::_Exit({FailExitCode});");
+        }
+
+        writer.WriteLine();
+    }
+
+    private static void EmitDivideOrFailHelper(
+        SourceWriter writer,
+        ArithmeticBehavior behavior,
+        string signed,
+        string suffix)
+    {
+        var stem = Stem(behavior);
+
+        writer.WriteLine("// Division that terminates the process on a zero divisor.");
+        using (writer.Block($"inline {signed} {stem}_div_or_fail_{suffix}({signed} a, {signed} b)"))
+        {
+            using (writer.Block("if (b == 0)"))
+            {
+                writer.WriteLine("fail(\"division\");");
+            }
+
+            writer.WriteLine();
+            writer.WriteLine($"return {stem}_div_{suffix}(a, b);");
+        }
+
+        writer.WriteLine();
+    }
+
+    private static void EmitModuloOrFailHelper(
+        SourceWriter writer,
+        ArithmeticBehavior behavior,
+        string signed,
+        string suffix)
+    {
+        var stem = Stem(behavior);
+
+        writer.WriteLine("// Remainder that terminates the process on a zero divisor.");
+        using (writer.Block($"inline {signed} {stem}_mod_or_fail_{suffix}({signed} a, {signed} b)"))
+        {
+            using (writer.Block("if (b == 0)"))
+            {
+                writer.WriteLine("fail(\"modulo\");");
+            }
+
+            writer.WriteLine();
+            writer.WriteLine($"return {stem}_mod_{suffix}(a, b);");
+        }
+
+        writer.WriteLine();
+    }
+
+    /// <summary>
+    /// Emits the form used when the author supplied an <c>on_zero</c> fallback. The fallback is
+    /// evaluated eagerly at the call site; ProtoLang expressions have no side effects, so this is
+    /// indistinguishable from lazy evaluation.
+    /// </summary>
+    private static void EmitDivideOrHelper(
+        SourceWriter writer,
+        ArithmeticBehavior behavior,
+        string signed,
+        string suffix)
+    {
+        var stem = Stem(behavior);
+
+        writer.WriteLine("// Division that yields on_zero instead of failing.");
+        using (writer.Block(
+            $"inline {signed} {stem}_div_or_{suffix}({signed} a, {signed} b, {signed} on_zero)"))
+        {
+            using (writer.Block("if (b == 0)"))
+            {
+                writer.WriteLine("return on_zero;");
+            }
+
+            writer.WriteLine();
+            writer.WriteLine($"return {stem}_div_{suffix}(a, b);");
+        }
+
+        writer.WriteLine();
+    }
+
+    private static void EmitModuloOrHelper(
+        SourceWriter writer,
+        ArithmeticBehavior behavior,
+        string signed,
+        string suffix)
+    {
+        var stem = Stem(behavior);
+
+        writer.WriteLine("// Remainder that yields on_zero instead of failing.");
+        using (writer.Block(
+            $"inline {signed} {stem}_mod_or_{suffix}({signed} a, {signed} b, {signed} on_zero)"))
+        {
+            using (writer.Block("if (b == 0)"))
+            {
+                writer.WriteLine("return on_zero;");
+            }
+
+            writer.WriteLine();
+            writer.WriteLine($"return {stem}_mod_{suffix}(a, b);");
+        }
+
+        writer.WriteLine();
+    }
+
+    private static void EmitDivideHelper(
+        SourceWriter writer,
+        ArithmeticBehavior behavior,
+        string signed,
+        string unsigned,
+        string suffix)
+    {
+        var stem = Stem(behavior);
+
+        writer.WriteLine("// Reached only when the divisor is a non-zero literal, so b is never 0.");
+        using (writer.Block($"inline {signed} {stem}_div_{suffix}({signed} a, {signed} b)"))
+        {
+            if (IsSigned(suffix))
+            {
+                writer.WriteLine("// MIN / -1 is the one division that overflows. The -1 case is answered here,");
+                writer.WriteLine("// before the divide instruction, which would otherwise trap.");
+                using (writer.Block("if (b == -1)"))
+                {
+                    if (behavior != ArithmeticBehavior.Wrap)
+                    {
+                        using (writer.Block($"if (a == ::std::numeric_limits<{signed}>::min())"))
+                        {
+                            writer.WriteLine(behavior == ArithmeticBehavior.Check
+                                ? "fail_overflow(\"division\");"
+                                : $"return ::std::numeric_limits<{signed}>::max();");
+                        }
+
+                        writer.WriteLine();
+                    }
+
+                    writer.WriteLine($"return static_cast<{signed}>(0u - static_cast<{unsigned}>(a));");
+                }
+
+                writer.WriteLine();
+            }
+
+            writer.WriteLine("return a / b;");
+        }
+
+        writer.WriteLine();
+    }
+
+    private static void EmitModuloHelper(
+        SourceWriter writer,
+        ArithmeticBehavior behavior,
+        string signed,
+        string suffix)
+    {
+        var stem = Stem(behavior);
+
+        writer.WriteLine("// Reached only when the divisor is a non-zero literal, so b is never 0.");
+        using (writer.Block($"inline {signed} {stem}_mod_{suffix}({signed} a, {signed} b)"))
+        {
+            if (IsSigned(suffix))
+            {
+                writer.WriteLine("// MIN % -1 traps on the same instruction as the quotient, but unlike the");
+                writer.WriteLine("// quotient the remainder is 0, which every type can represent. No policy");
+                writer.WriteLine("// differs here.");
+                using (writer.Block("if (b == -1)"))
+                {
+                    writer.WriteLine("return 0;");
+                }
+
+                writer.WriteLine();
+            }
+
+            writer.WriteLine("return a % b;");
+        }
+
+        writer.WriteLine();
+    }
+
+    private static string Describe(ArithmeticBehavior behavior) => behavior switch
+    {
+        ArithmeticBehavior.Wrap => "wrapping on overflow",
+        ArithmeticBehavior.Check => "terminating the process on overflow",
+        ArithmeticBehavior.Saturate => "clamping on overflow",
+        _ => throw new ArgumentOutOfRangeException(nameof(behavior), behavior, "Unhandled arithmetic behavior."),
+    };
 
     /// <summary>
     /// Exit code of a program stopped by <c>on_zero fail</c>. <c>EX_SOFTWARE</c> from
