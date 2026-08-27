@@ -117,8 +117,13 @@ public static class ProtocLocator
 
         var candidates = new[]
         {
-            // The layout of protoc's own release archives: bin/protoc beside include/.
+            // The layout of protoc's own release archives, and of a system package manager:
+            // bin/protoc beside include/.
             Path.Combine(directory, "..", "include"),
+
+            // vcpkg and the other prefix layouts that file tools by package, putting protoc at
+            // <prefix>/tools/protobuf/ and the schemas at <prefix>/include.
+            Path.Combine(directory, "..", "..", "include"),
 
             // Grpc.Tools puts protoc at <version>/tools/<rid>/ and the schemas at
             // <version>/build/native/include.
