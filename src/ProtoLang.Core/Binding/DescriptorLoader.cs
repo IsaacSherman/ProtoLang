@@ -150,8 +150,16 @@ public sealed class DescriptorLoader
         using var process = started
             ?? throw new DescriptorLoadException($"Failed to start protoc at '{_protocPath}'.");
 
-        var stderr = process.StandardError.ReadToEnd();
-        process.StandardOutput.ReadToEnd();
+        // Both streams are drained concurrently, and only then is the exit awaited. Reading one to
+        // the end before starting the other deadlocks whenever the child fills the pipe it is not
+        // being read from: it blocks on the write, so it never exits, so the stream being read
+        // never reaches end. protoc writes its output to a file here and normally leaves stdout
+        // empty, which is the only reason the sequential form has held up.
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+
+        var stderr = stderrTask.GetAwaiter().GetResult();
+        stdoutTask.GetAwaiter().GetResult();
         process.WaitForExit();
 
         if (process.ExitCode != 0)

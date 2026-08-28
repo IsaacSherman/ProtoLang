@@ -8,10 +8,30 @@ namespace ProtoLang.Syntax;
 /// </summary>
 public sealed class Parser
 {
+    /// <summary>
+    /// How deeply nested constructs may be before the parser gives up on them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Recursive descent costs stack per nesting level, and a <see cref="StackOverflowException"/>
+    /// cannot be caught: it terminates the process immediately, skipping every <c>finally</c> and
+    /// every handler. In the CLI that is an ugly crash. In a long-lived host it takes the whole
+    /// session down, which is why this is a budget rather than a matter of taste.
+    /// </para>
+    /// <para>
+    /// The limit is far above anything hand-written -- real code nests single digits deep -- and far
+    /// below where the stack runs out, with room to spare for the binder and the backends, which
+    /// walk the same tree with larger frames.
+    /// </para>
+    /// </remarks>
+    private const int MaxNestingDepth = 128;
+
     private readonly IReadOnlyList<Token> _tokens;
     private readonly DiagnosticBag _diagnostics;
     private readonly string _file;
     private int _position;
+    private int _nestingDepth;
+    private bool _reportedNesting;
 
     public Parser(IReadOnlyList<Token> tokens, string file, DiagnosticBag diagnostics)
     {
@@ -66,6 +86,44 @@ public sealed class Parser
         // Return a synthetic token so callers can continue building a tree.
         return new Token(kind, string.Empty, Current.Span);
     }
+
+    /// <summary>
+    /// Takes one level of nesting budget, or reports that the budget is exhausted.
+    /// </summary>
+    /// <returns>
+    /// True when the caller may recurse, in which case it must call <see cref="ExitNesting"/>.
+    /// False when it must not, in which case the diagnostic has already been reported.
+    /// </returns>
+    /// <remarks>
+    /// Reported once per file. A construct deep enough to exhaust the budget produces one
+    /// diagnostic per enclosing level otherwise, and the hundredth copy tells the reader nothing
+    /// the first did not.
+    /// </remarks>
+    private bool TryEnterNesting()
+    {
+        if (_nestingDepth < MaxNestingDepth)
+        {
+            _nestingDepth++;
+            return true;
+        }
+
+        if (!_reportedNesting)
+        {
+            _reportedNesting = true;
+            _diagnostics.Error(
+                "PL0081",
+                "nesting is too deep",
+                $"This construct nests more than {MaxNestingDepth} levels deep, which the compiler "
+                + "does not parse.",
+                Current.Span,
+                "This is nearly always a malformed or generated file. Reduce the nesting, or split "
+                + "the expression across intermediate variables.");
+        }
+
+        return false;
+    }
+
+    private void ExitNesting() => _nestingDepth--;
 
     public CompilationUnit ParseCompilationUnit()
     {
@@ -247,6 +305,7 @@ public sealed class Parser
 
         while (Current.Kind is not (TokenKind.CloseBrace or TokenKind.EndOfFile))
         {
+            var before = _position;
             var start = Current.Span;
             var fieldName = Expect(TokenKind.Identifier).Text;
 
@@ -255,13 +314,42 @@ public sealed class Parser
                 var value = ParseExpression();
                 var end = Expect(TokenKind.Semicolon).Span;
                 fields.Add(new TestScalarFieldInitializer(fieldName, value, Spanning(start, end)));
-                continue;
+            }
+            else if (!TryEnterNesting())
+            {
+                // Message fixtures nest, so they carry the same budget as blocks and expressions.
+                var abandonedEnd = Current.Span;
+                if (Match(TokenKind.OpenBrace))
+                {
+                    abandonedEnd = SkipBalancedBlock();
+                }
+
+                fields.Add(new TestMessageFieldInitializer(fieldName, [], Spanning(start, abandonedEnd)));
+            }
+            else
+            {
+                try
+                {
+                    Expect(TokenKind.OpenBrace);
+                    var nested = ParseTestFieldInitializers();
+                    var nestedEnd = Expect(TokenKind.CloseBrace).Span;
+                    fields.Add(
+                        new TestMessageFieldInitializer(fieldName, nested, Spanning(start, nestedEnd)));
+                }
+                finally
+                {
+                    ExitNesting();
+                }
             }
 
-            Expect(TokenKind.OpenBrace);
-            var nested = ParseTestFieldInitializers();
-            var nestedEnd = Expect(TokenKind.CloseBrace).Span;
-            fields.Add(new TestMessageFieldInitializer(fieldName, nested, Spanning(start, nestedEnd)));
+            // Guarantee forward progress, as ParseBlock does. Nothing above is obliged to consume a
+            // token: on a stray token every Expect fails without advancing, and the recursive call
+            // then re-enters on an unchanged position. That recursion has no base case, and the
+            // resulting StackOverflowException cannot be caught -- it takes the process with it.
+            if (_position == before)
+            {
+                Advance();
+            }
         }
 
         return fields;
@@ -388,22 +476,65 @@ public sealed class Parser
     private BlockStatement ParseBlock()
     {
         var start = Expect(TokenKind.OpenBrace).Span;
-        var statements = new List<Statement>();
 
-        while (Current.Kind is not (TokenKind.CloseBrace or TokenKind.EndOfFile))
+        // Blocks nest through if/while/for bodies, so they need the same budget expressions do.
+        if (!TryEnterNesting())
         {
-            var before = _position;
-            statements.Add(ParseStatement());
-
-            // Guarantee forward progress even if a statement parser bailed without consuming.
-            if (_position == before)
-            {
-                Advance();
-            }
+            return new BlockStatement([], Spanning(start, SkipBalancedBlock()));
         }
 
-        var end = Expect(TokenKind.CloseBrace).Span;
-        return new BlockStatement(statements, Spanning(start, end));
+        try
+        {
+            var statements = new List<Statement>();
+
+            while (Current.Kind is not (TokenKind.CloseBrace or TokenKind.EndOfFile))
+            {
+                var before = _position;
+                statements.Add(ParseStatement());
+
+                // Guarantee forward progress even if a statement parser bailed without consuming.
+                if (_position == before)
+                {
+                    Advance();
+                }
+            }
+
+            var end = Expect(TokenKind.CloseBrace).Span;
+            return new BlockStatement(statements, Spanning(start, end));
+        }
+        finally
+        {
+            ExitNesting();
+        }
+    }
+
+    /// <summary>
+    /// Consumes tokens through the closer matching an already-consumed <c>{</c>, and returns that
+    /// closer's span. Used to step over a construct too deeply nested to descend into.
+    /// </summary>
+    private SourceSpan SkipBalancedBlock()
+    {
+        var depth = 1;
+
+        while (Current.Kind != TokenKind.EndOfFile)
+        {
+            if (Current.Kind == TokenKind.OpenBrace)
+            {
+                depth++;
+            }
+            else if (Current.Kind == TokenKind.CloseBrace)
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return Advance().Span;
+                }
+            }
+
+            Advance();
+        }
+
+        return Current.Span;
     }
 
     private Statement ParseStatement()
@@ -529,7 +660,38 @@ public sealed class Parser
         return new ExpressionStatement(expression, Spanning(start, end));
     }
 
-    private Expression ParseExpression() => ParseBinaryExpression(0);
+    private Expression ParseExpression()
+    {
+        if (!TryEnterNesting())
+        {
+            return AbandonExpression();
+        }
+
+        try
+        {
+            return ParseBinaryExpression(0);
+        }
+        finally
+        {
+            ExitNesting();
+        }
+    }
+
+    /// <summary>
+    /// Gives up on an expression that is nested too deeply, consuming a token so the enclosing loop
+    /// still makes progress.
+    /// </summary>
+    private Expression AbandonExpression()
+    {
+        var span = Current.Span;
+
+        if (Current.Kind != TokenKind.EndOfFile)
+        {
+            Advance();
+        }
+
+        return new ErrorExpression(span);
+    }
 
     /// <summary>Binding power for infix operators; higher binds tighter.</summary>
     private static int GetBinaryPrecedence(TokenKind kind) => kind switch
@@ -672,7 +834,24 @@ public sealed class Parser
         if (token.Kind is TokenKind.Minus or TokenKind.Bang or TokenKind.Not)
         {
             Advance();
-            var operand = ParsePrefixExpression();
+
+            // A chain of prefix operators recurses without passing through ParseExpression, so it
+            // needs its own budget rather than inheriting that one.
+            if (!TryEnterNesting())
+            {
+                return AbandonExpression();
+            }
+
+            Expression operand;
+            try
+            {
+                operand = ParsePrefixExpression();
+            }
+            finally
+            {
+                ExitNesting();
+            }
+
             var op = token.Kind == TokenKind.Minus ? UnaryOperatorKind.Negate : UnaryOperatorKind.LogicalNot;
             return new UnaryExpression(op, operand, Spanning(token.Span, operand.Span));
         }
