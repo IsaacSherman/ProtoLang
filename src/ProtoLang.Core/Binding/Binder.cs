@@ -985,7 +985,15 @@ public sealed class Binder
     private IrStatement BindWhile(WhileStatement statement, Scope scope, MethodContext context)
     {
         var condition = BindCondition(statement.Condition, scope, context, "while");
-        var body = BindBlock(statement.Body, scope, context with { LoopDepth = context.LoopDepth + 1 });
+        var (whenTrue, _) = PresenceFacts(condition);
+        var body = BindBlock(
+            statement.Body,
+            scope,
+            context with
+            {
+                LoopDepth = context.LoopDepth + 1,
+                Present = Union(context.Present, whenTrue),
+            });
 
         return new IrWhile(condition, body, statement.Span);
     }

@@ -16,12 +16,21 @@ namespace ProtoLang.Tests;
 public class PresenceTests
 {
     private const string Prelude = "import proto \"fixtures.proto\";\n";
+    private const string ConformancePrelude = "import proto \"conformance.proto\";\n";
+
+    private static readonly string ConformanceProtoDirectory =
+        Path.Combine(TestPaths.RepositoryRoot, "tests", "conformance", "protos");
 
     private static CompilationResult Compile(string source)
         => Compilation.Compile(TestPaths.WriteTempScript(source), [TestPaths.FixtureProtoDirectory]);
 
     private static CompilationResult CompileBody(string body)
         => Compile(Prelude + "extend Outer {\n" + body + "\n}");
+
+    private static CompilationResult CompileConformanceBody(string body)
+        => Compilation.Compile(
+            TestPaths.WriteTempScript(ConformancePrelude + "extend PresenceCase {\n" + body + "\n}"),
+            [ConformanceProtoDirectory]);
 
     private static void AssertOk(CompilationResult result)
         => Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
@@ -119,6 +128,90 @@ public class PresenceTests
                 }
 
                 return other_inner.deep;
+            }
+            """));
+    }
+
+    /// <summary>
+    /// A loop body only runs when its condition is true, so a presence test in that condition is
+    /// just as real inside the body as it is inside an <c>if</c> branch.
+    /// </summary>
+    [Fact]
+    public void AWhileConditionProvesPresenceInsideItsBody()
+    {
+        AssertOk(CompileBody(
+            """
+            fn f() -> Deep {
+                while has inner {
+                    return inner.deep;
+                }
+
+                return Deep.DEEP_NONE;
+            }
+            """));
+    }
+
+    /// <summary>
+    /// An <c>or</c> condition proves presence only on its false side. If it is true, either operand
+    /// may have carried the branch, so neither message field is safe to read.
+    /// </summary>
+    [Fact]
+    public void AnOrConditionDoesNotProveEitherFieldOnItsTrueSide()
+    {
+        var result = CompileBody(
+            """
+            fn f() -> Deep {
+                if has inner or has other_inner {
+                    return inner.deep;
+                }
+
+                return Deep.DEEP_NONE;
+            }
+            """);
+
+        AssertCode(result, "PL0078");
+    }
+
+    /// <summary>
+    /// A guard inside a loop can prove facts for the rest of that iteration, but it cannot prove
+    /// anything after the loop: the loop might not run, or it might exit through the guarded break.
+    /// </summary>
+    [Fact]
+    public void ALoopLocalGuardDoesNotEscapeTheLoop()
+    {
+        var result = CompileBody(
+            """
+            fn f() -> Deep {
+                while count < 3 {
+                    if not has inner {
+                        break;
+                    }
+
+                    return inner.deep;
+                }
+
+                return inner.deep;
+            }
+            """);
+
+        AssertCode(result, "PL0078");
+    }
+
+    /// <summary>
+    /// Nested message paths need both links proved. The second guard depends on the first one,
+    /// because asking about <c>inner.stamp</c> reads <c>inner</c> to reach the field.
+    /// </summary>
+    [Fact]
+    public void AGuardClauseCanProveANestedMessagePath()
+    {
+        AssertOk(CompileConformanceBody(
+            """
+            fn f() -> int64 {
+                if not has inner or not has inner.stamp {
+                    return 0;
+                }
+
+                return inner.stamp.seconds;
             }
             """));
     }
