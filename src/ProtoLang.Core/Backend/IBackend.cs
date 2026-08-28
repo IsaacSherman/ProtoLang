@@ -93,6 +93,13 @@ public sealed record ScaffoldOptions(
     /// <param name="descriptors">
     /// Every protobuf file the compilation used, from <see cref="CompilationResult.Descriptors"/>.
     /// </param>
+    /// <remarks>
+    /// The form for a caller that has a source path and no compilation in hand. It resolves imports
+    /// through <see cref="Compilation.GetSearchPaths"/> so it searches exactly where the compiler
+    /// searched; a caller holding a <see cref="CompilationResult"/> should pass
+    /// <see cref="CompilationResult.SearchPaths"/> to the other overload and skip the re-derivation
+    /// entirely, which is also the only route open to a compilation of a buffer that has no path.
+    /// </remarks>
     public static ScaffoldOptions Create(
         string sourcePath,
         IReadOnlyList<string> includePaths,
@@ -100,9 +107,27 @@ public sealed record ScaffoldOptions(
         string behaviorDirectory,
         string testOutputDirectory,
         IReadOnlyList<string> testSourceFileNames)
+        => Create(
+            Compilation.GetSearchPaths(sourcePath, includePaths),
+            descriptors,
+            behaviorDirectory,
+            testOutputDirectory,
+            testSourceFileNames);
+
+    /// <inheritdoc cref="Create(string, IReadOnlyList{string}, IReadOnlyList{FileDescriptor}, string, string, IReadOnlyList{string})"/>
+    /// <param name="searchPaths">
+    /// Where imports were resolved, from <see cref="CompilationResult.SearchPaths"/>. Taken rather
+    /// than rebuilt because a compilation of an unsaved buffer has no source path to rebuild from,
+    /// and because a build file with a nearly-right proto root fails at build time rather than here.
+    /// </param>
+    public static ScaffoldOptions Create(
+        IReadOnlyList<string> searchPaths,
+        IReadOnlyList<FileDescriptor> descriptors,
+        string behaviorDirectory,
+        string testOutputDirectory,
+        IReadOnlyList<string> testSourceFileNames)
     {
         var projectDirectory = Path.GetFullPath(testOutputDirectory);
-        var searchPaths = Compilation.GetSearchPaths(sourcePath, includePaths);
         var protoFiles = new List<ProtoFileReference>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
 

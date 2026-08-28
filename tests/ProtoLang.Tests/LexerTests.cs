@@ -96,6 +96,16 @@ public class LexerTests
     }
 
     [Fact]
+    public void ReportsUnterminatedStringEndingInBackslash()
+    {
+        var tokens = Tokenize("\"abc\\", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Code == "PL0008");
+        Assert.Equal(TokenKind.StringLiteral, tokens[0].Kind);
+        Assert.Equal("abc", tokens[0].Value);
+    }
+
+    [Fact]
     public void ReportsUnterminatedBlockComment()
     {
         Tokenize("/* never closed", out var diagnostics);

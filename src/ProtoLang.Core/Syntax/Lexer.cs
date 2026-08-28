@@ -298,6 +298,17 @@ public sealed class Lexer
             if (current == '\\')
             {
                 Advance();
+
+                // A backslash as the last character of the text has nothing to escape. Peek reports
+                // '\0' past the end but Advance does not clamp, so falling through to the default
+                // arm below would step the position past the end and make the closing slice throw.
+                // The literal is unterminated either way, which is also the more useful diagnostic
+                // than complaining about an escape sequence the author never wrote.
+                if (_position >= _text.Length)
+                {
+                    break;
+                }
+
                 var escape = Current;
                 switch (escape)
                 {
