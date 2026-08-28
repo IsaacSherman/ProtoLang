@@ -1,5 +1,6 @@
 using ProtoLang;
 using ProtoLang.Backend;
+using ProtoLang.Config;
 using ProtoLang.Backend.Cpp;
 using ProtoLang.Backend.CSharp;
 using ProtoLang.Diagnostics;
@@ -24,7 +25,17 @@ if (options.Scaffold && options.TestOutputDirectory is null)
     return 2;
 }
 
-var result = Compilation.Compile(options.SourcePath, options.IncludePaths);
+var configDiagnostics = new DiagnosticBag();
+var config = ResolveConfig(options, configDiagnostics);
+PrintDiagnostics(configDiagnostics);
+
+if (config is null)
+{
+    Console.Error.WriteLine("configuration failed");
+    return 2;
+}
+
+var result = Compilation.Compile(options.SourcePath, options.IncludePaths, config: config);
 PrintDiagnostics(result.Diagnostics);
 
 if (!result.Success)
@@ -44,6 +55,13 @@ if (options.Targets.Contains("cpp"))
     backends.Add(new CppBackend());
 }
 
+// The resolved policy travels into the header of every generated file, so a reader can tell what
+// produced the code in front of them without re-running the compiler to find out.
+var backendOptions = new BackendOptions(Path.GetFileName(options.SourcePath))
+{
+    PolicyDescription = result.Config.DescribeForHeader(),
+};
+
 var backendDiagnostics = new DiagnosticBag();
 var written = new List<string>();
 
@@ -51,7 +69,7 @@ foreach (var backend in backends)
 {
     var files = backend.Emit(
         result.Module!,
-        new BackendOptions(Path.GetFileName(options.SourcePath)),
+        backendOptions,
         backendDiagnostics);
 
     var outputDirectory = Path.Combine(options.OutputDirectory, backend.Name);
@@ -68,7 +86,7 @@ foreach (var backend in backends)
     {
         var testFiles = testBackend.EmitTests(
             result.Module!,
-            new BackendOptions(Path.GetFileName(options.SourcePath)),
+            backendOptions,
             backendDiagnostics);
 
         var testOutputDirectory = Path.Combine(options.TestOutputDirectory, backend.Name);
@@ -116,6 +134,78 @@ foreach (var path in written)
 
 return 0;
 
+/// <summary>
+/// Settles the project policy from the config file and the command line (spec 10.4).
+/// </summary>
+/// <remarks>
+/// The config file wins. A flag that contradicts a setting the file states is refused rather than
+/// silently applied, because the point of tracking policy in the repository is that the generated
+/// code means the same thing however it was built. <c>--override-config</c> exists so that trying
+/// another policy stays one flag away, while leaving a trace in the command that no one can
+/// mistake for the project's own answer.
+/// </remarks>
+static ProjectConfig? ResolveConfig(CommandLineOptions options, DiagnosticBag diagnostics)
+{
+    ProjectConfig config;
+
+    if (options.NoConfig)
+    {
+        config = ProjectConfig.Default;
+    }
+    else if (options.ConfigPath is { } explicitPath)
+    {
+        if (!File.Exists(explicitPath))
+        {
+            Console.Error.WriteLine($"error: configuration file not found: {explicitPath}");
+            return null;
+        }
+
+        var loaded = ProjectConfig.Load(explicitPath, diagnostics);
+        if (loaded is null)
+        {
+            return null;
+        }
+
+        config = loaded;
+    }
+    else
+    {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(options.SourcePath));
+        var discovered = directory is null ? null : ProjectConfig.Discover(directory);
+
+        if (discovered is null)
+        {
+            config = ProjectConfig.Default;
+        }
+        else
+        {
+            var loaded = ProjectConfig.Load(discovered, diagnostics);
+            if (loaded is null)
+            {
+                return null;
+            }
+
+            config = loaded;
+        }
+    }
+
+    if (options.Overflow is not { } overflow)
+    {
+        return config;
+    }
+
+    if (!config.TryOverrideOverflow(overflow, options.OverrideConfig, out var overridden, out var conflict))
+    {
+        Console.Error.WriteLine($"error: {conflict}");
+        Console.Error.WriteLine(
+            "       The config file wins, so that a build means the same thing however it was run.");
+        Console.Error.WriteLine("       Pass --override-config to use the flag anyway.");
+        return null;
+    }
+
+    return overridden;
+}
+
 static void PrintDiagnostics(DiagnosticBag diagnostics)
 {
     foreach (var diagnostic in diagnostics)
@@ -132,7 +222,11 @@ internal sealed record CommandLineOptions(
     string OutputDirectory,
     string? TestOutputDirectory,
     bool Scaffold,
-    IReadOnlySet<string> Targets)
+    IReadOnlySet<string> Targets,
+    string? ConfigPath,
+    bool NoConfig,
+    OverflowPolicy? Overflow,
+    bool OverrideConfig)
 {
     private static readonly string[] KnownTargets = ["csharp", "cpp"];
 
@@ -144,6 +238,10 @@ internal sealed record CommandLineOptions(
         string? testOutputDirectory = null;
         var scaffold = false;
         var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? configPath = null;
+        var noConfig = false;
+        OverflowPolicy? overflow = null;
+        var overrideConfig = false;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -183,6 +281,42 @@ internal sealed record CommandLineOptions(
 
                 case "--scaffold":
                     scaffold = true;
+                    break;
+
+                case "--config":
+                    if (++i >= args.Length)
+                    {
+                        Console.Error.WriteLine($"error: {arg} requires a file path");
+                        return null;
+                    }
+
+                    configPath = args[i];
+                    break;
+
+                case "--no-config":
+                    noConfig = true;
+                    break;
+
+                case "--override-config":
+                    overrideConfig = true;
+                    break;
+
+                case "--arithmetic-overflow":
+                    if (++i >= args.Length)
+                    {
+                        Console.Error.WriteLine($"error: {arg} requires a mode");
+                        return null;
+                    }
+
+                    if (!TryParseOverflow(args[i], out var parsed))
+                    {
+                        Console.Error.WriteLine(
+                            $"error: unknown overflow mode '{args[i]}' (expected one of: "
+                            + "wrapping, checked, saturating)");
+                        return null;
+                    }
+
+                    overflow = parsed;
                     break;
 
                 case "-t" or "--target":
@@ -241,8 +375,44 @@ internal sealed record CommandLineOptions(
             }
         }
 
+        if (noConfig && configPath is not null)
+        {
+            Console.Error.WriteLine("error: --no-config and --config say opposite things; pass one");
+            return null;
+        }
+
         return new CommandLineOptions(
-            sourcePath, includePaths, outputDirectory, testOutputDirectory, scaffold, targets);
+            sourcePath,
+            includePaths,
+            outputDirectory,
+            testOutputDirectory,
+            scaffold,
+            targets,
+            configPath,
+            noConfig,
+            overflow,
+            overrideConfig);
+    }
+
+    private static bool TryParseOverflow(string text, out OverflowPolicy policy)
+    {
+        // Lowercase on the command line, PascalCase in the file. A flag is typed by hand and a
+        // config value is read by a parser, so they answer to different conventions.
+        switch (text.Trim().ToLowerInvariant())
+        {
+            case "wrapping":
+                policy = OverflowPolicy.Wrapping;
+                return true;
+            case "checked":
+                policy = OverflowPolicy.Checked;
+                return true;
+            case "saturating":
+                policy = OverflowPolicy.Saturating;
+                return true;
+            default:
+                policy = default;
+                return false;
+        }
     }
 
     public static void PrintUsage()
@@ -263,6 +433,18 @@ internal sealed record CommandLineOptions(
         Console.Error.WriteLine("                           for cpp. Requires --test-out.");
         Console.Error.WriteLine("  -t, --target <list>      Comma-separated targets: csharp, cpp (default: all).");
         Console.Error.WriteLine("  -h, --help               Show this help.");
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("policy (spec 10.4):");
+        Console.Error.WriteLine("  --config <file>          Use this protolang.config.xml instead of searching.");
+        Console.Error.WriteLine("  --no-config              Ignore any config file and use the built-in defaults.");
+        Console.Error.WriteLine("  --arithmetic-overflow <mode>");
+        Console.Error.WriteLine("                           wrapping (default), checked, or saturating.");
+        Console.Error.WriteLine("  --override-config        Let a policy flag win over a setting the config file");
+        Console.Error.WriteLine("                           states. Without it, the conflict is an error: the file");
+        Console.Error.WriteLine("                           is the project's answer and a flag is not.");
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("  With no --config or --no-config, protolang.config.xml is searched for in the");
+        Console.Error.WriteLine("  source file's directory and every directory above it, nearest first.");
         Console.Error.WriteLine();
         Console.Error.WriteLine("environment:");
         Console.Error.WriteLine("  PROTOLANG_PROTOC         Path to protoc. Otherwise PATH and the NuGet");

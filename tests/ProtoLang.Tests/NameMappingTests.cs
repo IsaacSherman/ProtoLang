@@ -265,7 +265,13 @@ public class NameMappingTests
             }
 
             extend protolang.caller.Caller {
-                fn total() -> int64 { return target.adjusted_value(); }
+                fn total() -> int64 {
+                    if not has target {
+                        return 0;
+                    }
+
+                    return target.adjusted_value();
+                }
             }
             """,
             "test.g.cs");

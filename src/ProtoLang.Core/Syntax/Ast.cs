@@ -172,6 +172,18 @@ public sealed record UnaryExpression(
     SourceSpan Span) : Expression(Span);
 
 /// <summary>
+/// A presence test, <c>has customer.email</c> (spec 8.4).
+/// </summary>
+/// <remarks>
+/// Not a <see cref="UnaryExpression"/>, because its operand is not an expression in the usual
+/// sense: <c>has</c> asks about a field rather than about a value, and reading the value is exactly
+/// what it must not do. The binder enforces that the operand resolves to a field access.
+/// </remarks>
+public sealed record HasExpression(
+    Expression Operand,
+    SourceSpan Span) : Expression(Span);
+
+/// <summary>
 /// An explicit numeric conversion, <c>x as int64</c> (spec 10.3). ProtoLang applies no implicit
 /// numeric conversions, so this is the only way an expression changes width or signedness.
 /// </summary>

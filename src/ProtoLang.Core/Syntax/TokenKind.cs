@@ -29,6 +29,7 @@ public enum TokenKind
     Float,
     Fn,
     For,
+    Has,
     If,
     Import,
     In,

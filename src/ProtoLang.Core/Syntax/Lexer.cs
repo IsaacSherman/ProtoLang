@@ -31,6 +31,7 @@ public sealed class Lexer
         ["float"] = TokenKind.Float,
         ["fn"] = TokenKind.Fn,
         ["for"] = TokenKind.For,
+        ["has"] = TokenKind.Has,
         ["if"] = TokenKind.If,
         ["import"] = TokenKind.Import,
         ["in"] = TokenKind.In,

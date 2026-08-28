@@ -1,4 +1,5 @@
 using ProtoLang.Backend;
+using ProtoLang.Ir;
 
 namespace ProtoLang.Backend.CSharp;
 
@@ -7,10 +8,18 @@ namespace ProtoLang.Backend.CSharp;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Addition, subtraction, multiplication, and negation wrap correctly inside <c>unchecked(...)</c>,
-/// so those need no helper. Division does not: <c>long.MinValue / -1</c> raises
-/// <see cref="OverflowException"/> on x86/x64 from the hardware divide instruction itself, and
-/// <c>unchecked</c> has no effect on it. The same applies to <c>%</c>.
+/// Under the default wrapping policy, addition, subtraction, multiplication, and negation are
+/// correct inside <c>unchecked(...)</c>, so those need no helper. Division does not:
+/// <c>long.MinValue / -1</c> raises <see cref="OverflowException"/> on x86/x64 from the hardware
+/// divide instruction itself, and <c>unchecked</c> has no effect on it. The same applies to
+/// <c>%</c>. Under the checked and saturating policies every arithmetic operation needs a helper.
+/// </para>
+/// <para>
+/// Every helper is emitted regardless of which policy the module was compiled under. That costs a
+/// larger support file and nothing else -- the C# compiler drops unreferenced internal methods --
+/// and it buys two things worth more: this file is byte-for-byte identical for every compilation,
+/// so several ProtoLang sources compiled under *different* policies can still be built into one
+/// assembly, and a reader can see all three answers to a question side by side.
 /// </para>
 /// <para>
 /// Emitted as its own file so that compiling several ProtoLang sources into one assembly does not
@@ -31,6 +40,18 @@ public static class CSharpRuntime
 
     public static string Source => LazySource.Value;
 
+    /// <summary>
+    /// The helper-name prefix for one overflow policy. The wrapping stem is <c>Wrap</c> for
+    /// historical reasons and because it reads correctly at the call site.
+    /// </summary>
+    public static string Stem(ArithmeticBehavior behavior) => behavior switch
+    {
+        ArithmeticBehavior.Wrap => "Wrap",
+        ArithmeticBehavior.Check => "Checked",
+        ArithmeticBehavior.Saturate => "Saturating",
+        _ => throw new ArgumentOutOfRangeException(nameof(behavior), behavior, "Unhandled arithmetic behavior."),
+    };
+
     private static string Build()
     {
         var writer = new SourceWriter();
@@ -46,36 +67,31 @@ public static class CSharpRuntime
         using (writer.Block($"namespace {NamespaceName}"))
         {
             writer.WriteLine("/// <summary>");
-            writer.WriteLine("/// Numeric operations whose ProtoLang semantics C#'s <c>unchecked</c> does not");
-            writer.WriteLine("/// already provide: division, which traps on MIN / -1 regardless of context, and");
-            writer.WriteLine("/// conversion from floating point to an integer, which the language leaves");
-            writer.WriteLine("/// unspecified when the value is out of range.");
+            writer.WriteLine("/// Numeric operations whose ProtoLang semantics C# does not already provide: division,");
+            writer.WriteLine("/// which traps on MIN / -1 regardless of context; conversion from floating point to an");
+            writer.WriteLine("/// integer, which the language leaves unspecified when the value is out of range; and");
+            writer.WriteLine("/// every operation under the checked and saturating overflow policies.");
             writer.WriteLine("/// </summary>");
+            writer.WriteLine("/// <remarks>");
+            writer.WriteLine("/// All three overflow policies are present whichever one this project selected, so that");
+            writer.WriteLine("/// this file is identical for every compilation and sources built under different");
+            writer.WriteLine("/// policies can share one assembly. Unreferenced members are dropped by the compiler.");
+            writer.WriteLine("/// </remarks>");
             using (writer.Block("internal static class ProtoLangArithmetic"))
             {
                 EmitFail(writer);
                 writer.WriteLine();
+                EmitFailOverflow(writer);
 
-                var first = true;
                 foreach (var (type, isSigned) in IntegerTypes)
                 {
-                    if (!first)
+                    foreach (var behavior in Behaviors)
                     {
                         writer.WriteLine();
+                        EmitOverflowingOperations(writer, type, isSigned, behavior);
+                        writer.WriteLine();
+                        EmitDivision(writer, type, isSigned, behavior);
                     }
-
-                    first = false;
-                    EmitDivide(writer, type, isSigned);
-                    writer.WriteLine();
-                    EmitModulo(writer, type, isSigned);
-                    writer.WriteLine();
-                    EmitDivideOr(writer, type, isSigned);
-                    writer.WriteLine();
-                    EmitModuloOr(writer, type, isSigned);
-                    writer.WriteLine();
-                    EmitDivideOrFail(writer, type);
-                    writer.WriteLine();
-                    EmitModuloOrFail(writer, type);
                 }
 
                 foreach (var target in FloatToIntegerTargets)
@@ -96,6 +112,292 @@ public static class CSharpRuntime
         ("uint", false),
         ("ulong", false),
     ];
+
+    private static readonly ArithmeticBehavior[] Behaviors =
+    [
+        ArithmeticBehavior.Wrap,
+        ArithmeticBehavior.Check,
+        ArithmeticBehavior.Saturate,
+    ];
+
+    /// <summary>
+    /// Emits <c>Add</c>, <c>Subtract</c>, <c>Multiply</c>, and <c>Negate</c> for one type under one
+    /// policy.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The wrapping forms exist so that every policy has the same call shape, even though the
+    /// wrapping backend emits <c>unchecked(...)</c> inline and never calls them.
+    /// </para>
+    /// <para>
+    /// Overflow is detected by performing the operation in a <c>checked</c> context and catching
+    /// <see cref="OverflowException"/>, rather than by open-coding the sign rules. The exception is
+    /// never observable: it is caught here and turned into either a termination or a clamp. Doing
+    /// it this way means the detection is the runtime's rather than this file's, which matters most
+    /// for multiplication, where the hand-written guard is the easiest thing here to get subtly
+    /// wrong. The cost falls entirely on the overflow path, which either ends the process or is
+    /// rare enough not to matter.
+    /// </para>
+    /// <para>
+    /// Negation is not emitted for the unsigned types: negating an unsigned value is PL0052, so no
+    /// call site can exist.
+    /// </para>
+    /// </remarks>
+    private static void EmitOverflowingOperations(
+        SourceWriter writer,
+        string type,
+        bool isSigned,
+        ArithmeticBehavior behavior)
+    {
+        var stem = Stem(behavior);
+
+        EmitBinaryOperation(writer, type, isSigned, behavior, "Add", "+", "addition");
+        writer.WriteLine();
+        EmitBinaryOperation(writer, type, isSigned, behavior, "Subtract", "-", "subtraction");
+        writer.WriteLine();
+        EmitBinaryOperation(writer, type, isSigned, behavior, "Multiply", "*", "multiplication");
+
+        if (!isSigned)
+        {
+            return;
+        }
+
+        writer.WriteLine();
+        writer.WriteLine($"/// <summary>Negation, {Describe(behavior)}.</summary>");
+        using (writer.Block($"public static {type} {stem}Negate({type} value)"))
+        {
+            switch (behavior)
+            {
+                case ArithmeticBehavior.Wrap:
+                    writer.WriteLine("return unchecked(0 - value);");
+                    break;
+
+                case ArithmeticBehavior.Check:
+                    using (writer.Block("try"))
+                    {
+                        writer.WriteLine("return checked(0 - value);");
+                    }
+
+                    using (writer.Block("catch (global::System.OverflowException)"))
+                    {
+                        writer.WriteLine($"return FailOverflow<{type}>(\"negation\");");
+                    }
+
+                    break;
+
+                case ArithmeticBehavior.Saturate:
+                    writer.WriteLine("// Only MIN has no representable negation, and its magnitude clamps to MAX.");
+                    using (writer.Block($"if (value == {type}.MinValue)"))
+                    {
+                        writer.WriteLine($"return {type}.MaxValue;");
+                    }
+
+                    writer.WriteLine();
+                    writer.WriteLine("return unchecked(0 - value);");
+                    break;
+
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(behavior), behavior, "Unhandled behavior.");
+            }
+        }
+    }
+
+    private static void EmitBinaryOperation(
+        SourceWriter writer,
+        string type,
+        bool isSigned,
+        ArithmeticBehavior behavior,
+        string name,
+        string op,
+        string description)
+    {
+        var stem = Stem(behavior);
+
+        writer.WriteLine($"/// <summary>{char.ToUpperInvariant(description[0])}{description[1..]}, {Describe(behavior)}.</summary>");
+        using (writer.Block($"public static {type} {stem}{name}({type} left, {type} right)"))
+        {
+            if (behavior == ArithmeticBehavior.Wrap)
+            {
+                writer.WriteLine($"return unchecked(left {op} right);");
+                return;
+            }
+
+            using (writer.Block("try"))
+            {
+                writer.WriteLine($"return checked(left {op} right);");
+            }
+
+            using (writer.Block("catch (global::System.OverflowException)"))
+            {
+                if (behavior == ArithmeticBehavior.Check)
+                {
+                    writer.WriteLine($"return FailOverflow<{type}>(\"{description}\");");
+                    return;
+                }
+
+                writer.WriteLine(SaturationBound(type, isSigned, name));
+            }
+        }
+    }
+
+    /// <summary>
+    /// The clamp for an operation that has already been established to overflow.
+    /// </summary>
+    /// <remarks>
+    /// Each rule follows from the operands, not from the wrapped result, which is why none of these
+    /// inspects it. Addition can only overflow when both operands share a sign, so the sign of
+    /// either one names the bound. Subtraction overflows away from <c>right</c>'s sign. A product's
+    /// sign is the exclusive-or of its operands' signs, and neither can be zero if it overflowed.
+    /// Unsigned arithmetic can only leave the range at one end, so the bound is fixed.
+    /// </remarks>
+    private static string SaturationBound(string type, bool isSigned, string name)
+    {
+        if (!isSigned)
+        {
+            // Unsigned subtraction can only go below zero; addition and multiplication only above.
+            return name == "Subtract"
+                ? $"return {type}.MinValue;"
+                : $"return {type}.MaxValue;";
+        }
+
+        return name switch
+        {
+            "Add" => $"return right > 0 ? {type}.MaxValue : {type}.MinValue;",
+            "Subtract" => $"return right > 0 ? {type}.MinValue : {type}.MaxValue;",
+            "Multiply" => $"return (left < 0) != (right < 0) ? {type}.MinValue : {type}.MaxValue;",
+            _ => throw new ArgumentOutOfRangeException(nameof(name), name, "Not a saturating binary operation."),
+        };
+    }
+
+    /// <summary>
+    /// Emits <c>Divide</c> and <c>Modulo</c> for one type under one policy, in all three
+    /// zero-divisor shapes.
+    /// </summary>
+    /// <remarks>
+    /// The zero divisor and the overflow are separate questions, and this is the only operation
+    /// where both arise at once: <c>MIN / -1</c> overflows although neither operand is zero, and a
+    /// zero divisor is a failure of the value rather than of the range. The <c>on_zero</c> clause
+    /// answers the first; the project's overflow policy answers the second.
+    /// </remarks>
+    private static void EmitDivision(SourceWriter writer, string type, bool isSigned, ArithmeticBehavior behavior)
+    {
+        var stem = Stem(behavior);
+
+        EmitDivideCore(writer, type, isSigned, behavior);
+        writer.WriteLine();
+        EmitModuloCore(writer, type, isSigned, behavior);
+
+        foreach (var (name, word) in new[] { ("Divide", "division"), ("Modulo", "modulo") })
+        {
+            writer.WriteLine();
+            writer.WriteLine($"/// <summary>{char.ToUpperInvariant(word[0])}{word[1..]} that yields <paramref name=\"onZero\"/> instead of failing.</summary>");
+            using (writer.Block($"public static {type} {stem}{name}Or({type} left, {type} right, {type} onZero)"))
+            {
+                using (writer.Block("if (right == 0)"))
+                {
+                    writer.WriteLine("return onZero;");
+                }
+
+                writer.WriteLine();
+                writer.WriteLine($"return {stem}{name}(left, right);");
+            }
+
+            writer.WriteLine();
+            writer.WriteLine($"/// <summary>{char.ToUpperInvariant(word[0])}{word[1..]} that terminates the process on a zero divisor.</summary>");
+            using (writer.Block($"public static {type} {stem}{name}OrFail({type} left, {type} right)"))
+            {
+                using (writer.Block("if (right == 0)"))
+                {
+                    writer.WriteLine($"Fail(\"{word}\");");
+                }
+
+                writer.WriteLine();
+                writer.WriteLine($"return {stem}{name}(left, right);");
+            }
+        }
+    }
+
+    private static void EmitDivideCore(SourceWriter writer, string type, bool isSigned, ArithmeticBehavior behavior)
+    {
+        var stem = Stem(behavior);
+
+        writer.WriteLine($"/// <summary>Division, {Describe(behavior)}. Division by zero still throws.</summary>");
+        using (writer.Block($"public static {type} {stem}Divide({type} left, {type} right)"))
+        {
+            if (isSigned)
+            {
+                writer.WriteLine("// MIN / -1 overflows and traps even in an unchecked context, so the -1 case");
+                writer.WriteLine("// is answered before the divide instruction ever sees it.");
+                using (writer.Block("if (right == -1)"))
+                {
+                    switch (behavior)
+                    {
+                        case ArithmeticBehavior.Wrap:
+                            writer.WriteLine("return unchecked(0 - left);");
+                            break;
+
+                        case ArithmeticBehavior.Check:
+                            using (writer.Block($"if (left == {type}.MinValue)"))
+                            {
+                                writer.WriteLine($"return FailOverflow<{type}>(\"division\");");
+                            }
+
+                            writer.WriteLine();
+                            writer.WriteLine("return unchecked(0 - left);");
+                            break;
+
+                        case ArithmeticBehavior.Saturate:
+                            using (writer.Block($"if (left == {type}.MinValue)"))
+                            {
+                                writer.WriteLine($"return {type}.MaxValue;");
+                            }
+
+                            writer.WriteLine();
+                            writer.WriteLine("return unchecked(0 - left);");
+                            break;
+
+                        default:
+                            throw new ArgumentOutOfRangeException(nameof(behavior), behavior, "Unhandled behavior.");
+                    }
+                }
+
+                writer.WriteLine();
+            }
+
+            writer.WriteLine("return left / right;");
+        }
+    }
+
+    private static void EmitModuloCore(SourceWriter writer, string type, bool isSigned, ArithmeticBehavior behavior)
+    {
+        var stem = Stem(behavior);
+
+        writer.WriteLine($"/// <summary>Remainder, {Describe(behavior)}. Modulo by zero still throws.</summary>");
+        using (writer.Block($"public static {type} {stem}Modulo({type} left, {type} right)"))
+        {
+            if (isSigned)
+            {
+                writer.WriteLine("// MIN % -1 traps on the same instruction, but unlike the quotient the");
+                writer.WriteLine("// remainder is 0, which every type can represent. No policy differs here.");
+                using (writer.Block("if (right == -1)"))
+                {
+                    writer.WriteLine("return 0;");
+                }
+
+                writer.WriteLine();
+            }
+
+            writer.WriteLine("return left % right;");
+        }
+    }
+
+    private static string Describe(ArithmeticBehavior behavior) => behavior switch
+    {
+        ArithmeticBehavior.Wrap => "wrapping on overflow",
+        ArithmeticBehavior.Check => "terminating the process on overflow",
+        ArithmeticBehavior.Saturate => "clamping on overflow",
+        _ => throw new ArgumentOutOfRangeException(nameof(behavior), behavior, "Unhandled arithmetic behavior."),
+    };
 
     /// <summary>
     /// Floating-point to integer conversion targets: the C# type, the helper name, and the two
@@ -129,11 +431,12 @@ public static class CSharpRuntime
     private static void EmitFloatToInteger(SourceWriter writer, (string Type, string Method, string Low, string High) target)
     {
         writer.WriteLine("/// <summary>");
-        writer.WriteLine($"/// Converts to <c>{target.Type}</c>, truncating toward zero and clamping to the");
-        writer.WriteLine("/// type's bounds. NaN converts to zero.");
+        writer.WriteLine($"/// Truncates toward zero and clamps to the range of <c>{target.Type}</c>. NaN becomes 0.");
         writer.WriteLine("/// </summary>");
         using (writer.Block($"public static {target.Type} {target.Method}(double value)"))
         {
+            writer.WriteLine("// NaN first: it compares false against every bound, so a range test alone");
+            writer.WriteLine("// would fall through to a conversion the language does not define for it.");
             using (writer.Block("if (double.IsNaN(value))"))
             {
                 writer.WriteLine("return 0;");
@@ -162,8 +465,9 @@ public static class CSharpRuntime
     public const string FailMarker = "ProtoLang: ";
 
     /// <summary>
-    /// Exit code of a program stopped by <c>on_zero fail</c>. <c>EX_SOFTWARE</c> from
-    /// <c>sysexits.h</c>, and normative: every backend reports the same code (spec 10.2.1).
+    /// Exit code of a program stopped by <c>on_zero fail</c> or by a checked overflow.
+    /// <c>EX_SOFTWARE</c> from <c>sysexits.h</c>, and normative: every backend reports the same
+    /// code (spec 10.2.1).
     /// </summary>
     public const int FailExitCode = 70;
 
@@ -211,108 +515,30 @@ public static class CSharpRuntime
     }
 
     /// <summary>
-    /// Emits the form used when the author supplied an <c>on_zero</c> fallback. The fallback is
-    /// evaluated eagerly at the call site; ProtoLang expressions have no side effects, so this is
-    /// indistinguishable from lazy evaluation and keeps the emitted code a single expression.
+    /// Emits the termination helper behind the checked overflow policy.
     /// </summary>
-    private static void EmitDivideOr(SourceWriter writer, string type, bool isSigned)
+    /// <remarks>
+    /// Generic and returning <typeparamref name="T"/> so a caller can write
+    /// <c>return FailOverflow&lt;long&gt;("addition");</c>. That keeps every call site an ordinary
+    /// return rather than a statement followed by unreachable code, which some consumers compile
+    /// with warnings as errors.
+    /// </remarks>
+    private static void EmitFailOverflow(SourceWriter writer)
     {
-        writer.WriteLine("/// <summary>Division that yields <paramref name=\"onZero\"/> instead of failing.</summary>");
-        using (writer.Block($"public static {type} WrapDivideOr({type} left, {type} right, {type} onZero)"))
+        writer.WriteLine("/// <summary>");
+        writer.WriteLine("/// Terminates the process. Reached only under the checked overflow policy, where the");
+        writer.WriteLine("/// project declared that an unrepresentable result is not to be papered over.");
+        writer.WriteLine("/// </summary>");
+        writer.WriteLine("[global::System.Diagnostics.CodeAnalysis.DoesNotReturn]");
+        using (writer.Block("private static T FailOverflow<T>(string operation)"))
         {
-            using (writer.Block("if (right == 0)"))
-            {
-                writer.WriteLine("return onZero;");
-            }
-
+            writer.WriteLine($"global::System.Console.Error.WriteLine(\"{FailMarker}\" + operation + \" overflowed\");");
+            writer.WriteLine("global::System.Console.Error.Flush();");
+            writer.WriteLine($"global::System.Environment.Exit({FailExitCode});");
             writer.WriteLine();
-            writer.WriteLine($"return WrapDivide(left, right);");
-        }
-    }
-
-    private static void EmitModuloOr(SourceWriter writer, string type, bool isSigned)
-    {
-        writer.WriteLine("/// <summary>Remainder that yields <paramref name=\"onZero\"/> instead of failing.</summary>");
-        using (writer.Block($"public static {type} WrapModuloOr({type} left, {type} right, {type} onZero)"))
-        {
-            using (writer.Block("if (right == 0)"))
-            {
-                writer.WriteLine("return onZero;");
-            }
-
-            writer.WriteLine();
-            writer.WriteLine($"return WrapModulo(left, right);");
-        }
-    }
-
-    private static void EmitDivideOrFail(SourceWriter writer, string type)
-    {
-        writer.WriteLine("/// <summary>Division that terminates the process on a zero divisor.</summary>");
-        using (writer.Block($"public static {type} WrapDivideOrFail({type} left, {type} right)"))
-        {
-            using (writer.Block("if (right == 0)"))
-            {
-                writer.WriteLine("Fail(\"division\");");
-            }
-
-            writer.WriteLine();
-            writer.WriteLine("return WrapDivide(left, right);");
-        }
-    }
-
-    private static void EmitModuloOrFail(SourceWriter writer, string type)
-    {
-        writer.WriteLine("/// <summary>Remainder that terminates the process on a zero divisor.</summary>");
-        using (writer.Block($"public static {type} WrapModuloOrFail({type} left, {type} right)"))
-        {
-            using (writer.Block("if (right == 0)"))
-            {
-                writer.WriteLine("Fail(\"modulo\");");
-            }
-
-            writer.WriteLine();
-            writer.WriteLine("return WrapModulo(left, right);");
-        }
-    }
-
-    private static void EmitDivide(SourceWriter writer, string type, bool isSigned)
-    {
-        writer.WriteLine("/// <summary>Division with wrapping overflow. Division by zero still throws.</summary>");
-        using (writer.Block($"public static {type} WrapDivide({type} left, {type} right)"))
-        {
-            if (isSigned)
-            {
-                writer.WriteLine("// MIN / -1 overflows and traps even in an unchecked context.");
-                writer.WriteLine("// The wrapped result is MIN itself.");
-                using (writer.Block("if (right == -1)"))
-                {
-                    writer.WriteLine("return unchecked(0 - left);");
-                }
-
-                writer.WriteLine();
-            }
-
-            writer.WriteLine("return left / right;");
-        }
-    }
-
-    private static void EmitModulo(SourceWriter writer, string type, bool isSigned)
-    {
-        writer.WriteLine("/// <summary>Remainder with wrapping overflow. Modulo by zero still throws.</summary>");
-        using (writer.Block($"public static {type} WrapModulo({type} left, {type} right)"))
-        {
-            if (isSigned)
-            {
-                writer.WriteLine("// MIN % -1 traps for the same reason; the wrapped result is 0.");
-                using (writer.Block("if (right == -1)"))
-                {
-                    writer.WriteLine("return 0;");
-                }
-
-                writer.WriteLine();
-            }
-
-            writer.WriteLine("return left % right;");
+            writer.WriteLine("// Unreachable: Exit does not return, but the runtime does not say so in a way");
+            writer.WriteLine("// the compiler can use.");
+            writer.WriteLine("return default!;");
         }
     }
 }

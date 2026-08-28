@@ -1,0 +1,231 @@
+// Conformance vectors for the checked overflow policy (spec 10.1, 10.4).
+//
+// The config file beside this one selects it. Discovery stops at the nearest protolang.config.xml,
+// so these vectors compile under Checked while everything in the directory above compiles under the
+// default Wrapping -- and both end up in the same C# assembly and the same C++ link, which is the
+// property that makes a per-project policy safe to have at all.
+//
+// Overflow under this policy terminates the process the way 'on_zero fail' does, with the same
+// exit code, so 'expect fail' pins it with no new machinery. Every operand comes from a fixture
+// field rather than a literal, so the compiler cannot fold the overflow away and decide the
+// terminating path is unreachable.
+
+import proto "conformance.proto";
+
+extend CheckedOverflowCase {
+    fn i32_sum() -> int32 {
+        return i32_left + i32_right;
+    }
+
+    fn i32_difference() -> int32 {
+        return i32_left - i32_right;
+    }
+
+    fn i32_product() -> int32 {
+        return i32_left * i32_right;
+    }
+
+    fn i32_negated() -> int32 {
+        return -i32_left;
+    }
+
+    fn i64_sum() -> int64 {
+        return i64_left + i64_right;
+    }
+
+    fn i64_product() -> int64 {
+        return i64_left * i64_right;
+    }
+
+    fn i64_negated() -> int64 {
+        return -i64_left;
+    }
+
+    // MIN / -1 is the one division that overflows: the quotient is 2^63, which int64 cannot hold.
+    fn i64_quotient() -> int64 {
+        return i64_left / i64_right on_zero 0;
+    }
+
+    // The remainder of the same division is 0, which every type can hold, so no policy makes this
+    // one fail. It is here to keep that distinction pinned rather than assumed.
+    fn i64_remainder() -> int64 {
+        return i64_left % i64_right on_zero 0;
+    }
+
+    fn u32_sum() -> uint32 {
+        return u32_left + u32_right;
+    }
+
+    fn u32_difference() -> uint32 {
+        return u32_left - u32_right;
+    }
+
+    fn u64_product() -> uint64 {
+        return u64_left * u64_right;
+    }
+}
+
+// --- values that fit are untouched by the policy ---
+
+test CheckedOverflowCase.i32_sum "an addition that fits returns normally" {
+    receiver {
+        i32_left = 2000000000;
+        i32_right = 100000000;
+    }
+
+    expect return 2100000000;
+}
+
+test CheckedOverflowCase.i32_product "a product that fits returns normally" {
+    receiver {
+        i32_left = 46340;
+        i32_right = 46340;
+    }
+
+    expect return 2147395600;
+}
+
+test CheckedOverflowCase.i64_sum "a 64-bit addition that fits returns normally" {
+    receiver {
+        i64_left = 9223372036854775807;
+        i64_right = 0;
+    }
+
+    expect return 9223372036854775807;
+}
+
+test CheckedOverflowCase.i64_quotient "a division that fits returns normally" {
+    receiver {
+        i64_left = -7;
+        i64_right = 2;
+    }
+
+    expect return -3;
+}
+
+test CheckedOverflowCase.i64_quotient "a zero divisor still takes the on_zero fallback" {
+    receiver {
+        i64_left = 5;
+        i64_right = 0;
+    }
+
+    expect return 0;
+}
+
+// MIN % -1 is 0 under every policy, because 0 is representable. Only the quotient overflows.
+test CheckedOverflowCase.i64_remainder "MIN % -1 is zero, not an overflow" {
+    receiver {
+        i64_left = -9223372036854775807 - 1;
+        i64_right = -1;
+    }
+
+    expect return 0;
+}
+
+test CheckedOverflowCase.u32_sum "an unsigned addition that fits returns normally" {
+    receiver {
+        u32_left = 4294967295;
+        u32_right = 0;
+    }
+
+    expect return 4294967295;
+}
+
+// --- values that do not fit stop the process ---
+
+test CheckedOverflowCase.i32_sum "int32 addition past MAX terminates" {
+    receiver {
+        i32_left = 2147483647;
+        i32_right = 1;
+    }
+
+    expect fail;
+}
+
+test CheckedOverflowCase.i32_difference "int32 subtraction past MIN terminates" {
+    receiver {
+        i32_left = -2147483647;
+        i32_right = 2;
+    }
+
+    expect fail;
+}
+
+test CheckedOverflowCase.i32_product "int32 multiplication past MAX terminates" {
+    receiver {
+        i32_left = 46341;
+        i32_right = 46341;
+    }
+
+    expect fail;
+}
+
+test CheckedOverflowCase.i32_negated "negating int32 MIN terminates" {
+    receiver {
+        i32_left = -2147483647 - 1;
+    }
+
+    expect fail;
+}
+
+test CheckedOverflowCase.i64_sum "int64 addition past MAX terminates" {
+    receiver {
+        i64_left = 9223372036854775807;
+        i64_right = 1;
+    }
+
+    expect fail;
+}
+
+test CheckedOverflowCase.i64_product "int64 multiplication past MAX terminates" {
+    receiver {
+        i64_left = 4294967296;
+        i64_right = 4294967296;
+    }
+
+    expect fail;
+}
+
+test CheckedOverflowCase.i64_negated "negating int64 MIN terminates" {
+    receiver {
+        i64_left = -9223372036854775807 - 1;
+    }
+
+    expect fail;
+}
+
+test CheckedOverflowCase.i64_quotient "MIN / -1 terminates" {
+    receiver {
+        i64_left = -9223372036854775807 - 1;
+        i64_right = -1;
+    }
+
+    expect fail;
+}
+
+test CheckedOverflowCase.u32_sum "uint32 addition past MAX terminates" {
+    receiver {
+        u32_left = 4294967295;
+        u32_right = 1;
+    }
+
+    expect fail;
+}
+
+test CheckedOverflowCase.u32_difference "uint32 subtraction below zero terminates" {
+    receiver {
+        u32_left = 0;
+        u32_right = 1;
+    }
+
+    expect fail;
+}
+
+test CheckedOverflowCase.u64_product "uint64 multiplication past MAX terminates" {
+    receiver {
+        u64_left = 4294967296;
+        u64_right = 4294967296;
+    }
+
+    expect fail;
+}

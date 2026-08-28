@@ -658,6 +658,17 @@ public sealed class Parser
     {
         var token = Current;
 
+        // 'has' sits at prefix precedence beside 'not', so 'has a.b' takes the whole path and
+        // 'has a and has a.b' groups the way it reads. Its operand is parsed as a postfix
+        // expression rather than a prefix one: 'has not x' is nonsense, and letting it parse would
+        // only move the diagnostic further from the mistake.
+        if (token.Kind == TokenKind.Has)
+        {
+            Advance();
+            var target = ParsePostfixExpression();
+            return new HasExpression(target, Spanning(token.Span, target.Span));
+        }
+
         if (token.Kind is TokenKind.Minus or TokenKind.Bang or TokenKind.Not)
         {
             Advance();

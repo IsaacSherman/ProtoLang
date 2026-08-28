@@ -43,4 +43,13 @@ message Outer {
   int32 small_count = 9;
   uint32 tally = 10;
   uint64 big_tally = 11;
+
+  // Explicit presence, so 'has' has something to answer. Without 'optional' a proto3 scalar
+  // cannot distinguish unset from its default, which is what PL0079 reports.
+  optional int64 optional_count = 12;
+  optional string optional_label = 13;
+
+  // A second message field, so a guard over two of them is a real test rather than one field
+  // and a scalar that never needed guarding.
+  Inner other_inner = 14;
 }

@@ -82,6 +82,10 @@ public class WellKnownTypeTests
 
             extend Event {
                 fn ends_at_seconds() -> int64 {
+                    if not has starts_at or not has length {
+                        return 0;
+                    }
+
                     return starts_at.seconds + length.seconds;
                 }
             }
@@ -133,6 +137,10 @@ public class WellKnownTypeTests
 
             extend Event {
                 fn ends_at_seconds() -> int64 {
+                    if not has starts_at or not has length {
+                        return 0;
+                    }
+
                     return starts_at.seconds + length.seconds;
                 }
             }
@@ -196,6 +204,10 @@ public class WellKnownTypeTests
 
             extend Event {
                 fn ends_at_seconds() -> int64 {
+                    if not has starts_at or not has length {
+                        return 0;
+                    }
+
                     return starts_at.seconds + length.seconds;
                 }
             }
