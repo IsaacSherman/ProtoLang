@@ -69,8 +69,13 @@ ProtoLang method:
 Receiver:
 : The message instance a method operates on, equivalent to `this` or `self` in target languages.
 
+Front end:
+: The compiler components that produce the IR: lexer, parser, descriptor binding, name resolution,
+  and type checking. The compiler-literature sense of the word, not the web one -- it has nothing to
+  do with a user interface.
+
 Backend:
-: A compiler component that emits code for a specific target language.
+: A compiler component that emits code for a specific target language. Everything after the IR.
 
 IR:
 : The typed intermediate representation produced after parsing, name resolution, and type checking.
