@@ -41,15 +41,23 @@ internal static class TestPaths
     }
 
     /// <summary>
+    /// A temporary directory of its own, so a test that cares which config file or which proto root
+    /// is nearest cannot be reached by another test's.
+    /// </summary>
+    public static string CreateTempDirectory()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "protolang-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        return directory;
+    }
+
+    /// <summary>
     /// Writes <paramref name="source"/> to a temporary .protolang file that imports the example
     /// invoice schema, so binder tests can exercise real descriptors.
     /// </summary>
     public static string WriteTempScript(string source)
     {
-        var directory = Path.Combine(Path.GetTempPath(), "protolang-tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(directory);
-
-        var path = Path.Combine(directory, "test.protolang");
+        var path = Path.Combine(CreateTempDirectory(), "test.protolang");
         File.WriteAllText(path, source);
         return path;
     }
