@@ -1,4 +1,5 @@
 using ProtoLang.Backend;
+using ProtoLang.Config;
 using ProtoLang.Backend.Cpp;
 using ProtoLang.Backend.CSharp;
 using ProtoLang.Diagnostics;
@@ -20,9 +21,19 @@ public sealed class ConformanceFixture
 
     internal ConformanceRun Cpp { get; }
 
+    /// <summary>
+    /// One compiled vector, with the policy it compiled under.
+    /// </summary>
+    /// <remarks>
+    /// The policy is carried because it reaches the generated file's header. The vectors in the
+    /// policy subdirectories are precisely the ones a header claiming the default would mislead
+    /// about, and a header is the first thing read when a conformance failure is being diagnosed.
+    /// </remarks>
+    private sealed record CompiledVector(ConformanceVector Vector, IrModule Module, ProjectConfig Config);
+
     public ConformanceFixture()
     {
-        var modules = new List<(ConformanceVector Vector, IrModule Module)>();
+        var modules = new List<CompiledVector>();
         var failures = new List<string>();
 
         foreach (var vector in ConformanceVectors.All)
@@ -30,7 +41,7 @@ public sealed class ConformanceFixture
             var result = ConformanceVectors.Compile(vector);
             if (result.Success)
             {
-                modules.Add((vector, result.Module!));
+                modules.Add(new CompiledVector(vector, result.Module!, result.Config));
                 continue;
             }
 
@@ -55,7 +66,7 @@ public sealed class ConformanceFixture
         Cpp = RunCpp(modules);
     }
 
-    private static ConformanceRun RunCSharp(IReadOnlyList<(ConformanceVector Vector, IrModule Module)> modules)
+    private static ConformanceRun RunCSharp(IReadOnlyList<CompiledVector> modules)
     {
         const string Backend = "csharp";
 
@@ -113,7 +124,7 @@ public sealed class ConformanceFixture
         return new ConformanceRun(Backend, null, results, workspace.Directory, run.Process.Output);
     }
 
-    private static ConformanceRun RunCpp(IReadOnlyList<(ConformanceVector Vector, IrModule Module)> modules)
+    private static ConformanceRun RunCpp(IReadOnlyList<CompiledVector> modules)
     {
         const string Backend = "cpp";
 
@@ -219,15 +230,18 @@ public sealed class ConformanceFixture
     /// here: that is exactly the case their fixed file names exist to allow.
     /// </summary>
     private static IReadOnlyList<GeneratedFile> EmitAll(
-        IReadOnlyList<(ConformanceVector Vector, IrModule Module)> modules,
+        IReadOnlyList<CompiledVector> modules,
         ITestBackend backend,
         DiagnosticBag diagnostics)
     {
         var byPath = new Dictionary<string, GeneratedFile>(StringComparer.Ordinal);
 
-        foreach (var (vector, module) in modules)
+        foreach (var (vector, module, config) in modules)
         {
-            var options = new BackendOptions(Path.GetFileName(vector.SourcePath));
+            var options = new BackendOptions(Path.GetFileName(vector.SourcePath))
+            {
+                PolicyDescription = config.DescribeForHeader(),
+            };
 
             foreach (var file in backend.Emit(module, options, diagnostics)
                 .Concat(backend.EmitTests(module, options, diagnostics)))

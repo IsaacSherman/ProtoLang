@@ -86,6 +86,41 @@ public sealed record ProjectConfig(
     public string? Path { get; init; }
 
     /// <summary>
+    /// The policy lines a generated file's header carries, so a reader can tell which policy
+    /// produced the code below it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Rendered here rather than in each backend, for two reasons. Every target says the same thing
+    /// about the same build, which is the point of a header that claims reproducibility. And a
+    /// backend receives these as prose it can only print, never as a policy it could branch on --
+    /// every emission decision has to come from the annotation the binder stamped onto the IR node,
+    /// which is what makes a new mode a compile error at every emission site instead of a silently
+    /// wrong default.
+    /// </para>
+    /// <para>
+    /// Only the settings visible in the emitted code are listed. The other two govern what compiles
+    /// rather than what is written out, and a header that repeated them in every file forever would
+    /// be noise. No path is included: an absolute path would make otherwise identical output differ
+    /// between machines.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<string> DescribeForHeader() =>
+    [
+        $"Language policy (spec 10.4): integer overflow = {DescribeOverflow(Overflow)},",
+        $"numeric conversions = {Conversion}. Both are emitted explicitly, so a",
+        "consumer's build settings cannot change what this code does.",
+    ];
+
+    private static string DescribeOverflow(OverflowPolicy overflow) => overflow switch
+    {
+        OverflowPolicy.Wrapping => "Wrapping (two's complement)",
+        OverflowPolicy.Checked => "Checked (terminates, exit code 70)",
+        OverflowPolicy.Saturating => "Saturating (clamps to the type's bounds)",
+        _ => throw new ArgumentOutOfRangeException(nameof(overflow), overflow, "Unhandled overflow policy."),
+    };
+
+    /// <summary>
     /// Applies a command-line override to one setting, or refuses it.
     /// </summary>
     /// <remarks>

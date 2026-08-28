@@ -55,6 +55,13 @@ if (options.Targets.Contains("cpp"))
     backends.Add(new CppBackend());
 }
 
+// The resolved policy travels into the header of every generated file, so a reader can tell what
+// produced the code in front of them without re-running the compiler to find out.
+var backendOptions = new BackendOptions(Path.GetFileName(options.SourcePath))
+{
+    PolicyDescription = result.Config.DescribeForHeader(),
+};
+
 var backendDiagnostics = new DiagnosticBag();
 var written = new List<string>();
 
@@ -62,7 +69,7 @@ foreach (var backend in backends)
 {
     var files = backend.Emit(
         result.Module!,
-        new BackendOptions(Path.GetFileName(options.SourcePath)),
+        backendOptions,
         backendDiagnostics);
 
     var outputDirectory = Path.Combine(options.OutputDirectory, backend.Name);
@@ -79,7 +86,7 @@ foreach (var backend in backends)
     {
         var testFiles = testBackend.EmitTests(
             result.Module!,
-            new BackendOptions(Path.GetFileName(options.SourcePath)),
+            backendOptions,
             backendDiagnostics);
 
         var testOutputDirectory = Path.Combine(options.TestOutputDirectory, backend.Name);

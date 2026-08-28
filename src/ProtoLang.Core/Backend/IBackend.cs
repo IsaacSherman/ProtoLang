@@ -7,7 +7,21 @@ namespace ProtoLang.Backend;
 /// <summary>A single generated source file, with a path relative to the output directory.</summary>
 public sealed record GeneratedFile(string RelativePath, string Contents);
 
-public sealed record BackendOptions(string SourceFileName);
+public sealed record BackendOptions(string SourceFileName)
+{
+    /// <summary>
+    /// The policy lines to print in the generated file's header, from
+    /// <see cref="Config.ProjectConfig.DescribeForHeader"/>.
+    /// </summary>
+    /// <remarks>
+    /// Prose, deliberately. A backend prints these and cannot branch on them: how an operation is
+    /// emitted comes from the behavior annotation on its IR node, never from a policy object handed
+    /// to the backend. The default describes the default policy, so a caller that compiles with no
+    /// configuration still emits an accurate header rather than none.
+    /// </remarks>
+    public IReadOnlyList<string> PolicyDescription { get; init; } =
+        Config.ProjectConfig.Default.DescribeForHeader();
+}
 
 /// <summary>
 /// A code generator. Per spec 23 a conforming backend consumes only the typed IR, preserves

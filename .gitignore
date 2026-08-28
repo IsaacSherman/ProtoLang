@@ -433,3 +433,6 @@ generated/
 
 # vcpkg manifest-mode native dependencies
 vcpkg_installed/
+
+# A locally installed .NET CLI. A toolchain, not project content.
+.dotnet-cli/

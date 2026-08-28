@@ -714,6 +714,11 @@ Normative Requirements:
 - Every mode of every setting must produce identical observable behavior in every backend. A mode
   must never mean "use whatever this target does", unless that target behavior has been specified
   here and reproduced everywhere else.
+- **Every generated file states the policy it was produced under, in its header.** The settings that
+  shape the emitted code are named there, so a reader can tell why the code in front of them does
+  what it does without re-running the compiler to find out. Every backend states the same facts
+  about the same build, and no path is included: an absolute path would make otherwise identical
+  output differ between machines.
 
 Settings with a single legal value are listed anyway. The file's purpose is to enumerate every
 language-dependent preference, including the settled ones, so the whole contract is readable in one

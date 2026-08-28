@@ -1,3 +1,6 @@
+using ProtoLang.Backend;
+using ProtoLang.Backend.Cpp;
+using ProtoLang.Backend.CSharp;
 using ProtoLang.Config;
 using ProtoLang.Diagnostics;
 using ProtoLang.Ir;
@@ -250,6 +253,96 @@ public class ProjectConfigTests
             OverflowPolicy.Checked, allowOverride: false, out _, out var conflict));
 
         Assert.Null(conflict);
+    }
+
+    // ---------------------------------------------------------------- the generated header
+
+    private static string EmitHeader(IBackend backend, OverflowPolicy policy, string suffix)
+    {
+        var path = TestPaths.WriteTempScript(
+            "import proto \"fixtures.proto\";\nextend Outer { fn f() -> int64 { return count + count; } }");
+
+        var config = ProjectConfig.Default with { Overflow = policy };
+        var result = Compilation.Compile(path, [TestPaths.FixtureProtoDirectory], config: config);
+        Assert.True(result.Success, string.Join("\n", result.Diagnostics.Select(d => d.ToString())));
+
+        var options = new BackendOptions(Path.GetFileName(path))
+        {
+            PolicyDescription = result.Config.DescribeForHeader(),
+        };
+
+        var contents = backend.Emit(result.Module!, options, new DiagnosticBag())
+            .Single(f => f.RelativePath.EndsWith(suffix, StringComparison.Ordinal))
+            .Contents;
+
+        return string.Join(
+            "\n",
+            contents.Split('\n').TakeWhile(line => !line.Contains("</auto-generated>", StringComparison.Ordinal)));
+    }
+
+    /// <summary>
+    /// The header is the first thing a reader looks at, and the only place a generated file explains
+    /// itself. It used to claim wrapping semantics unconditionally, which was true until a second
+    /// mode existed and then became a lie in exactly the files someone would be reading because the
+    /// arithmetic had surprised them.
+    /// </summary>
+    [Theory]
+    [InlineData(OverflowPolicy.Wrapping, "Wrapping")]
+    [InlineData(OverflowPolicy.Checked, "Checked")]
+    [InlineData(OverflowPolicy.Saturating, "Saturating")]
+    public void TheGeneratedHeaderNamesThePolicyThatProducedIt(OverflowPolicy policy, string expected)
+    {
+        foreach (var (backend, suffix) in new (IBackend Backend, string Suffix)[]
+                 {
+                     (new CSharpBackend(), "test.g.cs"),
+                     (new CppBackend(), "test.pl.h"),
+                 })
+        {
+            var header = EmitHeader(backend, policy, suffix);
+
+            Assert.Contains(expected, header, StringComparison.Ordinal);
+
+            // Naming the right policy is not enough on its own: the old header named a policy too.
+            foreach (var other in Enum.GetValues<OverflowPolicy>())
+            {
+                if (other != policy)
+                {
+                    Assert.DoesNotContain(other.ToString(), header, StringComparison.Ordinal);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Both targets say the same thing about the same build. A header claiming reproducibility while
+    /// describing the compilation differently per language would be worth less than none, which is
+    /// why the lines are rendered once in the core rather than written out by each backend.
+    /// </summary>
+    [Fact]
+    public void BothBackendsDescribeTheBuildIdentically()
+    {
+        var csharp = EmitHeader(new CSharpBackend(), OverflowPolicy.Saturating, "test.g.cs");
+        var cpp = EmitHeader(new CppBackend(), OverflowPolicy.Saturating, "test.pl.h");
+
+        foreach (var line in (ProjectConfig.Default with { Overflow = OverflowPolicy.Saturating })
+                     .DescribeForHeader())
+        {
+            Assert.Contains(line, csharp, StringComparison.Ordinal);
+            Assert.Contains(line, cpp, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A caller that compiles with no configuration still gets an accurate header rather than none.
+    /// That is what let every existing call site stay as it was instead of being updated to repeat
+    /// the default back to the compiler.
+    /// </summary>
+    [Fact]
+    public void BackendOptionsDescribeTheDefaultPolicyWhenNothingSaysOtherwise()
+    {
+        Assert.Equal(
+            ProjectConfig.Default.DescribeForHeader(),
+            new BackendOptions("test.protolang").PolicyDescription);
     }
 
     // ---------------------------------------------------------------- reaching the IR
