@@ -55,7 +55,7 @@ Read the sub-issue **and** [#47](https://github.com/IsaacSherman/ProtoLang/issue
 specific about scope ("constructed in only eleven places") and those claims are worth verifying, not
 assuming.
 
-Plan- on ultracode- before writing. Where an issue deliberately leaves a decision open, decide it explicitly and ask
+Plan carefully before writing. Where an issue deliberately leaves a decision open, decide it explicitly and ask
 rather than picking silently; those choices are the ones that cost the most to reverse three issues
 later.
 
