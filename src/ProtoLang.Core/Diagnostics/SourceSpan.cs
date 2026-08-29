@@ -1,5 +1,3 @@
-using System.Diagnostics;
-
 namespace ProtoLang.Diagnostics;
 
 /// <summary>
@@ -56,7 +54,7 @@ public readonly record struct SourcePosition(int Offset, int Line, int Column)
 /// <para>
 /// The two ends are consistent with each other by construction: <see cref="SingleLine"/> and
 /// <see cref="Union(string, SourceSpan, SourceSpan)"/> compute one from the other, and the
-/// constructor asserts the ordering in debug builds. See <see cref="SourcePosition"/> for the
+/// constructor refuses an end that precedes its start. See <see cref="SourcePosition"/> for the
 /// origin and the units both ends are measured in.
 /// </para>
 /// <para>
@@ -74,13 +72,27 @@ public readonly record struct SourceSpan
     /// </remarks>
     public static readonly SourceSpan None = new("<none>", SourcePosition.None, SourcePosition.None);
 
+    /// <exception cref="ArgumentException">
+    /// <paramref name="end"/> comes before <paramref name="start"/> in any of the three coordinates.
+    /// </exception>
+    /// <remarks>
+    /// Checked rather than asserted. A debug assertion would guard the compiler's own call sites and
+    /// then vanish from the build a language server actually ships, which is where the untrusted
+    /// positions are: a client can send a range that no longer matches the buffer it was computed
+    /// against. An inverted span is not a squiggle in the wrong place, it is a negative
+    /// <see cref="Length"/> that surfaces as an out-of-range slice in whichever consumer reaches it
+    /// first, a long way from whoever built it.
+    /// </remarks>
     public SourceSpan(string file, SourcePosition start, SourcePosition end)
     {
-        Debug.Assert(end.Offset >= start.Offset, "a span cannot end before it starts");
-        Debug.Assert(end.Line >= start.Line, "a span cannot end on a line above the one it starts on");
-        Debug.Assert(
-            end.Line != start.Line || end.Column >= start.Column,
-            "a span on one line cannot end left of where it starts");
+        if (end.Offset < start.Offset
+            || end.Line < start.Line
+            || (end.Line == start.Line && end.Column < start.Column))
+        {
+            throw new ArgumentException(
+                $"A span cannot end before it starts: {Describe(start)} to {Describe(end)} in '{file}'.",
+                nameof(end));
+        }
 
         File = file;
         Start = start;
@@ -118,7 +130,7 @@ public readonly record struct SourceSpan
     /// </summary>
     public static SourceSpan SingleLine(string file, int offset, int line, int column, int length)
     {
-        Debug.Assert(length >= 0, "a span cannot have negative length");
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
 
         return new SourceSpan(
             file,
@@ -138,8 +150,9 @@ public readonly record struct SourceSpan
 
     /// <inheritdoc cref="Union(SourceSpan, SourceSpan)"/>
     /// <param name="file">
-    /// The file to stamp on the result, for callers that are the authority on it -- the parser
-    /// knows what it is parsing even when it combines a synthesized span with a real one.
+    /// The label to stamp on the result, for callers that are the authority on it -- the parser
+    /// knows what it is parsing. It renames the result and nothing more: both operands still have
+    /// to describe the same text, because that is what makes their offsets comparable.
     /// </param>
     public static SourceSpan Union(string file, SourceSpan first, SourceSpan second)
     {
@@ -158,11 +171,23 @@ public readonly record struct SourceSpan
             return new SourceSpan(file, first.Start, first.End);
         }
 
+        if (!string.Equals(first.File, second.File, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"Spans from two files cannot be combined: '{first.File}' and '{second.File}'. An "
+                + "offset is an index into one text, so a range that takes its start from one file "
+                + "and its end from another describes nowhere.",
+                nameof(second));
+        }
+
         return new SourceSpan(
             file,
             first.Start.Offset <= second.Start.Offset ? first.Start : second.Start,
             first.End.Offset >= second.End.Offset ? first.End : second.End);
     }
+
+    private static string Describe(SourcePosition position)
+        => $"offset {position.Offset} ({position.Line}:{position.Column})";
 
     /// <summary>Formats as <c>file.protolang:line:column</c> per the spec 26 template.</summary>
     public override string ToString() => $"{File}:{Line}:{Column}";

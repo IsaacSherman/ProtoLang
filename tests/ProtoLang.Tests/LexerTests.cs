@@ -263,4 +263,39 @@ public class LexerTests
         Assert.True(span.End.Offset <= Text.Length, "the span must not end past the end of the text");
         Assert.Equal("\\q", Text.Substring(span.Start.Offset, span.Length));
     }
+    /// <summary>
+    /// A line ending has nothing to escape, and consuming one would be worse than a wrong
+    /// diagnostic: the literal would carry on to the next line while the lexer line bookkeeping
+    /// stayed behind, and every span for the rest of the file would name the wrong line. That
+    /// failure is silent and unbounded, so it is asserted over the whole token stream rather than
+    /// over the one token that caused it.
+    /// </summary>
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    public void ABackslashAtTheEndOfALineDoesNotCarryTheLiteralOntoTheNextOne(string lineEnding)
+    {
+        var text = $"var s = \"a\\{lineEnding}b\";{lineEnding}var t = 1;";
+
+        var tokens = Tokenize(text, out var diagnostics);
+        var lines = new LineMap(text);
+
+        // The literal stops at the line ending, which is what PL0008 already says is the rule.
+        // Complaining about an escape sequence the author never wrote would be the wrong answer,
+        // and the answer has to be the same whichever line ending the file uses.
+        Assert.Contains(diagnostics, d => d.Code == "PL0008");
+        Assert.DoesNotContain(diagnostics, d => d.Code == "PL0007");
+
+        Assert.All(
+            tokens,
+            token =>
+            {
+                Assert.Equal(token.Text, text.Substring(token.Span.Start.Offset, token.Span.Length));
+                Assert.Equal(token.Span.Start, lines.PositionOf(token.Span.Start.Offset));
+                Assert.Equal(token.Span.End, lines.PositionOf(token.Span.End.Offset));
+            });
+
+        // The bookkeeping survived to the end of the file: the last statement really is on line 3.
+        Assert.Equal(3, tokens.Last(token => token.Kind != TokenKind.EndOfFile).Span.Line);
+    }
 }

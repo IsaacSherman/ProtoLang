@@ -102,13 +102,63 @@ public class SourceSpanTests
     }
 
     [Fact]
-    public void UnionStampsTheFileItIsGiven()
+    public void UnionTakesTheFileFromItsOperandsOrFromTheCaller()
     {
         var first = SourceSpan.SingleLine("a.protolang", 0, 1, 1, 1);
-        var second = SourceSpan.SingleLine("b.protolang", 4, 1, 5, 1);
+        var second = SourceSpan.SingleLine("a.protolang", 4, 1, 5, 1);
 
-        Assert.Equal(Name, SourceSpan.Union(Name, first, second).File);
         Assert.Equal("a.protolang", SourceSpan.Union(first, second).File);
+        Assert.Equal("relabelled.protolang", SourceSpan.Union("relabelled.protolang", first, second).File);
+    }
+
+    /// <summary>
+    /// An offset is an index into one text. Taking a start from one file and an end from another
+    /// produces a `Length` that is the difference between positions in unrelated strings, and the
+    /// first consumer to slice with it reads the wrong range or throws -- a long way from here.
+    /// </summary>
+    [Fact]
+    public void UnionRefusesSpansFromTwoFiles()
+    {
+        var here = SourceSpan.SingleLine("a.protolang", 0, 1, 1, 1);
+        var elsewhere = SourceSpan.SingleLine("b.protolang", 400, 40, 1, 1);
+
+        Assert.Throws<ArgumentException>(() => SourceSpan.Union(here, elsewhere));
+        Assert.Throws<ArgumentException>(() => SourceSpan.Union(Name, here, elsewhere));
+
+        // A None operand contributes no text, so it is not a second file.
+        Assert.Equal(here, SourceSpan.Union(here, SourceSpan.None));
+    }
+
+    // ---------------------------------------------------------------- construction
+
+    /// <summary>
+    /// The check has to survive into Release. A language server builds spans from positions a client
+    /// supplied, which can describe a buffer that has since been edited, and the guard is worth
+    /// nothing if it is compiled out of the build that faces them.
+    /// </summary>
+    [Fact]
+    public void ASpanCannotEndBeforeItStarts()
+    {
+        Assert.Throws<ArgumentException>(
+            () => new SourceSpan(Name, new SourcePosition(20, 5, 1), new SourcePosition(10, 3, 1)));
+
+        // Ordered by offset but not by line, and ordered by line but not by column.
+        Assert.Throws<ArgumentException>(
+            () => new SourceSpan(Name, new SourcePosition(10, 5, 1), new SourcePosition(20, 3, 1)));
+        Assert.Throws<ArgumentException>(
+            () => new SourceSpan(Name, new SourcePosition(10, 3, 9), new SourcePosition(20, 3, 4)));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => SourceSpan.SingleLine(Name, 0, 1, 1, -1));
+    }
+
+    [Fact]
+    public void AnEndEqualToItsStartIsAllowed()
+    {
+        var position = new SourcePosition(10, 3, 4);
+        var empty = new SourceSpan(Name, position, position);
+
+        Assert.True(empty.IsEmpty);
+        Assert.Equal(0, empty.Length);
     }
 
     // ---------------------------------------------------------------- nowhere

@@ -313,6 +313,18 @@ public sealed class Lexer
                     break;
                 }
 
+                // A line ending has nothing to escape either, and consuming one here would be worse
+                // than a wrong diagnostic: the line bookkeeping lives in SkipTrivia, so the literal
+                // would carry on to the next line while _line and _lineStart stayed behind, and
+                // every span for the rest of the file would name the wrong line. Breaking leaves the
+                // newline for SkipTrivia and reports the unterminated literal, which is the truth
+                // about a line that ends in a backslash -- and reports it identically whether the
+                // file uses LF or CRLF.
+                if (Current == '\n' || (Current == '\r' && Lookahead == '\n'))
+                {
+                    break;
+                }
+
                 var escape = Current;
                 switch (escape)
                 {
