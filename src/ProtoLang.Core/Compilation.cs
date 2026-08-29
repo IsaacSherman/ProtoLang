@@ -358,6 +358,16 @@ public sealed class Compilation
         var everyImportResolved = true;
         foreach (var import in unit.Imports)
         {
+            // An import whose path has not been written names no file, and the parser has already
+            // said so. Searching for it anyway reports a schema called the empty string as missing,
+            // which is one mistake described twice. It still stops the compilation: there is no
+            // schema behind it to bind against.
+            if (import.PathIsMissing)
+            {
+                everyImportResolved = false;
+                continue;
+            }
+
             if (ResolveImport(import.Path, resolvePaths) is null)
             {
                 diagnostics.Error(

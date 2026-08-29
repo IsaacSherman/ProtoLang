@@ -43,18 +43,25 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    more than one line.
 4. **Parse.** [`Parser.ParseCompilationUnit`](src/ProtoLang.Core/Syntax/Parser.cs) → the AST in
    [Ast.cs](src/ProtoLang.Core/Syntax/Ast.cs). Recursive descent, error-recovering, depth-budgeted
-   (`MaxNestingDepth`) because a `StackOverflowException` cannot be caught.
-5. **Gate.** Parse errors currently stop the pipeline; the syntax tree is still returned. (#36
-   changes this so binding continues.)
+   (`MaxNestingDepth`) because a `StackOverflowException` cannot be caught. A name it expected and
+   did not find is a [`SyntaxName`](src/ProtoLang.Core/Syntax/SyntaxName.cs) that says so, carrying
+   the empty range where the name would go.
+5. **No gate.** Parse errors do not stop the pipeline. A buffer being typed into is broken most of
+   the time an editor asks anything about it, and what it most often asks — what may follow this
+   dot — only the binder can answer.
 6. **Descriptors.** Imports are resolved against the search paths, then
    [`DescriptorLoader`](src/ProtoLang.Core/Binding/DescriptorLoader.cs) shells out to `protoc`
    (located by [`ProtocLocator`](src/ProtoLang.Core/Binding/ProtocLocator.cs)) and returns
    `FileDescriptor`s. The `FileDescriptorSet` is currently discarded — #48 must stop doing that.
 7. **Bind.** [`Binder.Bind`](src/ProtoLang.Core/Binding/Binder.cs) resolves names against the
    descriptors and produces typed IR. It does **not** throw on bad input: an unresolved name becomes
-   `ErrorType` (`PL0037`) and binding continues.
-8. **Result.** `CompilationResult` carries the IR, the syntax tree *even when binding failed*, the
-   descriptors, the diagnostics, the settled config, and the search paths that were used.
+   `ErrorType` (`PL0037`) and binding continues, a name the parser never saw resolves to `ErrorType`
+   in silence, and a declaration that cannot be resolved is dropped rather than half-built.
+8. **Result.** `CompilationResult` carries the IR *even when the file did not parse*, the syntax
+   tree, the descriptors, the diagnostics, the settled config, and the search paths that were used.
+   `Module` is null only when the compilation stopped before the binder: an unreadable config, an
+   unusable include path, or a schema that could not be found or loaded. **Ask `Success`**, never
+   `Module is not null`, before treating it as a whole program.
 9. **Emit.** Backends consume the IR only.
 
 ## Key types
@@ -62,6 +69,7 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
 | Concern | Type | File |
 |---|---|---|
 | Location | `SourceSpan`, `SourcePosition` | [Diagnostics/SourceSpan.cs](src/ProtoLang.Core/Diagnostics/SourceSpan.cs) |
+| Written or not-yet-written names | `SyntaxName` | [Syntax/SyntaxName.cs](src/ProtoLang.Core/Syntax/SyntaxName.cs) |
 | Offset ↔ line/column | `LineMap` | [Diagnostics/LineMap.cs](src/ProtoLang.Core/Diagnostics/LineMap.cs) |
 | Messages | `Diagnostic`, `DiagnosticBag` | [Diagnostics/Diagnostic.cs](src/ProtoLang.Core/Diagnostics/Diagnostic.cs) |
 | Type system | `PlType` and friends | [Types/PlType.cs](src/ProtoLang.Core/Types/PlType.cs) |
@@ -99,9 +107,9 @@ reaches a backend only as prose for the generated file's header.
 ## Tests
 
 One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized by layer:
-`LexerTests`, `ParserTests`, `ParserResilienceTests` (fuzz), `SourceSpanTests`, `CompilationTests`,
-`InMemoryCompilationTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`, and the
-scaffolding and smoke suites.
+`LexerTests`, `ParserTests`, `ParserResilienceTests` and `BinderResilienceTests` (fuzz),
+`SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
+`ProjectConfigTests`, `BackendTests`, `NameMappingTests`, and the scaffolding and smoke suites.
 
 - **Conformance corpus** — [tests/conformance/vectors](tests/conformance/vectors) holds `.protolang`
   files whose `test` blocks *are* the vectors, compiled and executed in both backends. This is the
@@ -121,7 +129,8 @@ There is **no CI**. `dotnet test` locally is the gate.
 2. **Rendered diagnostics are published output.** Format, codes, and positions are user-visible.
 3. **Core stays free of CLI and editor coupling**, and dependencies keep running one way.
 4. **The compiler does not throw on user input.** Bad source, bad config, and bad include paths are
-   diagnostics. A long-lived host must survive all of them.
+   diagnostics. A long-lived host must survive all of them, through binding as well as parsing.
+   Neither stage may throw, hang, or recurse without bound on any input at all.
 5. **Backends see the IR only**, and cannot branch on policy.
 6. **Do not assume single-file forever.** #27 proposes multi-file compilation units; `Compilation`
    already holds a *set* of sources for that reason.
@@ -131,5 +140,5 @@ There is **no CI**. `dotnet test` locally is the gate.
 Epic [#47](https://github.com/IsaacSherman/ProtoLang/issues/47) makes the semantic model
 *addressable* ("what is at line 12, column 7?") and *durable* (the binder currently discards scope
 information as it goes), then builds a language server on top. Only four sub-issues touch existing
-compiler code — #35 (done), #36, #37 (done), #39. Everything else should be additive: new types,
+compiler code — #35, #36 and #37 (done), and #39. Everything else should be additive: new types,
 new projects. Rewriting the binder is the signal to stop and re-scope.

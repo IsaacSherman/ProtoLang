@@ -70,6 +70,41 @@ public class PartialBindingTests
         Assert.Empty(Walk(unknownField.Module!).OfType<IrMissingMemberAccess>());
     }
 
+    /// <summary>
+    /// The other trailing dot an editor sees constantly. <c>Level.</c> is a reach into an enum, not
+    /// a read of a value called Level, and the completed access has always known that -- so the
+    /// unfinished one has to know it too, or enum-value completion is answered with an error type.
+    /// </summary>
+    [Fact]
+    public void ATrailingDotOnAnEnumTypeExposesTheEnum()
+    {
+        var result = Compilation.Compile(
+            TestPaths.WriteTempScript(
+                "import proto \"fixtures.proto\";\n"
+                + "extend Outer { fn f() -> TopLevelStatus { return TopLevelStatus. } }"),
+            [TestPaths.FixtureProtoDirectory]);
+
+        var awaiting = Assert.Single(Walk(result.Module!).OfType<IrMissingMemberAccess>());
+
+        Assert.Equal(
+            "protolang.tests.TopLevelStatus",
+            Assert.IsType<EnumPlType>(awaiting.Receiver.Type).Descriptor.FullName);
+        Assert.DoesNotContain(result.Diagnostics, d => d.Code == "PL0037");
+    }
+
+    /// <summary>
+    /// Nothing can be called through a name that has not been typed, but the arguments were typed
+    /// and are still the author's code.
+    /// </summary>
+    [Fact]
+    public void ArgumentsOfACallWithNoMethodNameAreStillChecked()
+    {
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn f() -> int64 { return quantity.(nope); } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0037");
+    }
+
     // ------- what survives a parse error
 
     [Fact]
@@ -95,6 +130,52 @@ public class PartialBindingTests
     public void AModuleIsCarriedOutOfACompilationThatFailedToParse()
     {
         Assert.NotNull(CompileSource(TrailingDot).Module);
+    }
+
+    /// <summary>
+    /// A syntax error and a schema that is not there are two independent problems, and an author
+    /// with both of them has both of them. The parse gate used to report the first and stop, so the
+    /// second only appeared once the first was fixed.
+    /// </summary>
+    [Theory]
+    [InlineData("import proto \"nosuch.proto\";\nextend InvoiceItem { fn f() -> int64 { return quantity. } }", "PL0002")]
+    [InlineData("extend InvoiceItem { fn f() -> int64 { return quantity. } }", "PL0001")]
+    public void AParseErrorNoLongerHidesAProblemWithTheImports(string source, string code)
+    {
+        var result = CompileSource(source);
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0010");
+        Assert.Contains(result.Diagnostics, d => d.Code == code);
+    }
+
+    /// <summary>
+    /// An import being typed is not an import of a schema called the empty string. It still stops
+    /// the compilation -- there is nothing behind it to bind against -- but it says so once.
+    /// </summary>
+    [Fact]
+    public void AnImportWithNoPathIsNotAlsoReportedAsNotFound()
+    {
+        var result = CompileSource("import proto ;\nextend InvoiceItem { fn f() -> int64 { return 1; } }");
+
+        Assert.Equal("PL0010", Assert.Single(result.Diagnostics).Code);
+    }
+
+    [Fact]
+    public void AnImportOfAnEmptyPathIsStillReportedAsNotFound()
+    {
+        var result = CompileSource("import proto \"\";\nextend InvoiceItem { fn f() -> int64 { return 1; } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0002");
+    }
+
+    /// <summary>
+    /// The other direction, which is the one that would have made the change pointless: imports
+    /// that resolve perfectly must not be stopped by a syntax error elsewhere in the file.
+    /// </summary>
+    [Fact]
+    public void GoodImportsAreStillLoadedForAFileThatDidNotParse()
+    {
+        Assert.NotEmpty(CompileSource(TrailingDot).Descriptors);
     }
 
     /// <summary>

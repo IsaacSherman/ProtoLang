@@ -222,10 +222,13 @@ public sealed class Parser
     {
         var start = Expect(TokenKind.Import).Span;
         Expect(TokenKind.Proto);
-        var path = Expect(TokenKind.StringLiteral);
+        var written = TryExpect(TokenKind.StringLiteral, out var path);
         var end = Expect(TokenKind.Semicolon).Span;
 
-        return new ImportDeclaration((string?)path.Value ?? string.Empty, Spanning(start, end));
+        return new ImportDeclaration(
+            (string?)path.Value ?? string.Empty,
+            Spanning(start, end),
+            !written);
     }
 
     private ExtendDeclaration ParseExtendDeclaration()

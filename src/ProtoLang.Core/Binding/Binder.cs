@@ -1398,33 +1398,14 @@ public sealed class Binder
     /// </remarks>
     private IrExpression? TryBindEnumValue(MemberAccessExpression member, Scope scope, MethodContext context)
     {
-        if (!TryFlattenName(member.Receiver, out var typeName, out var leadingName))
+        if (!TryResolveEnumReceiver(member.Receiver, scope, context, out var descriptor))
         {
             return null;
         }
 
-        if (IsValueName(leadingName, scope, context))
+        if (descriptor is null)
         {
-            return null;
-        }
-
-        // A fully qualified name is unambiguous by construction, so it is tried before the
-        // simple-name lookup that could report a false ambiguity.
-        if (!_enumsByFullName.TryGetValue(typeName, out var descriptor))
-        {
-            if (!_enumsBySimpleName.TryGetValue(typeName, out var candidates))
-            {
-                // Not an enum. Whatever this is, the ordinary path reports it.
-                return null;
-            }
-
-            if (candidates.Count > 1)
-            {
-                ReportAmbiguousTypeName(typeName, member.Receiver.Span, candidates.Select(e => e.FullName));
-                return new IrLiteral(null, ErrorType.Instance, member.Span);
-            }
-
-            descriptor = candidates[0];
+            return new IrLiteral(null, ErrorType.Instance, member.Span);
         }
 
         var value = descriptor.FindValueByName(member.Name.Text);
@@ -1440,6 +1421,91 @@ public sealed class Binder
         }
 
         return new IrEnumValue(value, new EnumPlType(descriptor), member.Span);
+    }
+
+    /// <summary>
+    /// The enum a member access reaches into, when its receiver names one rather than holding a
+    /// value -- <c>Level</c> in <c>Level.LEVEL_HIGH</c>.
+    /// </summary>
+    /// <param name="descriptor">
+    /// The enum named, or null when the name was ambiguous -- which has been reported.
+    /// </param>
+    /// <returns>
+    /// False when the receiver does not name an enum at all, and the access should be bound the
+    /// ordinary way.
+    /// </returns>
+    /// <remarks>
+    /// Shared with the case where the member name has not been typed yet, so that <c>Level.</c> and
+    /// <c>Level.LEVEL_HIGH</c> agree about what <c>Level</c> is. They disagreed once: the unfinished
+    /// one bound the receiver as an expression and reported an unknown name for a type that
+    /// resolves perfectly well.
+    /// </remarks>
+    private bool TryResolveEnumReceiver(
+        Expression receiver,
+        Scope scope,
+        MethodContext context,
+        out EnumDescriptor? descriptor)
+    {
+        descriptor = null;
+
+        if (!TryFlattenName(receiver, out var typeName, out var leadingName))
+        {
+            return false;
+        }
+
+        if (IsValueName(leadingName, scope, context))
+        {
+            return false;
+        }
+
+        // A fully qualified name is unambiguous by construction, so it is tried before the
+        // simple-name lookup that could report a false ambiguity.
+        if (_enumsByFullName.TryGetValue(typeName, out var byFullName))
+        {
+            descriptor = byFullName;
+            return true;
+        }
+
+        if (!_enumsBySimpleName.TryGetValue(typeName, out var candidates))
+        {
+            // Not an enum. Whatever this is, the ordinary path reports it.
+            return false;
+        }
+
+        if (candidates.Count > 1)
+        {
+            ReportAmbiguousTypeName(typeName, receiver.Span, candidates.Select(e => e.FullName));
+            return true;
+        }
+
+        descriptor = candidates[0];
+        return true;
+    }
+
+    /// <summary>
+    /// Binds the receiver of a dot the author has not finished, for the type it has rather than for
+    /// a value it does not have.
+    /// </summary>
+    /// <remarks>
+    /// An enum is settled first, exactly as it is for a completed access. Binding <c>Level</c> as an
+    /// expression instead reports an unknown name -- a second diagnostic for a syntax error already
+    /// reported -- and then hands a completion list an error type in place of the enum whose values
+    /// it exists to offer. A placeholder carries the type, in the shape the binder already uses
+    /// wherever it has a type to publish and no value to go with it.
+    /// </remarks>
+    private IrExpression BindReceiverAwaitingAMember(
+        MemberAccessExpression member,
+        Scope scope,
+        MethodContext context)
+    {
+        if (!TryResolveEnumReceiver(member.Receiver, scope, context, out var descriptor))
+        {
+            return BindExpression(member.Receiver, scope, context, null);
+        }
+
+        return descriptor is null
+            ? new IrLiteral(null, ErrorType.Instance, member.Receiver.Span)
+            : new IrLiteral(null, new EnumPlType(descriptor), member.Receiver.Span);
     }
 
     /// <summary>
@@ -1497,8 +1563,9 @@ public sealed class Binder
     {
         if (member.Name.IsMissing)
         {
-            var awaitingName = BindExpression(member.Receiver, scope, context, null);
-            return new IrMissingMemberAccess(awaitingName, member.Name.Span);
+            return new IrMissingMemberAccess(
+                BindReceiverAwaitingAMember(member, scope, context),
+                member.Name.Span);
         }
 
         // A member access whose receiver is a plain dotted name may be naming an enum constant
@@ -1561,9 +1628,20 @@ public sealed class Binder
         switch (invocation.Callee)
         {
             // A callee whose name is still being typed is bound for what it is -- a receiver
-            // awaiting a member -- rather than looked up as a method called the empty string.
+            // awaiting a member -- rather than looked up as a method called the empty string. The
+            // arguments are still bound, and dropped: there is no call to hang them off, but they
+            // are the author's code and have to be checked whatever the callee turned out to be.
             case MemberAccessExpression { Name.IsMissing: true } member:
-                return BindMemberAccess(member, scope, context);
+            {
+                var awaiting = BindMemberAccess(member, scope, context);
+
+                foreach (var argument in invocation.Arguments)
+                {
+                    BindExpression(argument, scope, context, null);
+                }
+
+                return awaiting;
+            }
 
             case MemberAccessExpression member:
             {

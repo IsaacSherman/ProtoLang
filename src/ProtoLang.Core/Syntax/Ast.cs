@@ -11,7 +11,16 @@ public sealed record CompilationUnit(
     SourceSpan Span) : SyntaxNode(Span);
 
 /// <summary>An <c>import proto "path.proto";</c> declaration (spec 5.2).</summary>
-public sealed record ImportDeclaration(string Path, SourceSpan Span) : SyntaxNode(Span);
+/// <param name="PathIsMissing">
+/// Whether the path was never written, which is not the same as an empty one. The distinction
+/// <see cref="SyntaxName"/> draws for names, for the same reason: a path that is absent has been
+/// reported as a syntax error already, and looking for a schema called the empty string reports the
+/// one mistake a second time.
+/// </param>
+public sealed record ImportDeclaration(
+    string Path,
+    SourceSpan Span,
+    bool PathIsMissing = false) : SyntaxNode(Span);
 
 /// <summary>An <c>extend MessageName { ... }</c> block (spec 16.1).</summary>
 public sealed record ExtendDeclaration(
