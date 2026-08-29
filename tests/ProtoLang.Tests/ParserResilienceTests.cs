@@ -36,16 +36,27 @@ public class ParserResilienceTests
     }
 
     /// <summary>Runs a parse under a time limit, failing rather than hanging the test run.</summary>
-    private static void WithinBudget(string description, Action parse)
+    /// <remarks>
+    /// The sweep is told to stop before the failure is reported, so a parse that is merely slow does
+    /// not go on grinding through the rest of the corpus, on a core the remaining tests want, long
+    /// after this one has already failed. A single parse that never returns at all is past the reach
+    /// of anything here: the parser takes no cancellation token, and adding one to the compiler for
+    /// a test to hold is what <c>#54</c> -- process supervision, cancellation, and timeouts -- is
+    /// for. The failure is still reported, which is what this exists to do.
+    /// </remarks>
+    private static void WithinBudget(string description, Action<CancellationToken> sweep)
     {
-        var task = Task.Run(parse);
+        using var stop = new CancellationTokenSource();
+        var task = Task.Run(() => sweep(stop.Token));
 
-        if (!task.Wait(ParseBudget))
+        if (task.Wait(ParseBudget))
         {
-            Assert.Fail($"Parsing did not terminate within {ParseBudget.TotalSeconds:0}s: {description}");
+            task.GetAwaiter().GetResult();
+            return;
         }
 
-        task.GetAwaiter().GetResult();
+        stop.Cancel();
+        Assert.Fail($"Parsing did not terminate within {ParseBudget.TotalSeconds:0}s: {description}");
     }
 
     /// <summary>
@@ -83,9 +94,9 @@ public class ParserResilienceTests
 
         WithinBudget(
             $"truncations of {Path.GetFileName(path)}",
-            () =>
+            stop =>
             {
-                for (var length = 0; length <= source.Length; length++)
+                for (var length = 0; length <= source.Length && !stop.IsCancellationRequested; length++)
                 {
                     Parse(source[..length]);
                 }
@@ -104,9 +115,9 @@ public class ParserResilienceTests
 
         WithinBudget(
             $"single-character deletions of {Path.GetFileName(path)}",
-            () =>
+            stop =>
             {
-                for (var index = 0; index < source.Length; index++)
+                for (var index = 0; index < source.Length && !stop.IsCancellationRequested; index++)
                 {
                     Parse(source.Remove(index, 1));
                 }
@@ -129,7 +140,7 @@ public class ParserResilienceTests
     {
         WithinBudget(
             $"stray '{stray}' in a receiver fixture",
-            () =>
+            _ =>
             {
                 var diagnostics = Parse(
                     $$"""
@@ -185,7 +196,7 @@ public class ParserResilienceTests
 
         WithinBudget(
             $"{Depth} levels of {construct}",
-            () =>
+            _ =>
             {
                 var diagnostics = Parse(source);
 

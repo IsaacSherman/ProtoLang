@@ -265,15 +265,25 @@ public sealed class Binder
             return;
         }
 
+        _methods[key] = DescribeMethod(receiver, method);
+    }
+
+    /// <summary>Resolves what a method declares into the signature the IR carries.</summary>
+    private IrMethodSignature DescribeMethod(MessageDescriptor receiver, MethodDeclaration method)
+    {
         var returnType = method.ReturnType is null
             ? VoidType.Instance
             : ResolveTypeReference(method.ReturnType);
 
         var parameterNames = new List<string>();
         var parameterTypes = new List<PlType>();
+        var parametersAreNamed = true;
+
         foreach (var parameter in method.Parameters)
         {
             parameterNames.Add(parameter.Name.Text);
+            parametersAreNamed &= !parameter.Name.IsMissing;
+
             var type = ResolveTypeReference(parameter.Type);
             if (type is VoidType)
             {
@@ -289,8 +299,29 @@ public sealed class Binder
             parameterTypes.Add(type);
         }
 
-        _methods[key] = new IrMethodSignature(receiver, method.Name.Text, returnType, parameterNames, parameterTypes);
+        return new IrMethodSignature(
+            receiver,
+            method.Name.Text,
+            returnType,
+            parameterNames,
+            parameterTypes,
+            parametersAreNamed);
     }
+
+    /// <summary>
+    /// The signature to bind a body against: the one pass 1 declared, or -- for a method whose name
+    /// has not been typed -- one built here and registered nowhere.
+    /// </summary>
+    /// <remarks>
+    /// An unnamed method is unreachable by construction. No call can name it, and two of them cannot
+    /// collide, because neither is in the table. What it does have is a body, and the body is where
+    /// the author's caret is: dropping it made the one method being worked on the one method with no
+    /// types, which is the opposite of what binding through a parse error is for.
+    /// </remarks>
+    private IrMethodSignature? ResolveMethodSignature(MessageDescriptor receiver, MethodDeclaration method)
+        => method.Name.IsMissing
+            ? DescribeMethod(receiver, method)
+            : _methods.GetValueOrDefault((receiver.FullName, method.Name.Text));
 
     private void ReportAmbiguousTypeName(string name, SourceSpan span, IEnumerable<string> fullNames)
     {
@@ -378,7 +409,7 @@ public sealed class Binder
 
     private IrMethod? BindMethod(MessageDescriptor receiver, MethodDeclaration method)
     {
-        if (!_methods.TryGetValue((receiver.FullName, method.Name.Text), out var signature))
+        if (ResolveMethodSignature(receiver, method) is not { } signature)
         {
             // Pass 1 already reported why this method was rejected.
             return null;
@@ -610,10 +641,10 @@ public sealed class Binder
     {
         var declared = new Dictionary<string, TestArgumentDeclaration>(StringComparer.Ordinal);
 
-        // An argument whose name is half-typed says nothing about which arguments the test supplies,
-        // so the completeness check below is skipped rather than reporting every parameter of the
-        // signature as missing.
-        var argumentNamesAreComplete = true;
+        // A half-typed name on either side says nothing about which arguments the test supplies or
+        // which the method wants, so the completeness check below is skipped rather than reporting
+        // every parameter of the signature as missing -- or demanding one called the empty string.
+        var argumentNamesAreComplete = signature.ParametersAreNamed;
 
         foreach (var argument in test.Arguments)
         {

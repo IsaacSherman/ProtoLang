@@ -133,6 +133,49 @@ public class PartialBindingTests
     }
 
     /// <summary>
+    /// A method whose name is still being typed has a body that is not, and the body is where the
+    /// author's caret is. Nothing can call it, which is why it is never declared -- but dropping it
+    /// leaves the one method being worked on as the one method with no types.
+    /// </summary>
+    [Fact]
+    public void AMethodWithNoNameStillBindsItsBody()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend Invoice {\n"
+            + "    fn () -> int64 {\n"
+            + "        for line in items {\n"
+            + "            return line.\n"
+            + "        }\n"
+            + "\n"
+            + "        return 0;\n"
+            + "    }\n"
+            + "}");
+
+        var awaiting = Assert.Single(Walk(result.Module!).OfType<IrMissingMemberAccess>());
+
+        Assert.Equal(
+            "protolang.examples.InvoiceItem",
+            Assert.IsType<MessageType>(awaiting.Receiver.Type).Descriptor.FullName);
+    }
+
+    /// <summary>
+    /// A parameter list with a name still missing from it says nothing about which arguments a test
+    /// ought to supply, so demanding one called the empty string describes nothing the author did.
+    /// </summary>
+    [Fact]
+    public void AParameterWithNoNameIsNotDemandedOfATest()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend InvoiceItem { fn f(: int64) -> int64 { return 1; } }\n"
+            + "test InvoiceItem.f \"x\" { receiver { } expect return 1; }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0010");
+        Assert.DoesNotContain(result.Diagnostics, d => d.Code == "PL0066");
+    }
+
+    /// <summary>
     /// A syntax error and a schema that is not there are two independent problems, and an author
     /// with both of them has both of them. The parse gate used to report the first and stop, so the
     /// second only appeared once the first was fixed.

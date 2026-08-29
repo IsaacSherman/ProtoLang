@@ -15,12 +15,20 @@ public sealed record IrModule(IReadOnlyList<IrMethod> Methods, IReadOnlyList<IrT
 /// Identifies a method without carrying its body, so a call can reference a method declared later
 /// in the file (or in another extend block) without a construction cycle.
 /// </summary>
+/// <param name="ParametersAreNamed">
+/// Whether every parameter has a name. False for a parameter list still being typed, where the
+/// entry in <paramref name="ParameterNames"/> is an empty string standing in for a name nobody
+/// wrote. A caller checking whether it supplied every argument has to ask, because a list with a
+/// hole in it cannot say what a complete call would look like -- and demanding an argument called
+/// the empty string describes nothing the author did.
+/// </param>
 public sealed record IrMethodSignature(
     MessageDescriptor Receiver,
     string Name,
     PlType ReturnType,
     IReadOnlyList<string> ParameterNames,
-    IReadOnlyList<PlType> ParameterTypes);
+    IReadOnlyList<PlType> ParameterTypes,
+    bool ParametersAreNamed = true);
 
 public sealed record IrParameter(string Name, PlType Type);
 

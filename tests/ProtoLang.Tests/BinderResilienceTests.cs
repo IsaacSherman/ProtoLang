@@ -41,16 +41,27 @@ public class BinderResilienceTests
     }
 
     /// <summary>Runs a sweep under a time limit, failing rather than hanging the test run.</summary>
-    private static void WithinBudget(string description, Action bind)
+    /// <remarks>
+    /// The sweep is told to stop before the failure is reported, so a bind that is merely slow does
+    /// not go on grinding through the rest of the corpus, on a core the remaining tests want, long
+    /// after this one has already failed. A single bind that never returns at all is past the reach
+    /// of anything here: the binder takes no cancellation token, and adding one to the compiler for
+    /// a test to hold is what <c>#54</c> -- process supervision, cancellation, and timeouts -- is
+    /// for. The failure is still reported, which is what this exists to do.
+    /// </remarks>
+    private static void WithinBudget(string description, Action<CancellationToken> sweep)
     {
-        var task = Task.Run(bind);
+        using var stop = new CancellationTokenSource();
+        var task = Task.Run(() => sweep(stop.Token));
 
-        if (!task.Wait(BindBudget))
+        if (task.Wait(BindBudget))
         {
-            Assert.Fail($"Binding did not terminate within {BindBudget.TotalSeconds:0}s: {description}");
+            task.GetAwaiter().GetResult();
+            return;
         }
 
-        task.GetAwaiter().GetResult();
+        stop.Cancel();
+        Assert.Fail($"Binding did not terminate within {BindBudget.TotalSeconds:0}s: {description}");
     }
 
     /// <summary>
@@ -70,10 +81,15 @@ public class BinderResilienceTests
 
         WithinBudget(
             $"token-boundary truncations of {Path.GetFileName(path)}",
-            () =>
+            stop =>
             {
                 foreach (var boundary in boundaries)
                 {
+                    if (stop.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
                     Assert.NotNull(Bind(source[..boundary]));
                 }
             });
@@ -91,9 +107,9 @@ public class BinderResilienceTests
 
         WithinBudget(
             $"single-character deletions of {Path.GetFileName(path)}",
-            () =>
+            stop =>
             {
-                for (var index = 0; index < source.Length; index++)
+                for (var index = 0; index < source.Length && !stop.IsCancellationRequested; index++)
                 {
                     Assert.NotNull(Bind(source.Remove(index, 1)));
                 }
@@ -126,7 +142,7 @@ public class BinderResilienceTests
     [InlineData("test InvoiceItem.f \"x\" { receiver { = 1; } arg = 1; expect return 1; }")]
     public void MalformedInputBinds(string body)
     {
-        WithinBudget($"'{body}'", () => Assert.NotNull(Bind("import proto \"invoice.proto\";\n" + body)));
+        WithinBudget($"'{body}'", _ => Assert.NotNull(Bind("import proto \"invoice.proto\";\n" + body)));
     }
 
     /// <summary>
@@ -142,7 +158,7 @@ public class BinderResilienceTests
             + "extend InvoiceItem { fn f() -> int64 { return "
             + new string('(', Depth) + "1" + new string(')', Depth) + "; } }";
 
-        WithinBudget($"{Depth} levels of parentheses", () => Assert.NotNull(Bind(source)));
+        WithinBudget($"{Depth} levels of parentheses", _ => Assert.NotNull(Bind(source)));
     }
 
     /// <remarks>
