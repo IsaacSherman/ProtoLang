@@ -247,6 +247,31 @@ public enum ConversionKind
 public sealed record IrLiteral(object? Value, PlType LiteralType, SourceSpan Span)
     : IrExpression(LiteralType, Span);
 
+/// <summary>
+/// A member access whose member name has not been written yet -- <c>line.</c> with the caret sitting
+/// after the dot.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The one case where an error-typed value is not enough. Every other binding failure collapses to
+/// an <see cref="IrLiteral"/> of <see cref="ErrorType"/>, which is all a compiler needs, because a
+/// compilation that got there is going to stop anyway. An editor asked for a completion list needs
+/// the opposite: the thing it must answer with is precisely the type of the receiver, and collapsing
+/// throws exactly that away.
+/// </para>
+/// <para>
+/// <paramref name="Span"/> is the empty range where the member name would go, so a client can anchor
+/// its list under the caret rather than over whatever token recovery landed on.
+/// </para>
+/// <para>
+/// No backend handles this, and none has to. One exists only when the parser reported a missing
+/// name, so the compilation has errors, so <c>CompilationResult.Success</c> is false and no backend
+/// is ever handed the module.
+/// </para>
+/// </remarks>
+public sealed record IrMissingMemberAccess(IrExpression Receiver, SourceSpan Span)
+    : IrExpression(ErrorType.Instance, Span);
+
 public sealed record IrTest(
     IrMethodSignature Target,
     string Name,

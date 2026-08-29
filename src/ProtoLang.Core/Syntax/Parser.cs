@@ -72,9 +72,28 @@ public sealed class Parser
 
     private Token Expect(TokenKind kind)
     {
+        TryExpect(kind, out var token);
+        return token;
+    }
+
+    /// <summary>
+    /// Consumes the expected token, or reports that it is missing and synthesizes one.
+    /// </summary>
+    /// <returns>
+    /// True when the token was really there. False when it was not, in which case
+    /// <paramref name="token"/> is a stand-in and the diagnostic has already been reported.
+    /// </returns>
+    /// <remarks>
+    /// The answer is published rather than inferred from the stand-in, because the stand-in is
+    /// indistinguishable from a real token of the same kind carrying no text. Callers that build a
+    /// name out of the result need to know which they got; see <see cref="SyntaxName"/>.
+    /// </remarks>
+    private bool TryExpect(TokenKind kind, out Token token)
+    {
         if (Current.Kind == kind)
         {
-            return Advance();
+            token = Advance();
+            return true;
         }
 
         _diagnostics.Error(
@@ -83,9 +102,37 @@ public sealed class Parser
             $"Expected {kind.Describe()} but found {Current.Kind.Describe()}.",
             Current.Span);
 
-        // Return a synthetic token so callers can continue building a tree.
-        return new Token(kind, string.Empty, Current.Span);
+        // A synthetic token so callers can continue building a tree.
+        token = new Token(kind, string.Empty, Current.Span);
+        return false;
     }
+
+    /// <summary>
+    /// Parses an identifier into a <see cref="SyntaxName"/>, modelling its absence rather than
+    /// standing in for it.
+    /// </summary>
+    private SyntaxName ExpectName()
+    {
+        // Taken before the attempt, because a failed Expect does not consume and the token it
+        // failed on is the wrong anchor -- for a trailing dot at the end of a line, that token is
+        // on the next line.
+        var insertionPoint = InsertionPointAfterPreviousToken();
+
+        return TryExpect(TokenKind.Identifier, out var token)
+            ? new SyntaxName(token.Text, token.Span)
+            : SyntaxName.Missing(insertionPoint);
+    }
+
+    /// <summary>The empty range immediately after the last token consumed.</summary>
+    /// <remarks>
+    /// Where a name would be typed next, which is where an editor opens a completion list. Before
+    /// anything has been consumed this degenerates to the end of the current token; no name is
+    /// expected at the start of a file, so nothing reaches that case.
+    /// </remarks>
+    private SourceSpan InsertionPointAfterPreviousToken() => InsertionPointAfter(Peek(-1));
+
+    /// <inheritdoc cref="InsertionPointAfterPreviousToken"/>
+    private SourceSpan InsertionPointAfter(Token token) => new(_file, token.Span.End, token.Span.End);
 
     /// <summary>
     /// Takes one level of nesting budget, or reports that the budget is exhausted.
@@ -307,7 +354,7 @@ public sealed class Parser
         {
             var before = _position;
             var start = Current.Span;
-            var fieldName = Expect(TokenKind.Identifier).Text;
+            var fieldName = ExpectName();
 
             if (Match(TokenKind.Equals))
             {
@@ -358,7 +405,7 @@ public sealed class Parser
     private TestArgumentDeclaration ParseTestArgument()
     {
         var start = Expect(TokenKind.Arg).Span;
-        var name = Expect(TokenKind.Identifier).Text;
+        var name = ExpectName();
         Expect(TokenKind.Equals);
         var value = ParseExpression();
         var end = Expect(TokenKind.Semicolon).Span;
@@ -394,16 +441,37 @@ public sealed class Parser
     }
 
     /// <summary>Parses <c>Foo</c> or <c>pkg.Foo</c> into a single dotted name.</summary>
-    private string ParseQualifiedName()
+    /// <remarks>
+    /// A dot with no identifier after it is consumed and modelled as a missing name rather than
+    /// left in the stream. Leaving it made the caller's next <c>Expect</c> report the dot as the
+    /// unexpected token, which blamed the wrong thing and left nothing in the tree to anchor a
+    /// completion list to. It is still an error, reported here against the token that should have
+    /// been the name.
+    /// </remarks>
+    private SyntaxName ParseQualifiedName()
     {
-        var parts = new List<string> { Expect(TokenKind.Identifier).Text };
-        while (Current.Kind == TokenKind.Dot && Peek(1).Kind == TokenKind.Identifier)
+        var insertionPoint = InsertionPointAfterPreviousToken();
+        if (!TryExpect(TokenKind.Identifier, out var first))
         {
-            Advance();
-            parts.Add(Advance().Text);
+            return SyntaxName.Missing(insertionPoint);
         }
 
-        return string.Join('.', parts);
+        var parts = new List<string> { first.Text };
+        var span = first.Span;
+
+        while (Current.Kind == TokenKind.Dot)
+        {
+            var dot = Advance();
+            if (!TryExpect(TokenKind.Identifier, out var part))
+            {
+                return SyntaxName.Missing(InsertionPointAfter(dot));
+            }
+
+            parts.Add(part.Text);
+            span = Spanning(span, part.Span);
+        }
+
+        return new SyntaxName(string.Join('.', parts), span);
     }
 
     private MethodDeclaration ParseMethodDeclaration()
@@ -412,7 +480,7 @@ public sealed class Parser
         var isVirtual = Match(TokenKind.Virtual);
 
         Expect(TokenKind.Fn);
-        var name = Expect(TokenKind.Identifier).Text;
+        var name = ExpectName();
 
         Expect(TokenKind.OpenParen);
         var parameters = new List<ParameterDeclaration>();
@@ -421,7 +489,7 @@ public sealed class Parser
             do
             {
                 var parameterStart = Current.Span;
-                var parameterName = Expect(TokenKind.Identifier).Text;
+                var parameterName = ExpectName();
                 Expect(TokenKind.Colon);
                 var parameterType = ParseTypeReference();
                 parameters.Add(new ParameterDeclaration(
@@ -455,14 +523,16 @@ public sealed class Parser
             or TokenKind.Bytes or TokenKind.Void)
         {
             Advance();
-            return new TypeReference(token.Text, token.Span);
+            return new TypeReference(new SyntaxName(token.Text, token.Span), token.Span);
         }
 
         if (token.Kind == TokenKind.Identifier)
         {
             var name = ParseQualifiedName();
-            return new TypeReference(name, Spanning(token.Span, Peek(-1).Span));
+            return new TypeReference(name, Spanning(token.Span, name.Span));
         }
+
+        var insertionPoint = InsertionPointAfterPreviousToken();
 
         _diagnostics.Error(
             "PL0013",
@@ -470,7 +540,11 @@ public sealed class Parser
             $"Expected a type name but found {token.Kind.Describe()}.",
             token.Span);
         Advance();
-        return new TypeReference("<error>", token.Span);
+
+        // A missing name rather than a sentinel spelled like one. The old placeholder was the
+        // string "<error>", which the binder then looked up and failed to find, reporting an
+        // unknown type on top of the syntax error already reported here.
+        return new TypeReference(SyntaxName.Missing(insertionPoint), token.Span);
     }
 
     private BlockStatement ParseBlock()
@@ -556,7 +630,7 @@ public sealed class Parser
     private Statement ParseVariableDeclaration()
     {
         var start = Expect(TokenKind.Var).Span;
-        var name = Expect(TokenKind.Identifier).Text;
+        var name = ExpectName();
 
         TypeReference? declaredType = null;
         if (Match(TokenKind.Colon))
@@ -588,7 +662,7 @@ public sealed class Parser
     private Statement ParseForInStatement()
     {
         var start = Expect(TokenKind.For).Span;
-        var variable = Expect(TokenKind.Identifier).Text;
+        var variable = ExpectName();
         Expect(TokenKind.In);
         var collection = ParseExpression();
         var body = ParseBlock();
@@ -868,8 +942,13 @@ public sealed class Parser
             if (Current.Kind == TokenKind.Dot)
             {
                 Advance();
-                var name = Expect(TokenKind.Identifier);
-                expression = new MemberAccessExpression(expression, name.Text, Spanning(expression.Span, name.Span));
+                var name = ExpectName();
+
+                // The access ends where the name is, and a missing name is the empty range just
+                // after the dot. Taking the end from the token Expect happened to fail on instead
+                // stretched the access to wherever recovery landed -- for a dot at the end of a
+                // line, the brace on the next one.
+                expression = new MemberAccessExpression(expression, name, Spanning(expression.Span, name.Span));
                 continue;
             }
 
@@ -923,7 +1002,7 @@ public sealed class Parser
 
             case TokenKind.Identifier:
                 Advance();
-                return new NameExpression(token.Text, token.Span);
+                return new NameExpression(new SyntaxName(token.Text, token.Span), token.Span);
 
             case TokenKind.OpenParen:
             {

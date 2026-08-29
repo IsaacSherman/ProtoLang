@@ -7,6 +7,18 @@ using ProtoLang.Syntax;
 
 namespace ProtoLang;
 
+/// <param name="Module">
+/// The typed IR, covering as much of the source as could be bound. Non-null whenever binding ran at
+/// all, which now includes sources that failed to parse -- the point of doing so is that a buffer
+/// mid-edit still has types for the parts that are finished. Null only when the compilation stopped
+/// before the binder: a configuration file that could not be read, an unusable include path, or a
+/// protobuf schema that could not be found or loaded. Ask <see cref="CompilationResult.Success"/>,
+/// never <c>Module is not null</c>, before treating it as a whole program.
+/// </param>
+/// <param name="SyntaxTree">
+/// The syntax tree, present whenever the source was parsed at all, error-recovered and complete
+/// enough to walk. Null on the same three stops that leave <paramref name="Module"/> null.
+/// </param>
 /// <param name="Descriptors">
 /// Every protobuf file backing this compilation, including transitively imported ones, in
 /// dependency order. protoc is asked for <c>--include_imports</c>, so this is the whole closure and
@@ -39,9 +51,11 @@ public sealed record CompilationResult(
 /// <summary>Everything a compilation needs that is not source text.</summary>
 /// <remarks>
 /// Init-only members rather than a constructor parameter list, because this is where new knobs land
-/// -- a descriptor cache, a switch for binding through parse errors -- and each one added to a
-/// method signature is another round of call sites to update and another positional argument to
-/// transpose.
+/// -- a descriptor cache, an include path the caller settled some other way -- and each one added to
+/// a method signature is another round of call sites to update and another positional argument to
+/// transpose. Binding through parse errors was expected to land here and did not: it is what the
+/// pipeline does now, for everyone, because a second mode is a second thing to keep correct and the
+/// tolerant one is the one that must never crash.
 /// </remarks>
 public sealed record CompilationOptions
 {
@@ -280,10 +294,11 @@ public sealed class Compilation
         var tokens = new Lexer(source.Text, file, diagnostics).Tokenize();
         var unit = new Parser(tokens, file, diagnostics).ParseCompilationUnit();
 
-        if (diagnostics.HasErrors)
-        {
-            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths);
-        }
+        // Parse errors used to stop here. They no longer do: the parser recovers, the binder does
+        // not throw on what recovery leaves behind, and a buffer being typed into is broken most of
+        // the time an editor is asked anything about it. The most valuable question an editor asks
+        // -- what may follow this dot -- is one only the binder can answer, and refusing to run it
+        // on a file with a syntax error is refusing to answer it at all.
 
         // Where the path-based pipeline used to build the search paths: after the source has had its
         // say, so a broken buffer reports what is wrong with it rather than what is wrong with the
@@ -340,6 +355,7 @@ public sealed class Compilation
         resolvePaths.AddRange(loader.ImplicitIncludePaths);
 
         var protoFiles = new List<string>();
+        var everyImportResolved = true;
         foreach (var import in unit.Imports)
         {
             if (ResolveImport(import.Path, resolvePaths) is null)
@@ -350,13 +366,17 @@ public sealed class Compilation
                     $"Could not find '{import.Path}' in any include directory.",
                     import.Span,
                     ImportSearchHelp(resolvePaths));
+                everyImportResolved = false;
                 continue;
             }
 
             protoFiles.Add(import.Path);
         }
 
-        if (diagnostics.HasErrors)
+        // The question is whether the schemas are all here, not whether anything at all has gone
+        // wrong. Asking the bag instead would stop a buffer whose imports are perfectly good and
+        // whose only problem is the half-typed line the editor is asking about.
+        if (!everyImportResolved)
         {
             return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths);
         }
@@ -378,9 +398,12 @@ public sealed class Compilation
 
         var module = new Binder(descriptors, diagnostics, new NumericPolicy(config), config).Bind(unit);
 
-        return diagnostics.HasErrors
-            ? new CompilationResult(null, unit, descriptors, diagnostics, config, SearchPaths)
-            : new CompilationResult(module, unit, descriptors, diagnostics, config, SearchPaths);
+        // Carried out whether or not anything went wrong, because a module built from a broken tree
+        // is exactly what an editor came for and is no use to anyone else. Nothing can mistake it
+        // for a finished compilation: Success wants an empty diagnostic bag as well as a module, so
+        // every existing caller -- the CLI and every backend -- still sees the same false it always
+        // did and never reaches this.
+        return new CompilationResult(module, unit, descriptors, diagnostics, config, SearchPaths);
     }
 
     /// <summary>
