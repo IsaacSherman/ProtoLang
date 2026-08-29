@@ -944,14 +944,13 @@ public sealed class Parser
         }
     }
 
+    /// <summary>The span covering both operands and everything between them.</summary>
+    /// <remarks>
+    /// Order-insensitive, because error recovery reaches here with an <c>end</c> that precedes its
+    /// <c>start</c>. Stamped with the file being parsed rather than with whichever file an
+    /// operand carries, because the parser is the authority on that and some of what it
+    /// combines is synthesized.
+    /// </remarks>
     private SourceSpan Spanning(SourceSpan start, SourceSpan end)
-    {
-        var length = Math.Max(end.Length, 1);
-        if (start.Line == end.Line && end.Column >= start.Column)
-        {
-            length = end.Column - start.Column + end.Length;
-        }
-
-        return new SourceSpan(_file, start.Line, start.Column, length);
-    }
+        => SourceSpan.Union(_file, start, end);
 }
