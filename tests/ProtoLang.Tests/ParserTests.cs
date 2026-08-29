@@ -400,4 +400,102 @@ public class ParserTests
 
         Assert.Contains(diagnostics, d => d.Code == "PL0013");
     }
+    // ------------------------------------------------------- multi-line constructs
+
+    /// <summary>
+    /// The defect issue #37 exists to fix. A span used to keep the start position and take the
+    /// closing token's length, so a block spanning four lines claimed to be one character long.
+    /// </summary>
+    [Fact]
+    public void AMultiLineExtendBlockSpansAllOfIt()
+    {
+        const string Text =
+            """
+            import proto "invoice.proto";
+
+            extend InvoiceItem {
+                fn line_total_cents() -> int64 {
+                    return quantity * unit_price_cents;
+                }
+            }
+            """;
+
+        var unit = Parse(Text, out var diagnostics);
+        var lines = new LineMap(Text);
+
+        Assert.Empty(diagnostics);
+
+        var span = Assert.Single(unit.Extends).Span;
+        var start = Text.IndexOf("extend", StringComparison.Ordinal);
+        var end = Text.LastIndexOf('}') + 1;
+
+        Assert.Equal(start, span.Start.Offset);
+        Assert.Equal(end, span.End.Offset);
+        Assert.Equal(end - start, span.Length);
+        Assert.Equal(lines.PositionOf(start), span.Start);
+        Assert.Equal(lines.PositionOf(end), span.End);
+        Assert.True(span.End.Line > span.Start.Line, "the block ends on a later line than it starts");
+    }
+
+    [Fact]
+    public void AMultiLineMethodSpansFromItsKeywordToItsClosingBrace()
+    {
+        const string Text =
+            """
+            import proto "x.proto";
+            extend M {
+                fn f() -> int64 {
+                    var a = 1;
+                    return a;
+                }
+            }
+            """;
+
+        var unit = Parse(Text, out var diagnostics);
+
+        Assert.Empty(diagnostics);
+
+        var method = unit.Extends[0].Methods[0];
+        var reported = Text.Substring(method.Span.Start.Offset, method.Span.Length);
+
+        Assert.StartsWith("fn f()", reported, StringComparison.Ordinal);
+        Assert.EndsWith("}", reported, StringComparison.Ordinal);
+        Assert.Contains("return a;", reported, StringComparison.Ordinal);
+        Assert.Equal(method.Body.Span.End, method.Span.End);
+        Assert.True(method.Span.End.Line > method.Span.Start.Line);
+
+        var body = Text.Substring(method.Body.Span.Start.Offset, method.Body.Span.Length);
+        Assert.StartsWith("{", body, StringComparison.Ordinal);
+        Assert.EndsWith("}", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AMultiLineIfStopsAtItsOwnEnd()
+    {
+        const string Text =
+            """
+            import proto "x.proto";
+            extend M {
+                fn f() -> int64 {
+                    if (1 == 1) {
+                        return 2;
+                    }
+                    return 3;
+                }
+            }
+            """;
+
+        var unit = Parse(Text, out var diagnostics);
+
+        Assert.Empty(diagnostics);
+
+        var statement = Assert.IsType<IfStatement>(unit.Extends[0].Methods[0].Body.Statements[0]);
+        var reported = Text.Substring(statement.Span.Start.Offset, statement.Span.Length);
+
+        Assert.StartsWith("if (1 == 1)", reported, StringComparison.Ordinal);
+        Assert.EndsWith("}", reported, StringComparison.Ordinal);
+        Assert.Contains("return 2;", reported, StringComparison.Ordinal);
+        Assert.DoesNotContain("return 3;", reported, StringComparison.Ordinal);
+        Assert.True(statement.Span.End.Line > statement.Span.Start.Line);
+    }
 }

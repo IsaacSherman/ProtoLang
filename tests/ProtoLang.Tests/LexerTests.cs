@@ -143,4 +143,124 @@ public class LexerTests
             ],
             tokens.Select(t => t.Kind));
     }
+    // ------------------------------------------------------- where a token says it is
+
+    /// <summary>
+    /// The consistency sweep. Every token has to be findable by its offset and describable by its
+    /// line and column, and the two have to name the same character. Asserting it over a whole file
+    /// costs one loop and covers every path through the lexer at once.
+    /// </summary>
+    [Fact]
+    public void EveryTokenSpanIndexesTheTextItCameFrom()
+    {
+        const string Text =
+            """
+            import proto "invoice.proto";
+
+            extend InvoiceItem {
+                // a line comment
+                fn total(rate float) -> int64 {
+                    /* a block
+                       comment */
+                    var s = "quoted \n text";
+                    return quantity * unit_price_cents + 1.5;
+                }
+            }
+            """;
+
+        var tokens = Tokenize(Text, out var diagnostics);
+        var lines = new LineMap(Text);
+
+        Assert.Empty(diagnostics);
+        Assert.All(
+            tokens,
+            token =>
+            {
+                Assert.Equal(token.Text, Text.Substring(token.Span.Start.Offset, token.Span.Length));
+                Assert.Equal(token.Span.Start, lines.PositionOf(token.Span.Start.Offset));
+                Assert.Equal(token.Span.End, lines.PositionOf(token.Span.End.Offset));
+            });
+    }
+
+    [Fact]
+    public void ColumnsAndOffsetsCountUtf16CodeUnits()
+    {
+        // U+1D11E MUSICAL SYMBOL G CLEF is one rune and two UTF-16 code units. The lexer indexes a
+        // .NET string, so it counts code units, which is what the default LSP position encoding
+        // wants. That agreement is worth a test rather than a coincidence: counting runes instead
+        // would silently shift every squiggle after the first astral character on the line.
+        const string Clef = "\U0001D11E";
+        var text = $"/* {Clef} */ var a = \"{Clef}\"; var b = 1;";
+
+        var tokens = Tokenize(text, out var diagnostics);
+
+        Assert.Empty(diagnostics);
+        Assert.Equal(2, Clef.Length);
+        Assert.All(
+            tokens,
+            token =>
+            {
+                // Everything is on line 1, so a column counting anything else would drift from the
+                // offset at the first clef.
+                Assert.Equal(token.Span.Start.Offset + 1, token.Span.Start.Column);
+                Assert.Equal(token.Text, text.Substring(token.Span.Start.Offset, token.Span.Length));
+            });
+    }
+
+    [Fact]
+    public void ACarriageReturnBeforeANewlineDoesNotShiftTheLineAfterIt()
+    {
+        const string Text = "var a = 1;\r\nvar b = 2;";
+
+        var tokens = Tokenize(Text, out var diagnostics);
+
+        Assert.Empty(diagnostics);
+
+        var second = tokens.First(t => t.Span.Line == 2);
+        Assert.Equal(1, second.Span.Start.Column);
+        Assert.Equal(Text.IndexOf("var b", StringComparison.Ordinal), second.Span.Start.Offset);
+    }
+
+    [Fact]
+    public void AnUnterminatedBlockCommentIsReportedOverItsOpeningDelimiter()
+    {
+        const string Text = "fn f() {\n    /* never closed\n";
+
+        Tokenize(Text, out var diagnostics);
+        var lines = new LineMap(Text);
+
+        var span = Assert.Single(diagnostics, d => d.Code == "PL0004").Span;
+        Assert.Equal("/*", Text.Substring(span.Start.Offset, span.Length));
+        Assert.Equal(span.Start, lines.PositionOf(span.Start.Offset));
+    }
+
+    [Fact]
+    public void AnUnrecognizedEscapeIsReportedOverTheBackslashAndWhatItEscapes()
+    {
+        const string Text = "var s = \"a\\qb\";";
+
+        Tokenize(Text, out var diagnostics);
+
+        var span = Assert.Single(diagnostics, d => d.Code == "PL0007").Span;
+        Assert.Equal(Text.IndexOf('\\'), span.Start.Offset);
+        Assert.Equal(2, span.Length);
+        Assert.Equal("\\q", Text.Substring(span.Start.Offset, span.Length));
+    }
+
+    /// <summary>
+    /// A range that ends past the end of the buffer is one no editor can render and no position
+    /// query can answer, so the escape span has to stay inside the text even when the text stops
+    /// in the middle of the escape.
+    /// </summary>
+    [Fact]
+    public void AnEscapeAtTheVeryEndOfTheTextDoesNotRunPastIt()
+    {
+        const string Text = "var s = \"a\\q";
+
+        Tokenize(Text, out var diagnostics);
+
+        var span = Assert.Single(diagnostics, d => d.Code == "PL0007").Span;
+        Assert.True(span.End.Offset <= Text.Length, "the span must not end past the end of the text");
+        Assert.Equal("\\q", Text.Substring(span.Start.Offset, span.Length));
+    }
 }

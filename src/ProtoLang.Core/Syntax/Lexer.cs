@@ -107,7 +107,10 @@ public sealed class Lexer
 
         if (_position >= _text.Length)
         {
-            return new Token(TokenKind.EndOfFile, string.Empty, new SourceSpan(_file, startLine, startColumn, 0));
+            return new Token(
+                TokenKind.EndOfFile,
+                string.Empty,
+                SourceSpan.SingleLine(_file, start, startLine, startColumn, 0));
         }
 
         var current = Current;
@@ -162,6 +165,7 @@ public sealed class Lexer
 
             if (current == '/' && Lookahead == '*')
             {
+                var commentStart = _position;
                 var commentLine = _line;
                 var commentColumn = Column;
                 Advance();
@@ -195,7 +199,7 @@ public sealed class Lexer
                         "PL0004",
                         "unterminated block comment",
                         "Reached end of file while scanning a block comment.",
-                        new SourceSpan(_file, commentLine, commentColumn, 2),
+                        SourceSpan.SingleLine(_file, commentStart, commentLine, commentColumn, 2),
                         "Close the comment with '*/'.");
                 }
 
@@ -217,7 +221,7 @@ public sealed class Lexer
 
         var text = _text[start.._position];
         var kind = Keywords.TryGetValue(text, out var keyword) ? keyword : TokenKind.Identifier;
-        return new Token(kind, text, new SourceSpan(_file, line, column, text.Length));
+        return new Token(kind, text, SourceSpan.SingleLine(_file, start, line, column, text.Length));
     }
 
     private Token LexNumber(int start, int line, int column)
@@ -242,7 +246,7 @@ public sealed class Lexer
         }
 
         var text = _text[start.._position];
-        var span = new SourceSpan(_file, line, column, text.Length);
+        var span = SourceSpan.SingleLine(_file, start, line, column, text.Length);
 
         if (isFloat)
         {
@@ -318,11 +322,14 @@ public sealed class Lexer
                     case '\\': builder.Append('\\'); Advance(); break;
                     case '"': builder.Append('"'); Advance(); break;
                     default:
+                        // The span covers the backslash and the character it escapes, which is what
+                        // the author actually wrote. Pointing at the escape character alone also ran
+                        // the range one position past the end of a text that ended mid-escape.
                         _diagnostics.Error(
                             "PL0007",
                             "unrecognized escape sequence",
                             $"'\\{escape}' is not a recognized escape sequence.",
-                            new SourceSpan(_file, line, Column, 2));
+                            SourceSpan.SingleLine(_file, _position - 1, line, Column - 1, 2));
                         Advance();
                         break;
                 }
@@ -335,7 +342,7 @@ public sealed class Lexer
         }
 
         var text = _text[start.._position];
-        var span = new SourceSpan(_file, line, column, text.Length);
+        var span = SourceSpan.SingleLine(_file, start, line, column, text.Length);
 
         if (!terminated)
         {
@@ -474,7 +481,7 @@ public sealed class Lexer
         }
 
         var text = _text[start.._position];
-        var span = new SourceSpan(_file, line, column, text.Length);
+        var span = SourceSpan.SingleLine(_file, start, line, column, text.Length);
 
         if (kind == TokenKind.Unknown)
         {
