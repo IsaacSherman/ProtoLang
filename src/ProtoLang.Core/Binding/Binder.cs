@@ -476,7 +476,7 @@ public sealed class Binder
             }
         }
 
-        var context = new MethodContext(receiver, signature.ReturnType, signature.Parameters);
+        var context = new MethodContext(receiver, signature.ReturnType);
         var body = BindBlock(method.Body, scope, context);
 
         if (signature.ReturnType is not VoidType && !NeverFallsThrough(body))
@@ -503,7 +503,6 @@ public sealed class Binder
         var context = new MethodContext(
             signature.Receiver,
             signature.ReturnType,
-            [],
             AllowImplicitReceiverFields: false);
         var receiver = BindTestReceiver(test.Receiver, signature.Receiver, context);
         var arguments = BindTestArguments(test, signature, context);
@@ -2237,10 +2236,16 @@ public sealed class Binder
     /// How many enclosing loops the statement being bound sits inside. Zero means 'break' and
     /// 'continue' have nothing to bind to.
     /// </param>
+    /// <remarks>
+    /// Carries no parameter list, deliberately. <see cref="Scope"/> is what answers a name, and it
+    /// holds a filtered view of what a signature declares: a parameter nobody has named is not in
+    /// it, and a duplicate is in it once rather than twice. A second list beside it would be the
+    /// complete positional one, which reads like the authoritative answer and is the wrong list to
+    /// resolve a name against.
+    /// </remarks>
     private sealed record MethodContext(
         MessageDescriptor Receiver,
         PlType ReturnType,
-        IReadOnlyList<IrParameter> Parameters,
         bool AllowImplicitReceiverFields = true,
         int LoopDepth = 0)
     {
