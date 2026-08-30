@@ -21,6 +21,12 @@ public sealed record IrModule(IReadOnlyList<IrMethod> Methods, IReadOnlyList<IrT
 /// wrote. A caller checking whether it supplied every argument has to ask, because a list with a
 /// hole in it cannot say what a complete call would look like -- and demanding an argument called
 /// the empty string describes nothing the author did.
+/// <para>
+/// <b>A stopgap, and known to be one.</b> It answers for the whole signature, so one unnamed
+/// parameter silences the missing-argument check for every other parameter too. The precise answer
+/// wants per-parameter identity in the IR rather than a bare string, which reaches both backends;
+/// #39 is modelling declaration sites already and is where that lands.
+/// </para>
 /// </param>
 public sealed record IrMethodSignature(
     MessageDescriptor Receiver,
