@@ -239,6 +239,28 @@ public class CompilationTests
     }
 
     [Fact]
+    public void RejectsOverloadedMethodNamesWithDifferentParameterCountsWithoutThrowing()
+    {
+        CompilationResult? result = null;
+        var exception = Record.Exception(
+            () =>
+            {
+                result = CompileSource(
+                    Prelude +
+                    """
+                    extend InvoiceItem {
+                        fn f() -> int64 { return 1; }
+                        fn f(x: int64) -> int64 { return x; }
+                    }
+                    """);
+            });
+
+        Assert.Null(exception);
+        Assert.NotNull(result);
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0022");
+    }
+
+    [Fact]
     public void RejectsMethodNameCollidingWithField()
     {
         var result = CompileSource(

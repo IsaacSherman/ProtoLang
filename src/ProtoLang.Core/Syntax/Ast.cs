@@ -11,32 +11,41 @@ public sealed record CompilationUnit(
     SourceSpan Span) : SyntaxNode(Span);
 
 /// <summary>An <c>import proto "path.proto";</c> declaration (spec 5.2).</summary>
-public sealed record ImportDeclaration(string Path, SourceSpan Span) : SyntaxNode(Span);
+/// <param name="PathIsMissing">
+/// Whether the path was never written, which is not the same as an empty one. The distinction
+/// <see cref="SyntaxName"/> draws for names, for the same reason: a path that is absent has been
+/// reported as a syntax error already, and looking for a schema called the empty string reports the
+/// one mistake a second time.
+/// </param>
+public sealed record ImportDeclaration(
+    string Path,
+    SourceSpan Span,
+    bool PathIsMissing = false) : SyntaxNode(Span);
 
 /// <summary>An <c>extend MessageName { ... }</c> block (spec 16.1).</summary>
 public sealed record ExtendDeclaration(
-    string MessageName,
+    SyntaxName MessageName,
     IReadOnlyList<MethodDeclaration> Methods,
     SourceSpan Span) : SyntaxNode(Span);
 
 public sealed record MethodDeclaration(
-    string Name,
+    SyntaxName Name,
     bool IsVirtual,
     IReadOnlyList<ParameterDeclaration> Parameters,
     TypeReference? ReturnType,
     BlockStatement Body,
     SourceSpan Span) : SyntaxNode(Span);
 
-public sealed record ParameterDeclaration(string Name, TypeReference Type, SourceSpan Span) : SyntaxNode(Span);
+public sealed record ParameterDeclaration(SyntaxName Name, TypeReference Type, SourceSpan Span) : SyntaxNode(Span);
 
 /// <summary>
 /// A syntactic type reference. Names are resolved later against protobuf descriptors, since
 /// spec 8.1 defines the ProtoLang type universe as exactly the protobuf type universe.
 /// </summary>
-public sealed record TypeReference(string Name, SourceSpan Span) : SyntaxNode(Span);
+public sealed record TypeReference(SyntaxName Name, SourceSpan Span) : SyntaxNode(Span);
 
 public sealed record TestDeclaration(
-    string TargetName,
+    SyntaxName TargetName,
     string Name,
     TestReceiverFixture Receiver,
     IReadOnlyList<TestArgumentDeclaration> Arguments,
@@ -47,19 +56,19 @@ public sealed record TestReceiverFixture(
     IReadOnlyList<TestFieldInitializer> Fields,
     SourceSpan Span) : SyntaxNode(Span);
 
-public abstract record TestFieldInitializer(string FieldName, SourceSpan Span) : SyntaxNode(Span);
+public abstract record TestFieldInitializer(SyntaxName FieldName, SourceSpan Span) : SyntaxNode(Span);
 
 public sealed record TestScalarFieldInitializer(
-    string Name,
+    SyntaxName Name,
     Expression Value,
     SourceSpan Span) : TestFieldInitializer(Name, Span);
 
 public sealed record TestMessageFieldInitializer(
-    string Name,
+    SyntaxName Name,
     IReadOnlyList<TestFieldInitializer> Fields,
     SourceSpan Span) : TestFieldInitializer(Name, Span);
 
-public sealed record TestArgumentDeclaration(string Name, Expression Value, SourceSpan Span) : SyntaxNode(Span);
+public sealed record TestArgumentDeclaration(SyntaxName Name, Expression Value, SourceSpan Span) : SyntaxNode(Span);
 
 public abstract record TestExpectation(SourceSpan Span) : SyntaxNode(Span);
 
@@ -72,7 +81,7 @@ public abstract record Statement(SourceSpan Span) : SyntaxNode(Span);
 public sealed record BlockStatement(IReadOnlyList<Statement> Statements, SourceSpan Span) : Statement(Span);
 
 public sealed record VariableDeclarationStatement(
-    string Name,
+    SyntaxName Name,
     TypeReference? DeclaredType,
     Expression Initializer,
     SourceSpan Span) : Statement(Span);
@@ -80,7 +89,7 @@ public sealed record VariableDeclarationStatement(
 public sealed record ReturnStatement(Expression? Value, SourceSpan Span) : Statement(Span);
 
 public sealed record ForInStatement(
-    string VariableName,
+    SyntaxName VariableName,
     Expression Collection,
     BlockStatement Body,
     SourceSpan Span) : Statement(Span);
@@ -113,9 +122,16 @@ public sealed record ExpressionStatement(Expression Expression, SourceSpan Span)
 public abstract record Expression(SourceSpan Span) : SyntaxNode(Span);
 
 /// <summary>A bare identifier: a local, a parameter, or an implicit field of the receiver.</summary>
-public sealed record NameExpression(string Name, SourceSpan Span) : Expression(Span);
+public sealed record NameExpression(SyntaxName Name, SourceSpan Span) : Expression(Span);
 
-public sealed record MemberAccessExpression(Expression Receiver, string Name, SourceSpan Span) : Expression(Span);
+/// <summary>A field or method reached through a value: <c>customer.email</c>.</summary>
+/// <remarks>
+/// <c>Name.IsMissing</c> is the shape of a caret waiting for a completion list -- the author typed
+/// the dot and stopped. It is a node rather than an absence precisely so that a consumer can ask
+/// what the receiver is and get an answer, and <c>Name.Span</c> is the empty range where the member
+/// name would go. See <see cref="SyntaxName"/>.
+/// </remarks>
+public sealed record MemberAccessExpression(Expression Receiver, SyntaxName Name, SourceSpan Span) : Expression(Span);
 
 public sealed record InvocationExpression(
     Expression Callee,

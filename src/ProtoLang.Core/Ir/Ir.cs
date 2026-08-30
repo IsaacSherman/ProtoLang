@@ -15,12 +15,26 @@ public sealed record IrModule(IReadOnlyList<IrMethod> Methods, IReadOnlyList<IrT
 /// Identifies a method without carrying its body, so a call can reference a method declared later
 /// in the file (or in another extend block) without a construction cycle.
 /// </summary>
+/// <param name="ParametersAreNamed">
+/// Whether every parameter has a name. False for a parameter list still being typed, where the
+/// entry in <paramref name="ParameterNames"/> is an empty string standing in for a name nobody
+/// wrote. A caller checking whether it supplied every argument has to ask, because a list with a
+/// hole in it cannot say what a complete call would look like -- and demanding an argument called
+/// the empty string describes nothing the author did.
+/// <para>
+/// <b>A stopgap, and known to be one.</b> It answers for the whole signature, so one unnamed
+/// parameter silences the missing-argument check for every other parameter too. The precise answer
+/// wants per-parameter identity in the IR rather than a bare string, which reaches both backends;
+/// #39 is modelling declaration sites already and is where that lands.
+/// </para>
+/// </param>
 public sealed record IrMethodSignature(
     MessageDescriptor Receiver,
     string Name,
     PlType ReturnType,
     IReadOnlyList<string> ParameterNames,
-    IReadOnlyList<PlType> ParameterTypes);
+    IReadOnlyList<PlType> ParameterTypes,
+    bool ParametersAreNamed = true);
 
 public sealed record IrParameter(string Name, PlType Type);
 
@@ -246,6 +260,31 @@ public enum ConversionKind
 
 public sealed record IrLiteral(object? Value, PlType LiteralType, SourceSpan Span)
     : IrExpression(LiteralType, Span);
+
+/// <summary>
+/// A member access whose member name has not been written yet -- <c>line.</c> with the caret sitting
+/// after the dot.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The one case where an error-typed value is not enough. Every other binding failure collapses to
+/// an <see cref="IrLiteral"/> of <see cref="ErrorType"/>, which is all a compiler needs, because a
+/// compilation that got there is going to stop anyway. An editor asked for a completion list needs
+/// the opposite: the thing it must answer with is precisely the type of the receiver, and collapsing
+/// throws exactly that away.
+/// </para>
+/// <para>
+/// <paramref name="Span"/> is the empty range where the member name would go, so a client can anchor
+/// its list under the caret rather than over whatever token recovery landed on.
+/// </para>
+/// <para>
+/// No backend handles this, and none has to. One exists only when the parser reported a missing
+/// name, so the compilation has errors, so <c>CompilationResult.Success</c> is false and no backend
+/// is ever handed the module.
+/// </para>
+/// </remarks>
+public sealed record IrMissingMemberAccess(IrExpression Receiver, SourceSpan Span)
+    : IrExpression(ErrorType.Instance, Span);
 
 public sealed record IrTest(
     IrMethodSignature Target,

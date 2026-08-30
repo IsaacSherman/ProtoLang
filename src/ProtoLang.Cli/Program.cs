@@ -38,7 +38,9 @@ if (config is null)
 var result = Compilation.Compile(options.SourcePath, options.IncludePaths, config: config);
 PrintDiagnostics(result.Diagnostics);
 
-if (!result.Success)
+// The one module a compiler may write from. A partial one comes out of a buffer that did not
+// parse, which is what an editor asks for and what nothing here may emit.
+if (result.EmittableModule is not { } module)
 {
     Console.Error.WriteLine($"compilation failed: {result.Diagnostics.Count(d => d.Severity == DiagnosticSeverity.Error)} error(s)");
     return 1;
@@ -68,7 +70,7 @@ var written = new List<string>();
 foreach (var backend in backends)
 {
     var files = backend.Emit(
-        result.Module!,
+        module,
         backendOptions,
         backendDiagnostics);
 
@@ -85,7 +87,7 @@ foreach (var backend in backends)
     if (options.TestOutputDirectory is not null && backend is ITestBackend testBackend)
     {
         var testFiles = testBackend.EmitTests(
-            result.Module!,
+            module,
             backendOptions,
             backendDiagnostics);
 
