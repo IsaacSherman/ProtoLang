@@ -21,7 +21,7 @@ else should start until they are in.
 | 1 | [#35](https://github.com/IsaacSherman/ProtoLang/issues/35) Compile from in-memory source text | done |
 | 2 | [#37](https://github.com/IsaacSherman/ProtoLang/issues/37) Give `SourceSpan` a real end position | done |
 | 3 | [#36](https://github.com/IsaacSherman/ProtoLang/issues/36) Bind through parse errors | done |
-| 4 | [#39](https://github.com/IsaacSherman/ProtoLang/issues/39) Preserve declaration sites and scope | next |
+| 4 | [#39](https://github.com/IsaacSherman/ProtoLang/issues/39) Preserve declaration sites and symbol identity; scope publication remains #49 | done |
 
 **Then mostly issue order**, following each issue's own instructions about what comes next. A few
 ordering constraints from #47 are easy to miss and are not implied by the numbers:

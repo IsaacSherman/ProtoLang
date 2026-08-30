@@ -1,5 +1,6 @@
 using Google.Protobuf.Reflection;
 using ProtoLang.Diagnostics;
+using ProtoLang.Symbols;
 using ProtoLang.Types;
 
 namespace ProtoLang.Ir;
@@ -15,44 +16,62 @@ public sealed record IrModule(IReadOnlyList<IrMethod> Methods, IReadOnlyList<IrT
 /// Identifies a method without carrying its body, so a call can reference a method declared later
 /// in the file (or in another extend block) without a construction cycle.
 /// </summary>
-/// <param name="ParametersAreNamed">
-/// Whether every parameter has a name. False for a parameter list still being typed, where the
-/// entry in <paramref name="ParameterNames"/> is an empty string standing in for a name nobody
-/// wrote. A caller checking whether it supplied every argument has to ask, because a list with a
-/// hole in it cannot say what a complete call would look like -- and demanding an argument called
-/// the empty string describes nothing the author did.
-/// <para>
-/// <b>A stopgap, and known to be one.</b> It answers for the whole signature, so one unnamed
-/// parameter silences the missing-argument check for every other parameter too. The precise answer
-/// wants per-parameter identity in the IR rather than a bare string, which reaches both backends;
-/// #39 is modelling declaration sites already and is where that lands.
-/// </para>
+/// <param name="Declaration">
+/// Where the method was declared, so a call can find its callee. The compiler always knew this --
+/// <see cref="IrMethod"/> had a span -- but a call reaches the signature and not the method, and the
+/// signature is the half that used to say nothing about where it came from.
+/// </param>
+/// <param name="Parameters">
+/// What the method takes, in order. One list rather than parallel names and types, and the same
+/// objects <see cref="IrMethod.Parameters"/> hands out, because a parameter is one declaration and
+/// two representations of it are two things to keep in step. It is also what retired the
+/// whole-signature <c>ParametersAreNamed</c> flag: whether a name was written is a fact about one
+/// parameter, and asking it per parameter is what lets a missing-argument check still speak about
+/// the parameters that do have names.
 /// </param>
 public sealed record IrMethodSignature(
     MessageDescriptor Receiver,
-    string Name,
+    DeclarationSite Declaration,
     PlType ReturnType,
-    IReadOnlyList<string> ParameterNames,
-    IReadOnlyList<PlType> ParameterTypes,
-    bool ParametersAreNamed = true);
+    IReadOnlyList<IrParameter> Parameters)
+{
+    public string Name => Declaration.Name.Text;
 
-public sealed record IrParameter(string Name, PlType Type);
+    /// <summary>What identifies this method, and every call that resolves to it.</summary>
+    public SymbolId Id => Declaration.Id;
+}
 
-/// <summary>A local variable or a <c>for</c> loop binding.</summary>
-public sealed record IrLocal(string Name, PlType Type);
+public sealed record IrParameter(DeclarationSite Declaration, PlType Type)
+{
+    public string Name => Declaration.Name.Text;
 
-public sealed record IrMethod(
-    IrMethodSignature Signature,
-    IReadOnlyList<IrParameter> Parameters,
-    IrBlock Body,
-    bool IsVirtual,
-    SourceSpan Span)
+    /// <inheritdoc cref="IrMethodSignature.Id"/>
+    public SymbolId Id => Declaration.Id;
+}
+
+/// <summary>
+/// A local variable or a <c>for</c> loop binding; <see cref="DeclarationSite.Kind"/> says which.
+/// </summary>
+public sealed record IrLocal(DeclarationSite Declaration, PlType Type)
+{
+    public string Name => Declaration.Name.Text;
+
+    /// <inheritdoc cref="IrMethodSignature.Id"/>
+    public SymbolId Id => Declaration.Id;
+}
+
+public sealed record IrMethod(IrMethodSignature Signature, IrBlock Body, bool IsVirtual)
 {
     public MessageDescriptor Receiver => Signature.Receiver;
 
     public string Name => Signature.Name;
 
     public PlType ReturnType => Signature.ReturnType;
+
+    public IReadOnlyList<IrParameter> Parameters => Signature.Parameters;
+
+    /// <summary>The whole declaration, <c>fn</c> through the closing brace of the body.</summary>
+    public SourceSpan Span => Signature.Declaration.Extent;
 }
 
 public abstract record IrStatement(SourceSpan Span);
