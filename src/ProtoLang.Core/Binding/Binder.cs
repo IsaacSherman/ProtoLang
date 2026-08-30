@@ -19,7 +19,25 @@ public sealed class Binder
     private readonly Dictionary<string, List<MessageDescriptor>> _messagesBySimpleName = new(StringComparer.Ordinal);
     private readonly Dictionary<string, EnumDescriptor> _enumsByFullName = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<EnumDescriptor>> _enumsBySimpleName = new(StringComparer.Ordinal);
+    /// <summary>What a call can resolve to: one entry per name a receiver actually offers.</summary>
     private readonly Dictionary<(string Receiver, string Method), IrMethodSignature> _methods = new();
+
+    /// <summary>What each declaration declares, whether or not anything may call it.</summary>
+    /// <remarks>
+    /// <para>
+    /// Separate from <see cref="_methods"/> because the two answer different questions, and binding
+    /// a body against the answer to the wrong one is how a second <c>fn f</c> came to be bound
+    /// against the first one's parameter list -- and then to index past the end of it, which is an
+    /// unhandled exception on a file that parses perfectly well.
+    /// </para>
+    /// <para>
+    /// Keyed by node identity rather than by value: two declarations that differ in nothing but
+    /// their span are still two declarations, and hashing a record whose value includes an entire
+    /// method body is not something to do once per method.
+    /// </para>
+    /// </remarks>
+    private readonly Dictionary<MethodDeclaration, IrMethodSignature> _signatures =
+        new(ReferenceEqualityComparer.Instance);
     private readonly NumericPolicy _policy;
     private readonly ProjectConfig _config;
 
@@ -229,15 +247,25 @@ public sealed class Binder
         return null;
     }
 
+    /// <summary>
+    /// Records what a method declares, and registers it as callable when its name is one a call
+    /// could use.
+    /// </summary>
     /// <remarks>
-    /// A method whose name is still being typed is not declared at all. Declaring it under the empty
-    /// name would make a second half-typed method in the same block collide with the first and
-    /// report a duplicate, which describes nothing the author did.
+    /// Every declaration is described, including the ones refused below. A refused method still has
+    /// a body, the body is still bound, and a body has to be bound against the types its own
+    /// declaration states -- never against those of whichever other declaration happens to share its
+    /// name. Refusal governs what may be *called*, and nothing else.
     /// </remarks>
     private void DeclareMethod(MessageDescriptor receiver, MethodDeclaration method)
     {
+        _signatures[method] = DescribeMethod(receiver, method);
+
         if (method.Name.IsMissing)
         {
+            // Nothing can name it, so nothing can call it. Registering it under the empty name would
+            // also make a second half-typed method collide with the first and report a duplicate the
+            // author never wrote.
             return;
         }
 
@@ -265,7 +293,7 @@ public sealed class Binder
             return;
         }
 
-        _methods[key] = DescribeMethod(receiver, method);
+        _methods[key] = _signatures[method];
     }
 
     /// <summary>Resolves what a method declares into the signature the IR carries.</summary>
@@ -308,20 +336,6 @@ public sealed class Binder
             parametersAreNamed);
     }
 
-    /// <summary>
-    /// The signature to bind a body against: the one pass 1 declared, or -- for a method whose name
-    /// has not been typed -- one built here and registered nowhere.
-    /// </summary>
-    /// <remarks>
-    /// An unnamed method is unreachable by construction. No call can name it, and two of them cannot
-    /// collide, because neither is in the table. What it does have is a body, and the body is where
-    /// the author's caret is: dropping it made the one method being worked on the one method with no
-    /// types, which is the opposite of what binding through a parse error is for.
-    /// </remarks>
-    private IrMethodSignature? ResolveMethodSignature(MessageDescriptor receiver, MethodDeclaration method)
-        => method.Name.IsMissing
-            ? DescribeMethod(receiver, method)
-            : _methods.GetValueOrDefault((receiver.FullName, method.Name.Text));
 
     private void ReportAmbiguousTypeName(string name, SourceSpan span, IEnumerable<string> fullNames)
     {
@@ -409,9 +423,10 @@ public sealed class Binder
 
     private IrMethod? BindMethod(MessageDescriptor receiver, MethodDeclaration method)
     {
-        if (ResolveMethodSignature(receiver, method) is not { } signature)
+        if (!_signatures.TryGetValue(method, out var signature))
         {
-            // Pass 1 already reported why this method was rejected.
+            // Only reachable for a method in an extend block whose target did not resolve, which
+            // pass 1 skips entirely -- there is no receiver to bind a body against.
             return null;
         }
 

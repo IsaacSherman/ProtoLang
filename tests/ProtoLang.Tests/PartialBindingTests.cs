@@ -160,6 +160,62 @@ public class PartialBindingTests
     }
 
     /// <summary>
+    /// A declaration that cannot be called is still a declaration, so what it declares is still
+    /// resolved and mistakes in it are still reported. Skipping the whole declaration meant a void
+    /// parameter went unmentioned for as long as the method name was unfinished.
+    /// </summary>
+    [Fact]
+    public void AMethodWithNoNameStillReportsMistakesInItsSignature()
+    {
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn (x: void) -> int64 { return 1; } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0010");
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0024");
+    }
+
+    /// <summary>
+    /// Every declaration binds against the types it states, never against those of whichever other
+    /// declaration happens to share its name. Reading the first one's parameter list to bind the
+    /// second was an unhandled exception the moment the two differed in length.
+    /// </summary>
+    [Fact]
+    public void EachDeclarationBindsAgainstItsOwnParameterList()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend InvoiceItem {\n"
+            + "    fn f() -> int64 { return 1; }\n"
+            + "    fn f(a: int64, b: int64) -> int64 { return a; }\n"
+            + "}");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0022");
+
+        var declared = result.Module!.Methods
+            .Where(method => method.Name == "f")
+            .Select(method => method.Parameters.Count)
+            .Order();
+
+        Assert.Equal([0, 2], declared);
+    }
+
+    /// <summary>
+    /// The same for a method refused because its name is a field's. Refusal governs what may be
+    /// called; the body is the author's either way, and an editor wants its types.
+    /// </summary>
+    [Fact]
+    public void AMethodRefusedForItsNameStillBindsItsBody()
+    {
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn quantity() -> int64 { return name. } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0023");
+
+        var awaiting = Assert.Single(Walk(result.Module!).OfType<IrMissingMemberAccess>());
+        Assert.Equal(ScalarType.StringType, awaiting.Receiver.Type);
+    }
+
+    /// <summary>
     /// A parameter list with a name still missing from it says nothing about which arguments a test
     /// ought to supply, so demanding one called the empty string describes nothing the author did.
     /// </summary>
@@ -238,6 +294,29 @@ public class PartialBindingTests
         Assert.False(result.Success);
     }
 
+    /// <summary>
+    /// The rule an emitter follows, in the type rather than in an ordering convention. A partial
+    /// module exists and is exactly what must not be written from.
+    /// </summary>
+    [Fact]
+    public void NothingIsEmittableFromAFileThatDidNotParse()
+    {
+        var result = CompileSource(TrailingDot);
+
+        Assert.NotNull(result.Module);
+        Assert.Null(result.EmittableModule);
+    }
+
+    [Fact]
+    public void AWholeCompilationIsEmittableFromTheModuleItBound()
+    {
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn f() -> int64 { return quantity; } }");
+
+        Assert.True(result.Success, Render(result));
+        Assert.Same(result.Module, result.EmittableModule);
+    }
+
     // ------- one mistake, one diagnostic
 
     /// <summary>
@@ -308,6 +387,9 @@ public class PartialBindingTests
     }
 
     // ------- helpers
+
+    private static string Render(CompilationResult result)
+        => string.Join(Environment.NewLine, result.Diagnostics.Select(d => d.ToString()));
 
     private static IrMissingMemberAccess MissingMemberAccessIn(CompilationResult result)
     {

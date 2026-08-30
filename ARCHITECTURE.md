@@ -49,7 +49,9 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
 5. **No gate.** Parse errors do not stop the pipeline. A buffer being typed into is broken most of
    the time an editor asks anything about it, and what it most often asks — what may follow this
    dot — only the binder can answer.
-6. **Descriptors.** Imports are resolved against the search paths, then
+6. **Descriptors.** Each import is resolved against the search paths into an
+   [`ImportResolution`](src/ProtoLang.Core/ImportResolution.cs) — resolved, not found, or never
+   written — and the whole list is published on the result. Then
    [`DescriptorLoader`](src/ProtoLang.Core/Binding/DescriptorLoader.cs) shells out to `protoc`
    (located by [`ProtocLocator`](src/ProtoLang.Core/Binding/ProtocLocator.cs)) and returns
    `FileDescriptor`s. The `FileDescriptorSet` is currently discarded — #48 must stop doing that.
@@ -58,10 +60,11 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    `ErrorType` (`PL0037`) and binding continues, a name the parser never saw resolves to `ErrorType`
    in silence, and a declaration that cannot be resolved is dropped rather than half-built.
 8. **Result.** `CompilationResult` carries the IR *even when the file did not parse*, the syntax
-   tree, the descriptors, the diagnostics, the settled config, and the search paths that were used.
-   `Module` is null only when the compilation stopped before the binder: an unreadable config, an
-   unusable include path, or a schema that could not be found or loaded. **Ask `Success`**, never
-   `Module is not null`, before treating it as a whole program.
+   tree, the descriptors, the import outcomes, the diagnostics, the settled config, and the search
+   paths that were used. `Module` is null only when the compilation stopped before the binder: an
+   unreadable config, an unusable include path, or a schema that could not be found or loaded.
+   **`Module` is the partial one. Emit from `EmittableModule`**, which is null unless the
+   compilation produced a whole program.
 9. **Emit.** Backends consume the IR only.
 
 ## Key types
@@ -70,6 +73,7 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
 |---|---|---|
 | Location | `SourceSpan`, `SourcePosition` | [Diagnostics/SourceSpan.cs](src/ProtoLang.Core/Diagnostics/SourceSpan.cs) |
 | Written or not-yet-written names | `SyntaxName` | [Syntax/SyntaxName.cs](src/ProtoLang.Core/Syntax/SyntaxName.cs) |
+| What became of an import | `ImportResolution` | [ImportResolution.cs](src/ProtoLang.Core/ImportResolution.cs) |
 | Offset ↔ line/column | `LineMap` | [Diagnostics/LineMap.cs](src/ProtoLang.Core/Diagnostics/LineMap.cs) |
 | Messages | `Diagnostic`, `DiagnosticBag` | [Diagnostics/Diagnostic.cs](src/ProtoLang.Core/Diagnostics/Diagnostic.cs) |
 | Type system | `PlType` and friends | [Types/PlType.cs](src/ProtoLang.Core/Types/PlType.cs) |
@@ -109,7 +113,8 @@ reaches a backend only as prose for the generated file's header.
 One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized by layer:
 `LexerTests`, `ParserTests`, `ParserResilienceTests` and `BinderResilienceTests` (fuzz),
 `SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
-`ProjectConfigTests`, `BackendTests`, `NameMappingTests`, and the scaffolding and smoke suites.
+`ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`, and the
+scaffolding and smoke suites.
 
 - **Conformance corpus** — [tests/conformance/vectors](tests/conformance/vectors) holds `.protolang`
   files whose `test` blocks *are* the vectors, compiled and executed in both backends. This is the

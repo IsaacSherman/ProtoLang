@@ -12,8 +12,8 @@ namespace ProtoLang;
 /// all, which now includes sources that failed to parse -- the point of doing so is that a buffer
 /// mid-edit still has types for the parts that are finished. Null only when the compilation stopped
 /// before the binder: a configuration file that could not be read, an unusable include path, or a
-/// protobuf schema that could not be found or loaded. Ask <see cref="CompilationResult.Success"/>,
-/// never <c>Module is not null</c>, before treating it as a whole program.
+/// protobuf schema that could not be found or loaded. Never treat this as a whole program: ask
+/// <see cref="CompilationResult.EmittableModule"/> for the one that may be written from.
 /// </param>
 /// <param name="SyntaxTree">
 /// The syntax tree, present whenever the source was parsed at all, error-recovered and complete
@@ -37,15 +37,41 @@ namespace ProtoLang;
 /// this is not a convenience but the only correct answer. Empty when the compilation stopped before
 /// they were settled.
 /// </param>
+/// <param name="Imports">
+/// Every <c>import proto</c> declaration and what became of it, in the order they were written.
+/// Empty when the compilation stopped before the imports were looked at. See
+/// <see cref="ImportResolution"/> for why this is an object rather than a count of failures.
+/// </param>
 public sealed record CompilationResult(
     IrModule? Module,
     CompilationUnit? SyntaxTree,
     IReadOnlyList<FileDescriptor> Descriptors,
     DiagnosticBag Diagnostics,
     ProjectConfig Config,
-    IReadOnlyList<string> SearchPaths)
+    IReadOnlyList<string> SearchPaths,
+    IReadOnlyList<ImportResolution> Imports)
 {
+    /// <summary>Whether this compilation produced a whole program.</summary>
+    /// <remarks>
+    /// One question with one job: <b>may artifacts be written from this?</b> It is not a question
+    /// about whether the compiler got anything done, and nothing inside the pipeline may use it to
+    /// decide whether to keep going -- stopping at the first error is how the second one stays
+    /// hidden until the first is fixed. Prefer <see cref="EmittableModule"/>, which states the rule
+    /// rather than leaving each caller to remember it.
+    /// </remarks>
     public bool Success => Module is not null && !Diagnostics.HasErrors;
+
+    /// <summary>
+    /// The module an emitter may write from, or null when this compilation must produce nothing.
+    /// </summary>
+    /// <remarks>
+    /// The whole of what <see cref="Success"/> governs, said in the type instead of in a comment
+    /// every caller has to have read. <see cref="Module"/> is the partial one -- present whenever
+    /// binding ran at all, which includes files that did not parse, because that is precisely what
+    /// an editor came for. Emission is the one thing that must never see it, and a null check here
+    /// cannot be forgotten the way an ordering convention can.
+    /// </remarks>
+    public IrModule? EmittableModule => Success ? Module : null;
 }
 
 /// <summary>Everything a compilation needs that is not source text.</summary>
@@ -207,7 +233,7 @@ public sealed class Compilation
             // Search paths are left empty rather than computed: getting here means the compilation
             // never started, and building them could itself throw on a malformed include path,
             // replacing the config diagnostic this route exists to deliver.
-            return new CompilationResult(null, null, [], diagnostics, ProjectConfig.Default, []);
+            return new CompilationResult(null, null, [], diagnostics, ProjectConfig.Default, [], []);
         }
 
         return new Compilation(
@@ -285,7 +311,7 @@ public sealed class Compilation
         {
             // A project that states a policy and is then silently ignored is worse off than one that
             // states nothing, so a bad config file stops the compilation.
-            return new CompilationResult(null, null, [], diagnostics, ProjectConfig.Default, SearchPaths);
+            return new CompilationResult(null, null, [], diagnostics, ProjectConfig.Default, SearchPaths, []);
         }
 
         var source = Sources[0];
@@ -318,7 +344,7 @@ public sealed class Compilation
                         + "exist is searched and skipped. Correct the path or drop the entry.");
             }
 
-            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths);
+            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, []);
         }
 
         if (unit.Imports.Count == 0)
@@ -329,7 +355,7 @@ public sealed class Compilation
                 "A ProtoLang file must import at least one protobuf schema.",
                 unit.Span,
                 "Add an 'import proto \"your.proto\";' declaration (spec 5.2).");
-            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths);
+            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, []);
         }
 
         // Resolved before the imports are checked, because the loader knows about include
@@ -348,48 +374,42 @@ public sealed class Compilation
                 "protobuf schema could not be loaded",
                 ex.Message,
                 unit.Imports[0].Span);
-            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths);
+            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, []);
         }
 
         var resolvePaths = new List<string>(SearchPaths);
         resolvePaths.AddRange(loader.ImplicitIncludePaths);
 
-        var protoFiles = new List<string>();
-        var everyImportResolved = true;
-        foreach (var import in unit.Imports)
-        {
-            // An import whose path has not been written names no file, and the parser has already
-            // said so. Searching for it anyway reports a schema called the empty string as missing,
-            // which is one mistake described twice. It still stops the compilation: there is no
-            // schema behind it to bind against.
-            if (import.PathIsMissing)
-            {
-                everyImportResolved = false;
-                continue;
-            }
+        var imports = unit.Imports.Select(import => Resolve(import, resolvePaths)).ToList();
 
-            if (ResolveImport(import.Path, resolvePaths) is null)
+        foreach (var import in imports)
+        {
+            // An import naming no path at all is passed over in silence. It names no file, the
+            // parser has already reported the missing token, and describing the empty string as a
+            // schema that could not be found is one mistake told twice.
+            if (import.Outcome is ImportOutcome.NotFound)
             {
                 diagnostics.Error(
                     "PL0002",
                     "proto file not found",
                     $"Could not find '{import.Path}' in any include directory.",
                     import.Span,
-                    ImportSearchHelp(resolvePaths));
-                everyImportResolved = false;
-                continue;
+                    ImportSearchHelp(import.SearchedPaths));
             }
-
-            protoFiles.Add(import.Path);
         }
 
         // The question is whether the schemas are all here, not whether anything at all has gone
         // wrong. Asking the bag instead would stop a buffer whose imports are perfectly good and
         // whose only problem is the half-typed line the editor is asking about.
-        if (!everyImportResolved)
+        if (!imports.TrueForAll(import => import.IsResolved))
         {
-            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths);
+            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, imports);
         }
+
+        // The path the author wrote, not the one it resolved to: protoc is given the same relative
+        // path and the same roots to find it under, so that what it reports matches what was asked
+        // for.
+        var protoFiles = imports.ConvertAll(import => import.Path);
 
         IReadOnlyList<FileDescriptor> descriptors;
         try
@@ -403,7 +423,7 @@ public sealed class Compilation
                 "protobuf schema could not be loaded",
                 ex.Message,
                 unit.Imports.Count > 0 ? unit.Imports[0].Span : unit.Span);
-            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths);
+            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, []);
         }
 
         var module = new Binder(descriptors, diagnostics, new NumericPolicy(config), config).Bind(unit);
@@ -413,7 +433,7 @@ public sealed class Compilation
         // for a finished compilation: Success wants an empty diagnostic bag as well as a module, so
         // every existing caller -- the CLI and every backend -- still sees the same false it always
         // did and never reaches this.
-        return new CompilationResult(module, unit, descriptors, diagnostics, config, SearchPaths);
+        return new CompilationResult(module, unit, descriptors, diagnostics, config, SearchPaths, imports);
     }
 
     /// <summary>
@@ -484,17 +504,31 @@ public sealed class Compilation
         }
     }
 
-    private static string? ResolveImport(string importPath, IReadOnlyList<string> searchPaths)
+    /// <summary>Looks for the schema one import names, and records where it looked.</summary>
+    /// <remarks>
+    /// Returns what happened rather than whether it worked, because the two failures are not the
+    /// same failure: a path that is not there has been searched for and is worth a diagnostic, and a
+    /// path that was never written has not been searched for and has already had one. Every later
+    /// question about imports -- which file backs which declaration, whether two of them name the
+    /// same schema, whether one missing schema should stop the rest -- is a question about this
+    /// value, so it is one object rather than a flag beside a flag.
+    /// </remarks>
+    private static ImportResolution Resolve(ImportDeclaration import, IReadOnlyList<string> searchPaths)
     {
+        if (import.PathIsMissing)
+        {
+            return new ImportResolution(import, ImportOutcome.Unwritten, null, searchPaths);
+        }
+
         foreach (var searchPath in searchPaths)
         {
-            var candidate = Path.Combine(searchPath, importPath);
+            var candidate = Path.Combine(searchPath, import.Path);
             if (File.Exists(candidate))
             {
-                return candidate;
+                return new ImportResolution(import, ImportOutcome.Resolved, candidate, searchPaths);
             }
         }
 
-        return null;
+        return new ImportResolution(import, ImportOutcome.NotFound, null, searchPaths);
     }
 }

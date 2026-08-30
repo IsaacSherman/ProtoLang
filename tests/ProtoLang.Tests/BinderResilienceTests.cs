@@ -131,6 +131,8 @@ public class BinderResilienceTests
     [InlineData("extend InvoiceItem {")]
     [InlineData("extend InvoiceItem { fn")]
     [InlineData("extend InvoiceItem { fn f(")]
+    [InlineData("extend InvoiceItem { fn (x: void) -> int64 { return 1; } }")]
+    [InlineData("extend InvoiceItem { fn f() -> int64 { return 1; } fn f(a: int64) -> int64 { return a; } }")]
     [InlineData("extend InvoiceItem { fn f() -> { return . } }")]
     [InlineData("extend InvoiceItem { fn f() -> int64 { return quantity. } }")]
     [InlineData("extend InvoiceItem { fn f() -> int64 { return quantity...; } }")]
