@@ -58,8 +58,9 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
 7. **Bind.** [`Binder.Bind`](src/ProtoLang.Core/Binding/Binder.cs) resolves names against the
    descriptors and produces typed IR. It does **not** throw on bad input: an unresolved name becomes
    `ErrorType` (`PL0037`) and binding continues, a name the parser never saw resolves to `ErrorType`
-   in silence, and a declaration that cannot be resolved is dropped rather than half-built. Every
-   local, parameter, loop binding and method carries a
+   in silence, and an extend block whose receiver cannot be resolved is skipped because there is no
+   message to bind against. Declarations inside a resolvable receiver are kept as far as possible:
+   every local, parameter, loop binding and method carries a
    [`DeclarationSite`](src/ProtoLang.Core/Symbols/DeclarationSite.cs), so a reference can reach the
    declaration it means and say which symbol that is. The binder's `Scope` chain itself is still
    discarded as it descends; #49 is what publishes it.
