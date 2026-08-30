@@ -56,6 +56,17 @@ public readonly record struct SymbolId
     /// insertion point when the author has not written the name yet. Two half-typed declarations
     /// still get two identities, because the parser anchors each hole after a different token.
     /// </param>
+    /// <remarks>
+    /// <b>This is a one-file identity, and stops being one the day a compilation holds two.</b>
+    /// <see cref="SourceSpan.File"/> is <see cref="SourceIdentity.Name"/> -- the base file name,
+    /// deliberately, because it is what diagnostics print and that rendering is published output.
+    /// A compilation binds one source today, so every key here is drawn from one file and no two can
+    /// collide. Under #27 they can: two buffers both called <c>test.protolang</c> in different
+    /// directories, each declaring something at the same offset, would be one symbol, and a
+    /// reference index built on that would report one file's uses against the other's declaration.
+    /// Whatever gives a declaration site its file then has to say which file and not merely what it
+    /// is called -- the span cannot, without moving what the CLI prints.
+    /// </remarks>
     public static SymbolId ForDeclaration(SymbolKind kind, SourceSpan nameSpan)
         => new(kind, $"{nameSpan.File}@{nameSpan.Start.Offset}");
 

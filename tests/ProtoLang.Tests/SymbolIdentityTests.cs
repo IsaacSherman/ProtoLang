@@ -189,12 +189,12 @@ public class SymbolIdentityTests
         var identity = SourceIdentity.FromPath(
             Path.Combine(TestPaths.CreateTempDirectory(), "buffer.protolang"));
 
-        var first = Compile(identity, Fixture);
-        var second = Compile(identity, Fixture);
+        var first = Identities(Compile(identity, Fixture));
+        var second = Identities(Compile(identity, Fixture));
 
-        Assert.Equal(
-            Declarations(first).Select(declaration => declaration.Id).ToList(),
-            Declarations(second).Select(declaration => declaration.Id).ToList());
+        // Two empty lists are equal, and would say nothing about stability.
+        Assert.NotEmpty(first);
+        Assert.Equal(first, second);
     }
 
     /// <summary>
@@ -369,6 +369,9 @@ public class SymbolIdentityTests
 
     private static IEnumerable<DeclarationSite> Declarations(CompilationResult result)
         => IrWalk.Declarations(result.Module!);
+
+    private static List<SymbolId> Identities(CompilationResult result)
+        => Declarations(result).Select(declaration => declaration.Id).ToList();
 
     private static IrMethod MethodNamed(CompilationResult result, string name)
         => result.Module!.Methods.Single(method => method.Name == name);
