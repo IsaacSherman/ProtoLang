@@ -2,6 +2,7 @@ using Google.Protobuf.Reflection;
 using ProtoLang.Config;
 using ProtoLang.Diagnostics;
 using ProtoLang.Ir;
+using ProtoLang.Symbols;
 using ProtoLang.Syntax;
 using ProtoLang.Types;
 
@@ -303,15 +304,10 @@ public sealed class Binder
             ? VoidType.Instance
             : ResolveTypeReference(method.ReturnType);
 
-        var parameterNames = new List<string>();
-        var parameterTypes = new List<PlType>();
-        var parametersAreNamed = true;
+        var parameters = new List<IrParameter>();
 
         foreach (var parameter in method.Parameters)
         {
-            parameterNames.Add(parameter.Name.Text);
-            parametersAreNamed &= !parameter.Name.IsMissing;
-
             var type = ResolveTypeReference(parameter.Type);
             if (type is VoidType)
             {
@@ -325,16 +321,16 @@ public sealed class Binder
                 type = ErrorType.Instance;
             }
 
-            parameterTypes.Add(type);
+            parameters.Add(new IrParameter(
+                new DeclarationSite(SymbolKind.Parameter, parameter.Name, parameter.Span),
+                type));
         }
 
         return new IrMethodSignature(
             receiver,
-            method.Name.Text,
+            new DeclarationSite(SymbolKind.Method, method.Name, method.Span),
             returnType,
-            parameterNames,
-            parameterTypes,
-            parametersAreNamed);
+            parameters);
     }
 
 
@@ -458,18 +454,14 @@ public sealed class Binder
             return null;
         }
 
-        var parameters = new List<IrParameter>();
         var scope = new Scope(null);
 
-        for (var i = 0; i < method.Parameters.Count; i++)
+        foreach (var parameter in signature.Parameters)
         {
-            var parameter = new IrParameter(method.Parameters[i].Name.Text, signature.ParameterTypes[i]);
-            parameters.Add(parameter);
-
-            // A parameter still being typed is kept in the list, so the positions line up with the
-            // signature, but is not put in scope: two of them would otherwise collide under the
+            // A parameter still being typed stays in the signature, so the positions line up with
+            // the call sites, but is not put in scope: two of them would otherwise collide under the
             // empty name and be reported as a duplicate the author never wrote.
-            if (method.Parameters[i].Name.IsMissing)
+            if (parameter.Declaration.Name.IsMissing)
             {
                 continue;
             }
@@ -480,11 +472,11 @@ public sealed class Binder
                     "PL0026",
                     "duplicate parameter",
                     $"A parameter named '{parameter.Name}' is already declared.",
-                    method.Parameters[i].Span);
+                    parameter.Declaration.Extent);
             }
         }
 
-        var context = new MethodContext(receiver, signature.ReturnType, parameters);
+        var context = new MethodContext(receiver, signature.ReturnType, signature.Parameters);
         var body = BindBlock(method.Body, scope, context);
 
         if (signature.ReturnType is not VoidType && !NeverFallsThrough(body))
@@ -497,7 +489,7 @@ public sealed class Binder
                 method.Span);
         }
 
-        return new IrMethod(signature, parameters, body, method.IsVirtual, method.Span);
+        return new IrMethod(signature, body, method.IsVirtual);
     }
 
     private IrTest? BindTest(TestDeclaration test)
@@ -684,10 +676,10 @@ public sealed class Binder
     {
         var declared = new Dictionary<string, TestArgumentDeclaration>(StringComparer.Ordinal);
 
-        // A half-typed name on either side says nothing about which arguments the test supplies or
-        // which the method wants, so the completeness check below is skipped rather than reporting
-        // every parameter of the signature as missing -- or demanding one called the empty string.
-        var argumentNamesAreComplete = signature.ParametersAreNamed;
+        // An argument whose name is still being typed could be for any parameter, so nothing can be
+        // said about which are missing until it is written. That silence is unavoidable and covers
+        // the whole signature; a parameter with no name is a narrower problem, handled below.
+        var argumentNamesAreComplete = true;
 
         foreach (var argument in test.Arguments)
         {
@@ -708,9 +700,17 @@ public sealed class Binder
         }
 
         var arguments = new List<IrTestArgument>();
-        for (var i = 0; i < signature.ParameterNames.Count; i++)
+        foreach (var parameter in signature.Parameters)
         {
-            var name = signature.ParameterNames[i];
+            // A parameter nobody has named yet cannot be supplied and cannot be demanded: there is
+            // no name for the test to write. Only this parameter goes unmentioned, though -- the
+            // ones beside it that do have names are still checked.
+            if (parameter.Declaration.Name.IsMissing)
+            {
+                continue;
+            }
+
+            var name = parameter.Name;
             if (!declared.TryGetValue(name, out var declaration))
             {
                 if (argumentNamesAreComplete)
@@ -725,7 +725,7 @@ public sealed class Binder
                 continue;
             }
 
-            var expectedType = signature.ParameterTypes[i];
+            var expectedType = parameter.Type;
             var value = BindExpression(declaration.Value, new Scope(null), context, expectedType);
             if (value.Type is not ErrorType && !TypesMatch(expectedType, value.Type))
             {
@@ -739,7 +739,7 @@ public sealed class Binder
             arguments.Add(new IrTestArgument(name, value, declaration.Span));
         }
 
-        foreach (var extra in declared.Keys.Except(signature.ParameterNames, StringComparer.Ordinal))
+        foreach (var extra in declared.Keys.Except(NamedParametersOf(signature), StringComparer.Ordinal))
         {
             _diagnostics.Error(
                 "PL0068",
@@ -750,6 +750,12 @@ public sealed class Binder
 
         return arguments;
     }
+
+    /// <summary>The parameters a test could name, which is the ones the author has named.</summary>
+    private static IEnumerable<string> NamedParametersOf(IrMethodSignature signature)
+        => signature.Parameters
+            .Where(parameter => !parameter.Declaration.Name.IsMissing)
+            .Select(parameter => parameter.Name);
 
     private IrTestExpectation BindTestExpectation(
         TestExpectation expectation,
@@ -1031,7 +1037,9 @@ public sealed class Binder
                 "ProtoLang does not apply implicit numeric conversions.");
         }
 
-        var local = new IrLocal(declaration.Name.Text, declaredType ?? initializer.Type);
+        var local = new IrLocal(
+            new DeclarationSite(SymbolKind.Local, declaration.Name, declaration.Span),
+            declaredType ?? initializer.Type);
 
         // Same reasoning as an unnamed parameter: the declaration stays in the IR so the body can
         // still be walked, but nothing goes into scope under a name that was never written.
@@ -1117,7 +1125,12 @@ public sealed class Binder
         }
 
         var loopScope = new Scope(scope);
-        var loop = new IrLocal(statement.VariableName.Text, elementType);
+
+        // The extent is the whole loop rather than its header: the parser records no span for the
+        // header alone, and a client showing a loop binding in context wants the loop it binds over.
+        var loop = new IrLocal(
+            new DeclarationSite(SymbolKind.LoopBinding, statement.VariableName, statement.Span),
+            elementType);
 
         if (!statement.VariableName.IsMissing && !loopScope.TryDeclareLocal(loop))
         {
@@ -1773,16 +1786,16 @@ public sealed class Binder
         var arguments = new List<IrExpression>();
         for (var i = 0; i < invocation.Arguments.Count; i++)
         {
-            var expected = i < signature.ParameterTypes.Count ? signature.ParameterTypes[i] : null;
+            var expected = i < signature.Parameters.Count ? signature.Parameters[i].Type : null;
             arguments.Add(BindExpression(invocation.Arguments[i], scope, context, expected));
         }
 
-        if (arguments.Count != signature.ParameterTypes.Count)
+        if (arguments.Count != signature.Parameters.Count)
         {
             _diagnostics.Error(
                 "PL0045",
                 "wrong number of arguments",
-                $"'{methodName}' takes {signature.ParameterTypes.Count} argument(s) "
+                $"'{methodName}' takes {signature.Parameters.Count} argument(s) "
                 + $"but {arguments.Count} were supplied.",
                 invocation.Span);
             return new IrLiteral(null, ErrorType.Instance, invocation.Span);
@@ -1795,13 +1808,13 @@ public sealed class Binder
                 continue;
             }
 
-            if (!TypesMatch(signature.ParameterTypes[i], arguments[i].Type))
+            if (!TypesMatch(signature.Parameters[i].Type, arguments[i].Type))
             {
                 _diagnostics.Error(
                     "PL0046",
                     "argument type mismatch",
                     $"Argument {i + 1} of '{methodName}' expects "
-                    + $"'{signature.ParameterTypes[i].DisplayName}' but got "
+                    + $"'{signature.Parameters[i].Type.DisplayName}' but got "
                     + $"'{arguments[i].Type.DisplayName}'.",
                     invocation.Arguments[i].Span);
             }

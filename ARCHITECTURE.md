@@ -58,7 +58,11 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
 7. **Bind.** [`Binder.Bind`](src/ProtoLang.Core/Binding/Binder.cs) resolves names against the
    descriptors and produces typed IR. It does **not** throw on bad input: an unresolved name becomes
    `ErrorType` (`PL0037`) and binding continues, a name the parser never saw resolves to `ErrorType`
-   in silence, and a declaration that cannot be resolved is dropped rather than half-built.
+   in silence, and a declaration that cannot be resolved is dropped rather than half-built. Every
+   local, parameter, loop binding and method carries a
+   [`DeclarationSite`](src/ProtoLang.Core/Symbols/DeclarationSite.cs), so a reference can reach the
+   declaration it means and say which symbol that is. The binder's `Scope` chain itself is still
+   discarded as it descends; #49 is what publishes it.
 8. **Result.** `CompilationResult` carries the IR *even when the file did not parse*, the syntax
    tree, the descriptors, the import outcomes, the diagnostics, the settled config, and the search
    paths that were used. `Module` is null only when the compilation stopped before the binder: an
@@ -78,6 +82,8 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
 | Messages | `Diagnostic`, `DiagnosticBag` | [Diagnostics/Diagnostic.cs](src/ProtoLang.Core/Diagnostics/Diagnostic.cs) |
 | Type system | `PlType` and friends | [Types/PlType.cs](src/ProtoLang.Core/Types/PlType.cs) |
 | Typed IR | `IrModule` … `IrLiteral` | [Ir/Ir.cs](src/ProtoLang.Core/Ir/Ir.cs) |
+| Where a declaration is | `DeclarationSite` | [Symbols/DeclarationSite.cs](src/ProtoLang.Core/Symbols/DeclarationSite.cs) |
+| Which symbol a reference means | `SymbolId`, `SymbolKind` | [Symbols/SymbolId.cs](src/ProtoLang.Core/Symbols/SymbolId.cs) |
 | Emission behavior | `ArithmeticBehavior`, `ConversionBehavior` | [Ir/ArithmeticBehavior.cs](src/ProtoLang.Core/Ir/ArithmeticBehavior.cs) |
 | Policy → behavior | `NumericPolicy` | [Ir/NumericPolicy.cs](src/ProtoLang.Core/Ir/NumericPolicy.cs) |
 | Backend contract | `IBackend`, `ITestBackend`, `ITestProjectScaffold` | [Backend/IBackend.cs](src/ProtoLang.Core/Backend/IBackend.cs) |
@@ -143,7 +149,8 @@ There is **no CI**. `dotnet test` locally is the gate.
 ## Where the editor-support epic lands
 
 Epic [#47](https://github.com/IsaacSherman/ProtoLang/issues/47) makes the semantic model
-*addressable* ("what is at line 12, column 7?") and *durable* (the binder currently discards scope
-information as it goes), then builds a language server on top. Only four sub-issues touch existing
-compiler code — #35, #36 and #37 (done), and #39. Everything else should be additive: new types,
-new projects. Rewriting the binder is the signal to stop and re-scope.
+*addressable* ("what is at line 12, column 7?") and *durable* (the binder discarded everything it
+knew about a declaration as it went), then builds a language server on top. Only four sub-issues
+touch existing compiler code — #35, #36, #37 and #39 — and all four are done. Everything from here
+should be additive: new types, new projects. Rewriting the binder is the signal to stop and
+re-scope.

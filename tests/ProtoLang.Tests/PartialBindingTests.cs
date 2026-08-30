@@ -232,6 +232,24 @@ public class PartialBindingTests
     }
 
     /// <summary>
+    /// Whether a name was written is a fact about one parameter, not about the signature. The
+    /// parameter beside the hole is one the author named, one the test could have supplied, and one
+    /// the test should still be told about.
+    /// </summary>
+    [Fact]
+    public void AParameterThatWasNamedIsStillDemandedWhenAnotherWasNot()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend InvoiceItem { fn f(a: int64, : int64) -> int64 { return 1; } }\n"
+            + "test InvoiceItem.f \"x\" { receiver { } expect return 1; }");
+
+        var missing = Assert.Single(result.Diagnostics, d => d.Code == "PL0066");
+
+        Assert.Contains("'a'", missing.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A syntax error and a schema that is not there are two independent problems, and an author
     /// with both of them has both of them. The parse gate used to report the first and stop, so the
     /// second only appeared once the first was fixed.
@@ -446,50 +464,6 @@ public class PartialBindingTests
         return Assert.Single(Walk(result.Module!).OfType<IrMissingMemberAccess>());
     }
 
-    /// <summary>Every expression in a module, however deeply nested.</summary>
-    private static IEnumerable<IrExpression> Walk(IrModule module)
-        => module.Methods.SelectMany(method => Walk(method.Body));
-
-    /// <inheritdoc cref="Walk(IrModule)"/>
-    private static IEnumerable<IrExpression> Walk(IrStatement statement)
-        => statement switch
-        {
-            IrBlock block => block.Statements.SelectMany(Walk),
-            IrVariableDeclaration declaration => Walk(declaration.Initializer),
-            IrAssignment assignment => Walk(assignment.Value),
-            IrReturn { Value: { } value } => Walk(value),
-            IrForEach loop => Walk(loop.Collection).Concat(Walk(loop.Body)),
-            IrIf branch => Walk(branch.Condition)
-                .Concat(Walk(branch.Then))
-                .Concat(branch.Else is { } otherwise ? Walk(otherwise) : []),
-            IrWhile loop => Walk(loop.Condition).Concat(Walk(loop.Body)),
-            IrExpressionStatement expression => Walk(expression.Expression),
-            _ => [],
-        };
-
-    /// <inheritdoc cref="Walk(IrModule)"/>
-    private static IEnumerable<IrExpression> Walk(IrExpression expression)
-    {
-        yield return expression;
-
-        var operands = expression switch
-        {
-            IrFieldAccess field => (IEnumerable<IrExpression>)[field.Receiver],
-            IrFieldPresence presence => [presence.Receiver],
-            IrMethodCall call => [call.Receiver, .. call.Arguments],
-            IrBinary binary => [binary.Left, binary.Right],
-            IrIntegerDivision division => division.OnZero is { } onZero
-                ? [division.Left, division.Right, onZero]
-                : [division.Left, division.Right],
-            IrUnary unary => [unary.Operand],
-            IrConversion conversion => [conversion.Operand],
-            IrMissingMemberAccess awaiting => [awaiting.Receiver],
-            _ => [],
-        };
-
-        foreach (var operand in operands.SelectMany(Walk))
-        {
-            yield return operand;
-        }
-    }
+    /// <summary>Every expression in a module, however deeply nested. See <see cref="IrWalk"/>.</summary>
+    private static IEnumerable<IrExpression> Walk(IrModule module) => IrWalk.Expressions(module);
 }
