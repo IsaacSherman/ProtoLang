@@ -386,6 +386,54 @@ public class PartialBindingTests
         Assert.DoesNotContain(result.Diagnostics, d => d.Code == "PL0029");
     }
 
+    // ------- what a message calls something that has no name
+
+    /// <summary>
+    /// A name that was never written has no spelling to quote, and <c>''</c> reads as a defect in
+    /// the compiler rather than as a fact about the program. The span already says where it is.
+    /// </summary>
+    [Theory]
+    [InlineData("extend InvoiceItem { fn () -> int64 { } }", "This method declares a return type")]
+    [InlineData(
+        "extend InvoiceItem { fn f(: void) -> int64 { return 1; } }",
+        "This parameter cannot be declared void.")]
+    [InlineData(
+        "extend InvoiceItem { fn f() -> int64 { var : void = 1; return 1; } }",
+        "This variable cannot be declared void.")]
+    [InlineData(
+        "extend InvoiceItem { fn f() -> int64 { var : int64 = \"s\"; return 1; } }",
+        "Cannot initialize this variable of type")]
+    public void ADiagnosticAboutSomethingUnnamedSaysWhatItIsInsteadOfQuotingNothing(
+        string body,
+        string expected)
+    {
+        var result = CompileSource(Prelude + body);
+
+        Assert.Contains(result.Diagnostics, d => d.Message.Contains(expected, StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Diagnostics, d => d.Message.Contains("''", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// And the wording for a name that is there does not move, because that wording is published.
+    /// </summary>
+    [Theory]
+    [InlineData("extend InvoiceItem { fn f() -> int64 { } }", "'f' declares a return type")]
+    [InlineData(
+        "extend InvoiceItem { fn f(x: void) -> int64 { return 1; } }",
+        "Parameter 'x' cannot be declared void.")]
+    [InlineData(
+        "extend InvoiceItem { fn f() -> int64 { var x: void = 1; return 1; } }",
+        "Variable 'x' cannot be declared void.")]
+    [InlineData(
+        "extend InvoiceItem { fn f() -> int64 { var x: int64 = \"s\"; return 1; } }",
+        "Cannot initialize 'x' of type")]
+    public void ADiagnosticAboutSomethingNamedStillQuotesTheName(string body, string expected)
+    {
+        var result = CompileSource(Prelude + body);
+
+        Assert.Contains(result.Diagnostics, d => d.Message.Contains(expected, StringComparison.Ordinal));
+    }
+
     // ------- helpers
 
     private static string Render(CompilationResult result)

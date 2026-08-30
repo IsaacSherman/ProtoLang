@@ -318,7 +318,8 @@ public sealed class Binder
                 _diagnostics.Error(
                     "PL0024",
                     "void is not a value type",
-                    $"Parameter '{parameter.Name}' cannot be declared void.",
+                    $"{Capitalized(Refer(parameter.Name, "parameter", "Parameter"))} cannot be "
+                    + "declared void.",
                     parameter.Span,
                     "void is a return marker only (spec 8.1).");
                 type = ErrorType.Instance;
@@ -336,6 +337,33 @@ public sealed class Binder
             parametersAreNamed);
     }
 
+
+    /// <summary>
+    /// How a message refers to something the author has not named yet: <c>this method</c> rather
+    /// than <c>''</c>.
+    /// </summary>
+    /// <param name="lead">
+    /// The word that introduces a name that is there, for the messages that use one. "Parameter
+    /// 'x'" is what that message has always said and is not worth moving to save a branch here.
+    /// </param>
+    /// <remarks>
+    /// A name that was never written has no spelling to quote, and quoting the empty string reads as
+    /// a defect in the compiler rather than as a fact about the program. The span already says where
+    /// the thing is; the message only has to stop pretending it can name it. Wording for names that
+    /// are there is untouched, because those messages are published output.
+    /// </remarks>
+    private static string Refer(SyntaxName name, string kind, string? lead = null)
+        => name.IsMissing ? $"this {kind}"
+            : lead is null ? $"'{name}'"
+            : $"{lead} '{name}'";
+
+    /// <summary>Upper-cases a leading letter, for a referent that opens a sentence.</summary>
+    /// <remarks>
+    /// A no-op on the quoted forms <see cref="Refer"/> produces for a name that exists, because a
+    /// quote is not a letter -- which is what lets one referent serve both ends of a sentence.
+    /// </remarks>
+    private static string Capitalized(string text)
+        => text.Length == 0 ? text : char.ToUpperInvariant(text[0]) + text[1..];
 
     private void ReportAmbiguousTypeName(string name, SourceSpan span, IEnumerable<string> fullNames)
     {
@@ -464,7 +492,7 @@ public sealed class Binder
             _diagnostics.Error(
                 "PL0027",
                 "missing return statement",
-                $"'{method.Name}' declares a return type of "
+                $"{Capitalized(Refer(method.Name, "method"))} declares a return type of "
                 + $"'{signature.ReturnType.DisplayName}' but not all paths return a value.",
                 method.Span);
         }
@@ -979,7 +1007,8 @@ public sealed class Binder
             _diagnostics.Error(
                 "PL0024",
                 "void is not a value type",
-                $"Variable '{declaration.Name}' cannot be declared void.",
+                $"{Capitalized(Refer(declaration.Name, "variable", "Variable"))} cannot be "
+                + "declared void.",
                 declaration.Span,
                 "void is a return marker only (spec 8.1).");
             declaredType = ErrorType.Instance;
@@ -995,8 +1024,9 @@ public sealed class Binder
             _diagnostics.Error(
                 "PL0028",
                 "type mismatch in variable initializer",
-                $"Cannot initialize '{declaration.Name}' of type '{declaredType.DisplayName}' "
-                + $"with a value of type '{initializer.Type.DisplayName}'.",
+                $"Cannot initialize {Refer(declaration.Name, "variable")} of type "
+                + $"'{declaredType.DisplayName}' with a value of type "
+                + $"'{initializer.Type.DisplayName}'.",
                 declaration.Span,
                 "ProtoLang does not apply implicit numeric conversions.");
         }
