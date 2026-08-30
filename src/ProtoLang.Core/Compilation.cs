@@ -423,7 +423,13 @@ public sealed class Compilation
                 "protobuf schema could not be loaded",
                 ex.Message,
                 unit.Imports.Count > 0 ? unit.Imports[0].Span : unit.Span);
-            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, []);
+
+            // The imports, not an empty list: every one of them resolved -- the gate above refuses
+            // to reach protoc otherwise -- and what failed is protoc's reading of schemas this
+            // compilation had already found. An empty list here would say the imports were never
+            // looked at, and would throw away the file-to-declaration mapping that is exactly what
+            // an editor wants to report against and what a cache wants to key on.
+            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, imports);
         }
 
         var module = new Binder(descriptors, diagnostics, new NumericPolicy(config), config).Bind(unit);

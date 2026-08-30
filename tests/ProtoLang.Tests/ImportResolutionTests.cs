@@ -115,4 +115,28 @@ public class ImportResolutionTests
         Assert.Contains(result.Diagnostics, d => d.Code == "PL0001");
         Assert.Empty(result.Imports);
     }
+
+    /// <summary>
+    /// And the converse: a schema that was found and then would not load is still a schema that was
+    /// found. Reporting no imports there would say they were never looked at, and would throw away
+    /// the file each declaration resolved to -- which is what a diagnostic anchors against and what
+    /// a descriptor cache keys on.
+    /// </summary>
+    [Fact]
+    public void ASchemaThatWouldNotLoadIsStillReportedAsResolved()
+    {
+        var directory = TestPaths.CreateTempDirectory();
+        File.WriteAllText(Path.Combine(directory, "broken.proto"), "this is not a protobuf schema");
+
+        var source = Path.Combine(directory, "test.protolang");
+        File.WriteAllText(source, "import proto \"broken.proto\";\n" + Body);
+
+        var result = Compilation.Compile(source, [directory]);
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0003");
+
+        var import = Assert.Single(result.Imports);
+        Assert.Equal(ImportOutcome.Resolved, import.Outcome);
+        Assert.Equal(Path.Combine(directory, "broken.proto"), import.ResolvedPath);
+    }
 }
