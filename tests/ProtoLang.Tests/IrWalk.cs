@@ -21,7 +21,10 @@ namespace ProtoLang.Tests;
 /// </remarks>
 internal static class IrWalk
 {
-    /// <summary>Every statement in every method body, each before the statements it contains.</summary>
+    /// <summary>
+    /// Every statement in every method body, each before the statements it contains. A <c>test</c>
+    /// declaration holds expressions but no statements, so there is nothing there to walk.
+    /// </summary>
     public static IEnumerable<IrStatement> Statements(IrModule module)
         => module.Methods.SelectMany(method => Statements(method.Body));
 
@@ -45,13 +48,51 @@ internal static class IrWalk
         }
     }
 
-    /// <summary>Every expression in every method body, however deeply nested.</summary>
+    /// <summary>
+    /// Every expression in a module, however deeply nested: method bodies, and the three places a
+    /// <c>test</c> declaration holds one -- its receiver fixture, its arguments, and its expectation.
+    /// </summary>
+    /// <remarks>
+    /// The test half is easy to leave out and was, at first. Nothing in this suite noticed, because
+    /// the tests written against it are about method bodies -- which is exactly how a sweep quietly
+    /// stops covering a subtree and keeps reporting that everything holds.
+    /// </remarks>
     public static IEnumerable<IrExpression> Expressions(IrModule module)
-        => module.Methods.SelectMany(method => Expressions(method.Body));
+        => [
+            .. module.Methods.SelectMany(method => Expressions(method.Body)),
+            .. module.Tests.SelectMany(Expressions),
+        ];
 
     /// <inheritdoc cref="Expressions(IrModule)"/>
     public static IEnumerable<IrExpression> Expressions(IrStatement statement)
         => Statements(statement).SelectMany(OwnExpressions).SelectMany(Expressions);
+
+    /// <inheritdoc cref="Expressions(IrModule)"/>
+    public static IEnumerable<IrExpression> Expressions(IrTest test)
+        => [
+            .. Expressions(test.Receiver),
+            .. test.Arguments.SelectMany(argument => Expressions(argument.Value)),
+            .. test.Expectation is IrTestReturnExpectation expected
+                ? Expressions(expected.Value)
+                : Enumerable.Empty<IrExpression>(),
+        ];
+
+    /// <summary>Every expression in a receiver fixture, through however many nested messages.</summary>
+    private static IEnumerable<IrExpression> Expressions(IrTestMessageValue value)
+        => value.Fields.SelectMany(OwnExpressions);
+
+    /// <inheritdoc cref="Expressions(IrTestMessageValue)"/>
+    private static IEnumerable<IrExpression> OwnExpressions(IrTestFieldValue field)
+    {
+        if (field.ScalarValue is { } scalar)
+        {
+            return Expressions(scalar);
+        }
+
+        return field.MessageValue is { } message
+            ? Expressions(message)
+            : Enumerable.Empty<IrExpression>();
+    }
 
     /// <inheritdoc cref="Expressions(IrModule)"/>
     public static IEnumerable<IrExpression> Expressions(IrExpression expression)
@@ -83,6 +124,11 @@ internal static class IrWalk
     /// Every declaration a module makes: each method, its parameters, and every local and loop
     /// binding in its body.
     /// </summary>
+    /// <remarks>
+    /// Tests contribute none. A <c>test</c> declares nothing of its own -- it names a method that
+    /// was declared elsewhere, and walking its target's parameters would report one declaration
+    /// once per test that calls it.
+    /// </remarks>
     public static IEnumerable<DeclarationSite> Declarations(IrModule module)
         => module.Methods.SelectMany(Declarations);
 

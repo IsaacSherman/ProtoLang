@@ -198,6 +198,34 @@ public class SymbolIdentityTests
     }
 
     /// <summary>
+    /// Identity is scoped to the document, not to the label its spans print. A span says
+    /// <c>buffer.protolang</c> for both of these, because that is what a diagnostic has to say; the
+    /// two files are still two files, and the same declaration in each is still two symbols.
+    /// </summary>
+    /// <remarks>
+    /// Unreachable while a compilation binds one source, and the reason this is asserted anyway is
+    /// that <see cref="SymbolId"/> is what a reference index and an editor cache key on. An identity
+    /// that merges two files the day #27 lands is one that would have to break every consumer built
+    /// on it in the meantime.
+    /// </remarks>
+    [Fact]
+    public void TwoDocumentsWithOneNameDoNotShareTheirDeclarations()
+    {
+        var here = SourceIdentity.FromPath(
+            Path.Combine(TestPaths.CreateTempDirectory(), "buffer.protolang"));
+        var there = SourceIdentity.FromPath(
+            Path.Combine(TestPaths.CreateTempDirectory(), "buffer.protolang"));
+
+        Assert.Equal(there.Name, here.Name);
+
+        var first = Identities(Compile(here, Fixture));
+        var second = Identities(Compile(there, Fixture));
+
+        Assert.NotEmpty(first);
+        Assert.Empty(first.Intersect(second));
+    }
+
+    /// <summary>
     /// A buffer being typed into is full of names nobody has written yet, and two of them are still
     /// two declarations. Identity comes from where the name would go, and the parser anchors each
     /// hole after a different token.
@@ -263,6 +291,24 @@ public class SymbolIdentityTests
         Assert.Equal(
             $"protolang.tests.ambiguous.First.Kind.{value.Name}",
             SymbolId.ForEnumValue(value).Key);
+    }
+
+    /// <summary>
+    /// A <c>test</c> declaration holds expressions in three places the sweep would otherwise walk
+    /// past -- its receiver fixture, its arguments, and its expectation. Asserted against source
+    /// offsets rather than a count, so it says which ones were found.
+    /// </summary>
+    [Fact]
+    public void ExpressionsInsideATestDeclarationAreReachedToo()
+    {
+        var result = CompileAgainstFixtures(TestOverAFixture);
+
+        Assert.True(result.Success, "the fixture is a whole program");
+
+        var found = Expressions(result).Select(e => e.Span.Start.Offset).ToHashSet();
+
+        Assert.Contains(TestOverAFixture.IndexOf("7;", StringComparison.Ordinal), found);
+        Assert.Contains(TestOverAFixture.LastIndexOf("7;", StringComparison.Ordinal), found);
     }
 
     [Fact]
@@ -342,6 +388,22 @@ public class SymbolIdentityTests
 
     private const string HalfTypedParameters =
         "extend InvoiceItem { fn half(: int64, : int64) -> int64 { return 1; } }";
+
+    /// <summary>Two literals outside any method body: one in the fixture, one in the expectation.</summary>
+    private const string TestOverAFixture =
+        """
+        import proto "fixtures.proto";
+        extend Outer {
+            fn f() -> int64 {
+                return count;
+            }
+        }
+
+        test Outer.f "reads count" {
+            receiver { count = 7; }
+            expect return 7;
+        }
+        """;
 
     private const string AmbiguousSchema =
         """

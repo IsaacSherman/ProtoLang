@@ -432,7 +432,8 @@ public sealed class Compilation
             return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, imports);
         }
 
-        var module = new Binder(descriptors, diagnostics, new NumericPolicy(config), config).Bind(unit);
+        var module = new Binder(descriptors, diagnostics, new NumericPolicy(config), config, source.Identity)
+            .Bind(unit);
 
         // Carried out whether or not anything went wrong, because a module built from a broken tree
         // is exactly what an editor came for and is no use to anyone else. Nothing can mistake it

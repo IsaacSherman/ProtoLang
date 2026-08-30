@@ -41,18 +41,34 @@ namespace ProtoLang.Symbols;
 public sealed record DeclarationSite
 {
     /// <param name="kind">What is being declared. Also part of <see cref="Id"/>.</param>
+    /// <param name="document">
+    /// Which source this is in. A span says what its file is <em>called</em>; this says which file
+    /// it is. See <see cref="SymbolId.ForDeclaration"/>.
+    /// </param>
     /// <param name="name">The declaring name, written or not yet written.</param>
     /// <param name="extent">The whole declaring construct, as far as it has been written.</param>
-    public DeclarationSite(SymbolKind kind, SyntaxName name, SourceSpan extent)
+    public DeclarationSite(
+        SymbolKind kind,
+        SourceIdentity document,
+        SyntaxName name,
+        SourceSpan extent)
     {
+        ArgumentNullException.ThrowIfNull(document);
+
         Kind = kind;
+        Document = document;
         Name = name;
         Extent = SourceSpan.Union(extent, name.Span);
-        Id = SymbolId.ForDeclaration(kind, name.Span);
+        Id = SymbolId.ForDeclaration(kind, document, name.Span);
     }
 
     /// <summary>What this declares.</summary>
     public SymbolKind Kind { get; }
+
+    /// <summary>
+    /// The source this declaration is in, which is what a client opens to navigate to it.
+    /// </summary>
+    public SourceIdentity Document { get; }
 
     /// <summary>The declared name, and the narrow range covering just the name.</summary>
     public SyntaxName Name { get; }

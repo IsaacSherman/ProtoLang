@@ -20,10 +20,10 @@ namespace ProtoLang.Symbols;
 /// <b>Identity is semantic, not textual.</b> A name is not an identity: field names collide across
 /// messages constantly, and two blocks may each declare <c>total</c>. What identifies a symbol is
 /// the declaration it came from. So for anything ProtoLang declares, this is <em>where</em> the name
-/// was written -- the file and the offset of the declaring name, which is unique because no two
-/// names start at one offset, and stable across a recompilation of unchanged text because lexing is
-/// deterministic. For anything the schema declares, there is no ProtoLang declaration to point at,
-/// and identity comes from the descriptor's fully qualified name instead.
+/// was written -- the document and the offset of the declaring name, which is unique because no two
+/// names start at one offset in one document, and stable across a recompilation of unchanged text
+/// because lexing is deterministic. For anything the schema declares, there is no ProtoLang
+/// declaration to point at, and identity comes from the descriptor's fully qualified name instead.
 /// </para>
 /// <para>
 /// A single composed key rather than a discriminated shape, because every consumer wants the same
@@ -51,24 +51,31 @@ public readonly record struct SymbolId
     }
 
     /// <summary>The identity of something declared in ProtoLang source.</summary>
+    /// <param name="document">
+    /// Which source the declaration is in. Deliberately not taken from
+    /// <see cref="SourceSpan.File"/>: a span carries the label diagnostics print, which is the base
+    /// file name, so two documents called <c>test.protolang</c> in different directories are
+    /// indistinguishable by it. A compilation binds one source today and could not tell the
+    /// difference either way, but this type is what a reference index and an editor cache will key
+    /// on, and an identity that silently merges two files the day #27 lands is not one worth
+    /// building on. <see cref="SourceIdentity.Path"/> answers when there is a file;
+    /// <see cref="SourceIdentity.Name"/> is the fallback for a buffer that has never been saved,
+    /// which is exactly the handle its caller chose to be addressed by.
+    /// </param>
     /// <param name="nameSpan">
     /// The range of the declaring name -- <see cref="Syntax.SyntaxName.Span"/>, which is the empty
     /// insertion point when the author has not written the name yet. Two half-typed declarations
     /// still get two identities, because the parser anchors each hole after a different token.
     /// </param>
     /// <remarks>
-    /// <b>This is a one-file identity, and stops being one the day a compilation holds two.</b>
-    /// <see cref="SourceSpan.File"/> is <see cref="SourceIdentity.Name"/> -- the base file name,
-    /// deliberately, because it is what diagnostics print and that rendering is published output.
-    /// A compilation binds one source today, so every key here is drawn from one file and no two can
-    /// collide. Under #27 they can: two buffers both called <c>test.protolang</c> in different
-    /// directories, each declaring something at the same offset, would be one symbol, and a
-    /// reference index built on that would report one file's uses against the other's declaration.
-    /// Whatever gives a declaration site its file then has to say which file and not merely what it
-    /// is called -- the span cannot, without moving what the CLI prints.
+    /// The contract a multi-file caller has to keep: every source in one compilation needs a
+    /// distinct identity. <see cref="SourceIdentity.FromPath"/> guarantees it for saved files, and a
+    /// caller handing the compiler several unsaved buffers has to give each one its own name --
+    /// which <see cref="SourceIdentity.Unsaved"/> already asks for, because that name is the only
+    /// handle it will get back.
     /// </remarks>
-    public static SymbolId ForDeclaration(SymbolKind kind, SourceSpan nameSpan)
-        => new(kind, $"{nameSpan.File}@{nameSpan.Start.Offset}");
+    public static SymbolId ForDeclaration(SymbolKind kind, SourceIdentity document, SourceSpan nameSpan)
+        => new(kind, $"{document.Path ?? document.Name}@{nameSpan.Start.Offset}");
 
     /// <summary>The identity of a protobuf message field.</summary>
     /// <remarks>

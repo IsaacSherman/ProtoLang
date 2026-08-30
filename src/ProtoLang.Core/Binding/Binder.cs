@@ -41,16 +41,27 @@ public sealed class Binder
         new(ReferenceEqualityComparer.Instance);
     private readonly NumericPolicy _policy;
     private readonly ProjectConfig _config;
+    private readonly SourceIdentity _document;
 
+    /// <param name="document">
+    /// What the source being bound is, which every declaration site records so that a reference can
+    /// say not just where its declaration is but which file that is in. Optional because a caller
+    /// that only wants diagnostics -- the resilience suite binds thousands of generated trees --
+    /// has nothing to say here and no one to say it to. Omitting it leaves every declaration keyed
+    /// under one anonymous buffer, which is sound for a single compilation and useless to index
+    /// across several, so anything building an index must supply it. The pipeline always does.
+    /// </param>
     public Binder(
         IReadOnlyList<FileDescriptor> files,
         DiagnosticBag diagnostics,
         NumericPolicy? policy = null,
-        ProjectConfig? config = null)
+        ProjectConfig? config = null,
+        SourceIdentity? document = null)
     {
         _diagnostics = diagnostics;
         _config = config ?? ProjectConfig.Default;
         _policy = policy ?? new NumericPolicy(_config);
+        _document = document ?? SourceIdentity.Unsaved();
 
         foreach (var file in files)
         {
@@ -322,13 +333,13 @@ public sealed class Binder
             }
 
             parameters.Add(new IrParameter(
-                new DeclarationSite(SymbolKind.Parameter, parameter.Name, parameter.Span),
+                new DeclarationSite(SymbolKind.Parameter, _document, parameter.Name, parameter.Span),
                 type));
         }
 
         return new IrMethodSignature(
             receiver,
-            new DeclarationSite(SymbolKind.Method, method.Name, method.Span),
+            new DeclarationSite(SymbolKind.Method, _document, method.Name, method.Span),
             returnType,
             parameters);
     }
@@ -1037,7 +1048,7 @@ public sealed class Binder
         }
 
         var local = new IrLocal(
-            new DeclarationSite(SymbolKind.Local, declaration.Name, declaration.Span),
+            new DeclarationSite(SymbolKind.Local, _document, declaration.Name, declaration.Span),
             declaredType ?? initializer.Type);
 
         // Same reasoning as an unnamed parameter: the declaration stays in the IR so the body can
@@ -1128,7 +1139,7 @@ public sealed class Binder
         // The extent is the whole loop rather than its header: the parser records no span for the
         // header alone, and a client showing a loop binding in context wants the loop it binds over.
         var loop = new IrLocal(
-            new DeclarationSite(SymbolKind.LoopBinding, statement.VariableName, statement.Span),
+            new DeclarationSite(SymbolKind.LoopBinding, _document, statement.VariableName, statement.Span),
             elementType);
 
         if (!statement.VariableName.IsMissing && !loopScope.TryDeclareLocal(loop))
