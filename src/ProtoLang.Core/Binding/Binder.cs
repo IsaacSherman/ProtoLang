@@ -789,10 +789,17 @@ public sealed class Binder
             }
 
             // An argument names a parameter of the method under test, which is the only place in the
-            // language where a parameter is named from outside the method that declares it. The
-            // duplicate an author writes twice is deliberately not recorded twice: only the first is
-            // in `declared`, and the second has been reported as a mistake rather than a use.
-            Use(parameter.Id, declaration.Name.Span);
+            // language where a parameter is named from outside the method that declares it. Every
+            // occurrence and not only `declared`'s, which holds the first of a name supplied twice:
+            // the duplicate has been reported, but it is still that parameter's name written in that
+            // place, and an index that skipped it would rename around it.
+            foreach (var written in test.Arguments)
+            {
+                if (!written.Name.IsMissing && written.Name.Text == name)
+                {
+                    Use(parameter.Id, written.Name.Span);
+                }
+            }
 
             var expectedType = parameter.Type;
             var value = BindExpression(declaration.Value, new Scope(null), context, expectedType);
@@ -2036,6 +2043,12 @@ public sealed class Binder
             return new IrLiteral(null, ErrorType.Instance, has.Span);
         }
 
+        // Before the three refusals below rather than after them, for the reason a fixture field is
+        // recorded before its own: what they refuse is the question, not the name. 'has' on a
+        // repeated field, on one with implicit presence, or on a map is still a use of that field,
+        // and it is the use a rename would otherwise leave behind.
+        Use(SymbolId.ForField(field), fieldNameSpan);
+
         if (field.IsMap)
         {
             _diagnostics.Error(
@@ -2062,7 +2075,6 @@ public sealed class Binder
             return new IrLiteral(null, ErrorType.Instance, has.Span);
         }
 
-        Use(SymbolId.ForField(field), fieldNameSpan);
         return new IrFieldPresence(receiver, field, has.Span);
     }
 

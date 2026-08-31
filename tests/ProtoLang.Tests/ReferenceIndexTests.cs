@@ -266,6 +266,84 @@ public class ReferenceIndexTests
         Assert.Equal("protolang.tests.Outer.optional_count", reference.Symbol.Key);
     }
 
+    /// <summary>
+    /// The three refusals <c>has</c> can make are refusals of the question, not of the name. Review
+    /// found this: the reference was recorded past them, so asking about a field that cannot answer
+    /// left no trace of a name that had been written and resolved.
+    /// </summary>
+    [Fact]
+    public void AFieldThatCannotAnswerAPresenceTestIsStillReferencedByOne()
+    {
+        const string source =
+            """
+            import proto "invoice.proto";
+            extend Invoice {
+                fn f() -> bool { return has items; }
+            }
+
+            extend InvoiceItem {
+                fn g() -> bool { return has name; }
+            }
+            """;
+
+        var result = Compile(source, TestPaths.ExampleProtoDirectory);
+        var model = SemanticModel.For(result);
+
+        // PL0079 either way: a repeated field has no presence, and neither does a proto3 string
+        // that was not declared optional.
+        Assert.Equal(2, result.Diagnostics.Count(diagnostic => diagnostic.Code == "PL0079"));
+
+        var repeated = At(model, source, "has items", "items");
+        var implicitly = At(model, source, "has name", "name");
+
+        Assert.Equal("protolang.examples.Invoice.items", repeated.Symbol.Key);
+        Assert.Equal("items".Length, repeated.Span.Length);
+        Assert.Equal("protolang.examples.InvoiceItem.name", implicitly.Symbol.Key);
+        Assert.Equal("name".Length, implicitly.Span.Length);
+    }
+
+    /// <summary>
+    /// Also from review. An argument written twice is diagnosed, but both spellings still name that
+    /// parameter, and a rename that rewrote one of them would leave the file worse than it found it.
+    /// </summary>
+    [Fact]
+    public void AnArgumentSuppliedTwiceIsReferencedTwice()
+    {
+        const string source =
+            """
+            import proto "invoice.proto";
+            extend InvoiceItem {
+                fn scale(by: int64) -> int64 {
+                    return quantity * by;
+                }
+            }
+
+            test InvoiceItem.scale "supplies one argument twice" {
+                receiver {
+                    quantity = 2;
+                }
+
+                arg by = 3;
+                arg by = 4;
+
+                expect return 6;
+            }
+            """;
+
+        var result = Compile(source, TestPaths.ExampleProtoDirectory);
+        var model = SemanticModel.For(result);
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "PL0065");
+
+        var symbol = At(model, source, "by: int64", "by").Symbol;
+
+        Assert.Equal(SymbolKind.Parameter, symbol.Kind);
+        Assert.Equal(
+            2,
+            model.ReferencesTo(symbol).Count(reference =>
+                reference.Span.Start.Offset > source.IndexOf("test ", StringComparison.Ordinal)));
+    }
+
     [Fact]
     public void ACallIsAReferenceToTheMethodItCalls()
     {
