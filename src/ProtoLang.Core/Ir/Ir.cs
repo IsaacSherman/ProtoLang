@@ -80,9 +80,18 @@ public sealed record IrLocal(DeclarationSite Declaration, PlType Type)
 }
 
 /// <remarks>
+/// <para>
 /// Its <see cref="IrNode.Span"/> is the whole declaration, <c>fn</c> through the closing brace of
 /// the body, which is what it has always been -- taken from the signature's declaration site rather
 /// than recorded twice.
+/// </para>
+/// <para>
+/// It is computed once, at construction, and not on each read, which is the one thing to know before
+/// writing <c>method with { Signature = … }</c>: the copy carries the span of the declaration it was
+/// copied from, and would then report a location belonging to another method. Nothing does that
+/// today -- an <see cref="IrMethod"/> is built in one place, from the signature it keeps -- and if
+/// something needs to, it should build a new one rather than amend this.
+/// </para>
 /// </remarks>
 public sealed record IrMethod(IrMethodSignature Signature, IrBlock Body, bool IsVirtual)
     : IrNode(Signature.Declaration.Extent)
