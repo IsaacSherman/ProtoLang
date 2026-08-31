@@ -349,10 +349,14 @@ public sealed record IrMissingMemberAccess(IrExpression Receiver, SourceSpan Spa
 /// inside the parentheses, so the arguments have to survive the failure of the call around them.
 /// </para>
 /// <para>
-/// <paramref name="Receiver"/> is null only where there is no receiver to speak of: <c>1()</c> has a
-/// callee that is not a name or a member access, so nothing was resolved to hold. Its callee is not
-/// bound either, deliberately -- for <c>f()()</c> that would bind the inner call a second time and
-/// report every mistake in it twice, which is the cascade shape #36 spent its effort removing.
+/// <paramref name="Receiver"/> is null exactly where there is no receiver to speak of: a call
+/// through an expression that could never name a method, <c>1()</c> or <c>(quantity + 1)()</c>, has
+/// nothing that was resolved to hold. <b>Its callee is not bound either, and that is a limit rather
+/// than an oversight.</b> The parser's nesting budget bounds its own recursion but not the chain its
+/// postfix loop builds, so a file of 5000 unbalanced parentheses recovers into 2436 nested
+/// invocations; descending them turned a bind that took 183ms into one that did not finish inside a
+/// minute, and a language server may not be hung by a buffer. A position on such a callee is a
+/// question for the syntax tree, which has the whole of it.
 /// </para>
 /// <para>
 /// A wrong-typed argument does <em>not</em> produce one of these. That call resolved: the receiver,

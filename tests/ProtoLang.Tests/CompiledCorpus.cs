@@ -26,8 +26,10 @@ internal sealed record CorpusSource(string Name, string Text, CompilationResult 
 internal static class CompiledCorpus
 {
     /// <summary>
-    /// A file with several distinct mistakes in it: a member name never written, a call to nothing,
-    /// and a parameter list that was abandoned.
+    /// A file with several distinct mistakes in it: a member name never written, a parameter list
+    /// that was abandoned, a call to a method that is not there, and a call through something that
+    /// could never be one -- the last two being the shapes that put an
+    /// <see cref="Ir.IrUncallableInvocation"/> in the tree with each of its two halves.
     /// </summary>
     public const string BrokenText =
         """
@@ -42,6 +44,8 @@ internal static class CompiledCorpus
             }
 
             fn g( -> int64 { return nosuchmethod(1, 2); }
+
+            fn h() -> int64 { return 1(2); }
         }
         """;
 

@@ -21,10 +21,6 @@ namespace ProtoLang.Semantics;
 /// request. No index is built until something measures a need for one; #57 is the issue that would
 /// measure it.
 /// </para>
-/// <para>
-/// Recursion is bounded by the parser's own nesting budget (<c>MaxNestingDepth</c>), so a walk of a
-/// tree the parser produced cannot run the stack out however hostile the source was.
-/// </para>
 /// </remarks>
 internal static class PositionSearch
 {
@@ -50,15 +46,32 @@ internal static class PositionSearch
     /// <remarks>
     /// <para>
     /// <b>The tie-break.</b> Among containing nodes the shortest span wins. Among nodes whose spans
-    /// are equally short -- which includes the case of two nodes sharing one span exactly -- the one
-    /// reached first in this pre-order walk wins. That is the outermost of a nested pair, so the
-    /// implicit receiver the binder introduced never hides the field access the author wrote; and it
-    /// is the leftmost of two adjacent ones, so a caret on the boundary belongs to the node it ends
-    /// rather than to the one it begins.
+    /// are equally short -- which includes two nodes sharing one span exactly, and two equally long
+    /// neighbours meeting at the caret -- the one reached first in this pre-order walk wins: the
+    /// outermost of a nested pair, so the implicit receiver the binder introduced never hides the
+    /// field access the author wrote, and otherwise the leftmost.
+    /// </para>
+    /// <para>
+    /// Length is compared before order and nothing else is compared at all, so where two nodes of
+    /// different lengths merely meet -- a statement whose semicolon abuts the statement after it --
+    /// the shorter wins rather than the earlier. The case that matters is unaffected: what follows an
+    /// identifier is an operator, a delimiter or whitespace, none of which is a node, so a caret at
+    /// the end of a word still finds the word. There is no side-preference on top of length, because
+    /// a rule that preferred the node on the left would have to know the two are siblings, and the
+    /// IR is not nested tightly enough to answer that.
     /// </para>
     /// <para>
     /// The path is snapshotted when a better node is found rather than reconstructed afterwards,
-    /// which is what makes ancestry free: the descent already holds it.
+    /// which is what makes ancestry free: the walk already holds it.
+    /// </para>
+    /// <para id="depth">
+    /// <b>The walk carries its own stack rather than using the call stack.</b> The parser's nesting
+    /// budget bounds the depth it recurses to and not the depth of the tree it produces: its postfix
+    /// loop builds member accesses and calls iteratively, so a file of 5000 unbalanced parentheses
+    /// recovers into an invocation chain 2436 nodes deep. Recursing over that is how a language
+    /// server meets a <see cref="StackOverflowException"/>, which cannot be caught and takes the
+    /// process with it. An explicit stack also keeps the cost linear: nested iterators would ask each
+    /// node for its children once per level above it.
     /// </para>
     /// </remarks>
     public static IReadOnlyList<TNode>? Find<TNode>(
@@ -68,19 +81,23 @@ internal static class PositionSearch
         Func<TNode, IReadOnlyList<TNode>> childrenOf)
         where TNode : class
     {
+        var pending = new Stack<(TNode Node, int Depth)>();
+        foreach (var root in roots.Reverse())
+        {
+            pending.Push((root, 0));
+        }
+
         var path = new List<TNode>();
         IReadOnlyList<TNode>? best = null;
         var bestLength = int.MaxValue;
 
-        foreach (var root in roots)
+        while (pending.Count > 0)
         {
-            Descend(root);
-        }
+            var (node, depth) = pending.Pop();
 
-        return best;
-
-        void Descend(TNode node)
-        {
+            // Everything past this node's depth belongs to a subtree the walk has finished with, so
+            // what remains below it is exactly this node's ancestors.
+            path.RemoveRange(depth, path.Count - depth);
             path.Add(node);
 
             var span = spanOf(node);
@@ -90,13 +107,14 @@ internal static class PositionSearch
                 bestLength = span.Length;
             }
 
-            foreach (var child in childrenOf(node))
+            var children = childrenOf(node);
+            for (var index = children.Count - 1; index >= 0; index--)
             {
-                Descend(child);
+                pending.Push((children[index], depth + 1));
             }
-
-            path.RemoveAt(path.Count - 1);
         }
+
+        return best;
     }
 
     /// <summary>The first node in a pre-order walk whose span is exactly <paramref name="span"/>.</summary>

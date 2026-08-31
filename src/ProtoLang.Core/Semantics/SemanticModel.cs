@@ -60,14 +60,21 @@ public sealed class SemanticModel
     /// <b>The rule.</b> A node covers a position when the position is at or after its start and at or
     /// before its end -- both ends inclusive, so a caret that has just finished typing an identifier
     /// still finds that identifier, which is where the caret is when completion is requested. Among
-    /// covering nodes the shortest wins; among equally short ones the outermost wins, and between two
-    /// adjacent ones the caret belongs to the node it ends rather than the one it begins.
+    /// covering nodes the shortest wins, and among equally short ones the outermost. Length is all
+    /// that is compared before order, so where two nodes of different lengths meet at the caret the
+    /// shorter one wins rather than the earlier; see <see cref="PositionSearch.Find"/>.
     /// </para>
     /// <para>
-    /// Whitespace and comments are inside something: the innermost construct that spans them, which
-    /// is a block, a declaration, or the compilation unit. A position past the end of a line is
-    /// therefore an ordinary position and not a special case. Null means the offset is outside the
-    /// file, or that the compilation stopped before it parsed anything at all.
+    /// Whitespace and comments <em>between</em> two tokens are inside something -- the innermost
+    /// construct spanning them, which is a block, a declaration, or the compilation unit -- so a
+    /// position past the end of a line is an ordinary position rather than a special case. Trivia
+    /// before the first token of the file is the exception, and answers null: the compilation unit
+    /// starts at that token, because its range is what a diagnostic about the file as a whole is
+    /// reported against, and stretching it to cover a leading comment would move that.
+    /// </para>
+    /// <para>
+    /// Null also means the offset is outside the file, or that the compilation stopped before it
+    /// parsed anything at all.
     /// </para>
     /// </remarks>
     public SyntaxLocation? SyntaxAt(int offset)

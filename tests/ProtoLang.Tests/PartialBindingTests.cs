@@ -382,6 +382,26 @@ public class PartialBindingTests
     }
 
     /// <summary>
+    /// A callee that could never name a method keeps the call's arguments and nothing else. The
+    /// callee is where this stops: the parser's nesting budget bounds its own recursion and not the
+    /// chain its postfix loop builds, so descending one is how a buffer of unbalanced parentheses
+    /// stops a bind from finishing. <see cref="BinderResilienceTests"/> is what says so out loud.
+    /// </summary>
+    [Fact]
+    public void ACalleeThatCouldNeverNameAMethodLeavesNoReceiverBehind()
+    {
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn f() -> int64 { return (quantity + 1)(77); } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0043");
+
+        var call = Assert.Single(Walk(result.Module!).OfType<IrUncallableInvocation>());
+
+        Assert.Null(call.Receiver);
+        Assert.Equal(77L, Assert.IsType<IrLiteral>(Assert.Single(call.Arguments)).Value);
+    }
+
+    /// <summary>
     /// The receiver survives too, where there was one. It is the value the call would have been made
     /// on, and go-to-definition and hover are asked about it whether or not the call resolved.
     /// </summary>

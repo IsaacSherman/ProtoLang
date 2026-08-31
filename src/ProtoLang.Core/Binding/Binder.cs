@@ -1789,6 +1789,13 @@ public sealed class Binder
                     "Only ProtoLang methods can be called.",
                     invocation.Span,
                     "Calling target-language functions is not permitted (spec 20).");
+
+                // The callee is deliberately not bound. It is the author's expression and a position
+                // query would like it, but descending it is not safe: the parser's nesting budget
+                // bounds its own recursion and not the chain its postfix loop builds, so a file of
+                // 5000 unbalanced parentheses recovers into 2436 nested invocations, and binding
+                // through them turns a 183ms bind into one that does not finish. The syntax tree
+                // answers about a callee that cannot be called; the IR stops at the call.
                 return Uncallable(null);
         }
 

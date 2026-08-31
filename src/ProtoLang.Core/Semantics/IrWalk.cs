@@ -27,15 +27,24 @@ public static class IrWalk
     }
 
     /// <inheritdoc cref="DescendantsAndSelf(IrModule)"/>
+    /// <inheritdoc cref="PositionSearch.Find" path="/remarks/para[@id='depth']"/>
     public static IEnumerable<IrNode> DescendantsAndSelf(IrNode node)
     {
         ArgumentNullException.ThrowIfNull(node);
 
-        yield return node;
+        var pending = new Stack<IrNode>();
+        pending.Push(node);
 
-        foreach (var descendant in ChildrenOf(node).SelectMany(DescendantsAndSelf))
+        while (pending.Count > 0)
         {
-            yield return descendant;
+            var current = pending.Pop();
+            yield return current;
+
+            var children = ChildrenOf(current);
+            for (var index = children.Count - 1; index >= 0; index--)
+            {
+                pending.Push(children[index]);
+            }
         }
     }
 

@@ -126,6 +126,27 @@ public class PositionQueryTests
         Assert.Equal("total", SyntaxAt(endOfLine).Method?.Name.Text);
     }
 
+    /// <summary>
+    /// The one piece of a file the tree does not cover. A compilation unit begins at its first
+    /// token, because that range is what a diagnostic about the whole file is reported against, and
+    /// widening it to swallow a leading comment would move where those are shown. So trivia before
+    /// that token answers nothing here, which is the answer a client can act on -- unlike an
+    /// approximation.
+    /// </summary>
+    [Fact]
+    public void TriviaBeforeTheFirstTokenIsOutsideTheTree()
+    {
+        const string source =
+            "// A comment above everything, which is where a file usually starts.\n"
+            + "import proto \"invoice.proto\";\n"
+            + "extend InvoiceItem { fn f() -> int64 { return quantity; } }";
+
+        var model = SemanticModel.For(Compile(source, TestPaths.ExampleProtoDirectory));
+
+        Assert.Null(model.SyntaxAt(3));
+        Assert.NotNull(model.SyntaxAt(source.IndexOf("import", StringComparison.Ordinal)));
+    }
+
     [Theory]
     [InlineData(-1)]
     [InlineData(int.MinValue)]
@@ -405,6 +426,27 @@ public class PositionQueryTests
         Assert.NotNull(found.Enclosing<IrUncallableInvocation>());
     }
 
+    /// <summary>
+    /// Where the IR stops, stated as a test so it is a limit rather than a surprise. The callee of a
+    /// call through something that could never name a method is not bound -- descending one is how a
+    /// buffer of unbalanced parentheses stops a bind from finishing, which
+    /// <see cref="BinderResilienceTests"/> pins -- so a position on it answers with the call. The
+    /// syntax tree still has the expression itself, which is the door a client should use for it.
+    /// </summary>
+    [Fact]
+    public void APositionOnTheCalleeOfAnUncallableCallAnswersWithTheCall()
+    {
+        var source = FailingCall("return (quantity + 1)(77);");
+        var model = SemanticModel.For(Compile(source, TestPaths.ExampleProtoDirectory));
+
+        var inTheCallee = source.IndexOf("quantity", StringComparison.Ordinal) + 1;
+
+        Assert.IsType<IrUncallableInvocation>(model.IrAt(inTheCallee)?.Node);
+        Assert.Equal(
+            "quantity",
+            Assert.IsType<NameExpression>(model.SyntaxAt(inTheCallee)?.Node).Name.Text);
+    }
+
     // ------- every position at once
 
     /// <summary>
@@ -431,6 +473,30 @@ public class PositionQueryTests
             "the point of this fixture is that it does not parse");
 
         SweepEveryPosition(CompiledCorpus.Broken);
+    }
+
+    /// <summary>
+    /// The deep tree no well-formed file produces and an editor produces by accident. The parser
+    /// caps the depth it recurses to, but its postfix loop builds calls and member accesses
+    /// iteratively, so nothing caps the depth of what recovery leaves behind: 5000 unbalanced
+    /// parentheses come back as an invocation chain 2436 nodes deep. Both queries have to answer
+    /// over it without walking the stack out -- a <see cref="StackOverflowException"/> cannot be
+    /// caught, and a language server that meets one is gone rather than degraded.
+    /// </summary>
+    [Fact]
+    public void ADeeplyRecoveredTreeIsStillAnswerable()
+    {
+        const int Parentheses = 5_000;
+
+        var source = "import proto \"invoice.proto\";\n"
+            + "extend InvoiceItem { fn f() -> int64 { return "
+            + new string('(', Parentheses) + "1" + new string(')', Parentheses) + "; } }";
+
+        var model = SemanticModel.For(Compile(source, TestPaths.ExampleProtoDirectory));
+        var insideTheChain = source.IndexOf("return", StringComparison.Ordinal) + Parentheses / 2;
+
+        Assert.NotNull(model.SyntaxAt(insideTheChain));
+        Assert.NotNull(model.SyntaxAt(source.Length - 1));
     }
 
     // ------- helpers
