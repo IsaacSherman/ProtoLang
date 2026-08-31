@@ -166,6 +166,11 @@ public class SymbolIdentityTests
         Assert.NotEqual(totals[0].Id, totals[1].Id);
     }
 
+    /// <summary>
+    /// Counted from the fixture rather than written down, which is what makes this notice the target
+    /// of an assignment becoming a reference of its own -- #40 changed that, and a hardcoded number
+    /// would have had to be edited without anyone having to say why.
+    /// </summary>
     [Fact]
     public void EveryReferenceToOneDeclarationCarriesOneIdentity()
     {
@@ -176,8 +181,27 @@ public class SymbolIdentityTests
             .Where(reference => reference.Local.Name == "total")
             .ToList();
 
-        Assert.Equal(2, references.Count);
-        Assert.Equal(references[0].Local.Id, references[1].Local.Id);
+        var declaration = Fixture.IndexOf("var total", StringComparison.Ordinal) + "var ".Length;
+
+        Assert.Equal(
+            Occurrences("total").Where(offset => offset != declaration).ToList(),
+            references.Select(reference => reference.Span.Start.Offset).Order().ToList());
+        Assert.Single(references.Select(reference => reference.Local.Id).Distinct());
+    }
+
+    /// <summary>Every place the fixture writes <paramref name="text"/>, in order.</summary>
+    private static List<int> Occurrences(string text)
+    {
+        var found = new List<int>();
+
+        for (var at = Fixture.IndexOf(text, StringComparison.Ordinal);
+            at >= 0;
+            at = Fixture.IndexOf(text, at + 1, StringComparison.Ordinal))
+        {
+            found.Add(at);
+        }
+
+        return found;
     }
 
     /// <summary>
@@ -430,29 +454,8 @@ public class SymbolIdentityTests
     private static IEnumerable<IrExpression> Expressions(CompilationResult result)
         => IrWalk.DescendantsAndSelf(result.Module!).OfType<IrExpression>();
 
-    /// <summary>
-    /// Every declaration a module makes: each method, its parameters, and every local and loop
-    /// binding in its body.
-    /// </summary>
-    /// <remarks>
-    /// Here rather than beside the published walkers, because a reference index wants exactly this
-    /// sweep and what shape it should take is #40's decision to make. Tests contribute none: a
-    /// <c>test</c> declares nothing of its own, and walking its target's parameters would report one
-    /// declaration once per test that calls it.
-    /// </remarks>
     private static IEnumerable<DeclarationSite> Declarations(CompilationResult result)
-        => result.Module!.Methods.SelectMany(method =>
-            new[] { method.Signature.Declaration }
-                .Concat(method.Parameters.Select(parameter => parameter.Declaration))
-                .Concat(IrWalk.DescendantsAndSelf(method).SelectMany(DeclarationsIn)));
-
-    /// <inheritdoc cref="Declarations"/>
-    private static IReadOnlyList<DeclarationSite> DeclarationsIn(IrNode node) => node switch
-    {
-        IrVariableDeclaration declaration => [declaration.Local.Declaration],
-        IrForEach loop => [loop.Loop.Declaration],
-        _ => [],
-    };
+        => IrWalk.DeclarationsOf(result.Module!);
 
     private static List<SymbolId> Identities(CompilationResult result)
         => Declarations(result).Select(declaration => declaration.Id).ToList();

@@ -39,6 +39,15 @@ public sealed class Binder
     /// </remarks>
     private readonly Dictionary<MethodDeclaration, IrMethodSignature> _signatures =
         new(ReferenceEqualityComparer.Instance);
+    /// <summary>Every name this binder resolved, in the order it happened to resolve them.</summary>
+    /// <remarks>
+    /// Published as <see cref="IrModule.References"/>, sorted, once binding is done. Collected here
+    /// rather than derived afterwards for the reason <see cref="SymbolReference"/> gives: resolving a
+    /// name is the one moment at which both the symbol and the range of the name alone are in hand.
+    /// Appending is all any recording site does, so nothing below can change what the compiler
+    /// reports by recording -- or by failing to.
+    /// </remarks>
+    private readonly List<SymbolReference> _references = [];
     private readonly NumericPolicy _policy;
     private readonly ProjectConfig _config;
     private readonly SourceIdentity _document;
@@ -148,6 +157,7 @@ public sealed class Binder
                 continue;
             }
 
+            Use(SymbolId.ForType(receiver), extend.MessageName.Span);
             resolvedExtends.Add((extend, receiver));
             WarnIfWellKnown(receiver, extend);
 
@@ -182,8 +192,24 @@ public sealed class Binder
             }
         }
 
-        return new IrModule(methods, tests);
+        return new IrModule(methods, tests)
+        {
+            References = SymbolReference.InSourceOrder(_references),
+        };
     }
+
+    /// <summary>Records that a name at <paramref name="span"/> resolved to <paramref name="symbol"/>.</summary>
+    /// <param name="span">
+    /// The range of the name itself, never of the construct around it. A caller that has only the
+    /// wider span is at the wrong place to record from; see <see cref="SymbolReference"/>.
+    /// </param>
+    /// <remarks>
+    /// Called only where a resolution succeeded. A name that did not resolve has been diagnosed and
+    /// refers to nothing, so recording it would put an entry in the index under a symbol that does
+    /// not exist.
+    /// </remarks>
+    private void Use(SymbolId symbol, SourceSpan span, ReferenceKind kind = ReferenceKind.Read)
+        => _references.Add(new SymbolReference(symbol, _document, span, kind));
 
     /// <summary>
     /// Extending a well-known type is allowed, but it is not self-contained the way extending a
@@ -413,12 +439,12 @@ public sealed class Binder
         // simple-name lookup that could report a false ambiguity.
         if (_messagesByFullName.TryGetValue(name, out var messageByFullName))
         {
-            return new MessageType(messageByFullName);
+            return NamedMessage(messageByFullName);
         }
 
         if (_enumsByFullName.TryGetValue(name, out var enumByFullName))
         {
-            return new EnumPlType(enumByFullName);
+            return NamedEnum(enumByFullName);
         }
 
         _messagesBySimpleName.TryGetValue(name, out var messages);
@@ -439,12 +465,12 @@ public sealed class Binder
 
         if (messages is { Count: 1 })
         {
-            return new MessageType(messages[0]);
+            return NamedMessage(messages[0]);
         }
 
         if (enums is { Count: 1 })
         {
-            return new EnumPlType(enums[0]);
+            return NamedEnum(enums[0]);
         }
 
         _diagnostics.Error(
@@ -454,6 +480,21 @@ public sealed class Binder
             reference.Span,
             "ProtoLang types come only from the protobuf type universe (spec 8.1).");
         return ErrorType.Instance;
+
+        // The four ways this succeeds are the only mentions a message or an enum gets in a type
+        // position, and the type they produce says nothing about where it was named. A scalar and
+        // 'void' are left out on purpose: neither is declared anywhere a reader could be sent.
+        MessageType NamedMessage(MessageDescriptor message)
+        {
+            Use(SymbolId.ForType(message), reference.Name.Span);
+            return new MessageType(message);
+        }
+
+        EnumPlType NamedEnum(EnumDescriptor enumType)
+        {
+            Use(SymbolId.ForType(enumType), reference.Name.Span);
+            return new EnumPlType(enumType);
+        }
     }
 
     private IrMethod? BindMethod(MessageDescriptor receiver, MethodDeclaration method)
@@ -557,6 +598,12 @@ public sealed class Binder
 
         if (_methods.TryGetValue((receiver.FullName, methodName), out var signature))
         {
+            // The whole target, receiver half included. `ParseQualifiedName` produces one name for
+            // `Invoice.total_cents`, so the two halves share a range and there is no narrower one to
+            // record the method against -- and the method is what a reader following this wants
+            // anyway. The receiver is therefore not recorded here: two entries over one range would
+            // make which of them a position finds a matter of sort order.
+            Use(signature.Id, target.Span);
             return signature;
         }
 
@@ -601,6 +648,12 @@ public sealed class Binder
                     field.Span);
                 continue;
             }
+
+            // Recorded before the refusals below rather than beside each arm that builds a value.
+            // The name resolved -- that is what the checks that follow are checks *on* -- and a
+            // fixture field the compiler goes on to reject is still a use of that field, which is
+            // exactly the one someone renaming it must be shown.
+            Use(SymbolId.ForField(descriptorField), field.FieldName.Span);
 
             if (descriptorField.IsMap)
             {
@@ -734,6 +787,12 @@ public sealed class Binder
 
                 continue;
             }
+
+            // An argument names a parameter of the method under test, which is the only place in the
+            // language where a parameter is named from outside the method that declares it. The
+            // duplicate an author writes twice is deliberately not recorded twice: only the first is
+            // in `declared`, and the second has been reported as a mistake rather than a use.
+            Use(parameter.Id, declaration.Name.Span);
 
             var expectedType = parameter.Type;
             var value = BindExpression(declaration.Value, new Scope(null), context, expectedType);
@@ -1250,6 +1309,8 @@ public sealed class Binder
             return new IrExpressionStatement(boundValue, statement.Span);
         }
 
+        Use(local.Id, name.Name.Span, ReferenceKind.Write);
+
         var value = BindExpression(statement.Value, scope, context, local.Type);
 
         if (value.Type is not ErrorType && local.Type is not ErrorType && !TypesMatch(local.Type, value.Type))
@@ -1263,7 +1324,7 @@ public sealed class Binder
                 "ProtoLang does not apply implicit numeric conversions.");
         }
 
-        return new IrAssignment(local, value, statement.Span);
+        return new IrAssignment(new IrLocalReference(local, name.Span), value, statement.Span);
     }
 
     private IrExpression BindExpression(
@@ -1394,11 +1455,13 @@ public sealed class Binder
     {
         if (scope.LookupLocal(name.Name.Text) is { } local)
         {
+            Use(local.Id, name.Name.Span);
             return new IrLocalReference(local, name.Span);
         }
 
         if (scope.LookupParameter(name.Name.Text) is { } parameter)
         {
+            Use(parameter.Id, name.Name.Span);
             return new IrParameterReference(parameter, name.Span);
         }
 
@@ -1408,6 +1471,9 @@ public sealed class Binder
             var field = context.Receiver.FindFieldByName(name.Name.Text);
             if (field is not null)
             {
+                // The same symbol an explicit `this.quantity` would reach. That the author wrote no
+                // receiver is a fact about the text and not about what was named.
+                Use(SymbolId.ForField(field), name.Name.Span);
                 return BindFieldAccess(
                     new IrThis(new MessageType(context.Receiver), name.Span), field, name.Span, context);
             }
@@ -1519,6 +1585,7 @@ public sealed class Binder
             return new IrLiteral(null, ErrorType.Instance, member.Span);
         }
 
+        Use(SymbolId.ForEnumValue(value), member.Name.Span);
         return new IrEnumValue(value, new EnumPlType(descriptor), member.Span);
     }
 
@@ -1562,6 +1629,7 @@ public sealed class Binder
         if (_enumsByFullName.TryGetValue(typeName, out var byFullName))
         {
             descriptor = byFullName;
+            Use(SymbolId.ForType(descriptor), receiver.Span);
             return true;
         }
 
@@ -1578,6 +1646,12 @@ public sealed class Binder
         }
 
         descriptor = candidates[0];
+
+        // The whole receiver, because the enum is what the whole of it names: `Level` is one token
+        // and `pkg.Level` is three, and neither has a narrower range that means the enum alone. This
+        // runs at every level of a member chain and records at none of them but the one that
+        // resolves, which is what keeps a chain from reporting its head over and over.
+        Use(SymbolId.ForType(descriptor), receiver.Span);
         return true;
     }
 
@@ -1696,6 +1770,7 @@ public sealed class Binder
         var field = messageType.Descriptor.FindFieldByName(member.Name.Text);
         if (field is not null)
         {
+            Use(SymbolId.ForField(field), member.Name.Span);
             return BindFieldAccess(receiver, field, member.Span, context);
         }
 
@@ -1739,6 +1814,10 @@ public sealed class Binder
     {
         IrExpression receiver;
         string methodName;
+
+        // Carried out of the switch beside the name, because only the switch knows which of the two
+        // callee shapes wrote it, and the call's own span covers the arguments as well.
+        SourceSpan methodNameSpan;
         MessageDescriptor receiverDescriptor;
 
         switch (invocation.Callee)
@@ -1772,6 +1851,7 @@ public sealed class Binder
 
                 receiver = boundReceiver;
                 methodName = member.Name.Text;
+                methodNameSpan = member.Name.Span;
                 receiverDescriptor = messageType.Descriptor;
                 break;
             }
@@ -1779,6 +1859,7 @@ public sealed class Binder
             case NameExpression name:
                 receiver = new IrThis(new MessageType(context.Receiver), name.Span);
                 methodName = name.Name.Text;
+                methodNameSpan = name.Name.Span;
                 receiverDescriptor = context.Receiver;
                 break;
 
@@ -1809,6 +1890,8 @@ public sealed class Binder
                 "Methods must be defined in an extend block for that message.");
             return Uncallable(receiver);
         }
+
+        Use(signature.Id, methodNameSpan);
 
         var arguments = new List<IrExpression>();
         for (var i = 0; i < invocation.Arguments.Count; i++)
@@ -1886,6 +1969,10 @@ public sealed class Binder
         FieldDescriptor? field;
         string name;
 
+        // Beside the name for the reason BindInvocation carries one: `has a.b` spans the keyword and
+        // the receiver too, and `b` is what an occurrence of the field means.
+        SourceSpan fieldNameSpan;
+
         switch (has.Operand)
         {
             // 'has customer.' names no field yet, so it is bound as the member access it is rather
@@ -1899,6 +1986,7 @@ public sealed class Binder
                 receiver = new IrThis(new MessageType(context.Receiver), bare.Span);
                 field = context.Receiver.FindFieldByName(bare.Name.Text);
                 name = bare.Name.Text;
+                fieldNameSpan = bare.Name.Span;
                 break;
 
             case MemberAccessExpression member:
@@ -1923,6 +2011,7 @@ public sealed class Binder
                 receiver = target;
                 field = message.Descriptor.FindFieldByName(member.Name.Text);
                 name = member.Name.Text;
+                fieldNameSpan = member.Name.Span;
                 break;
             }
 
@@ -1973,6 +2062,7 @@ public sealed class Binder
             return new IrLiteral(null, ErrorType.Instance, has.Span);
         }
 
+        Use(SymbolId.ForField(field), fieldNameSpan);
         return new IrFieldPresence(receiver, field, has.Span);
     }
 
