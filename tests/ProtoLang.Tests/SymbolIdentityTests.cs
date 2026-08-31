@@ -1,5 +1,6 @@
 using Google.Protobuf.Reflection;
 using ProtoLang.Ir;
+using ProtoLang.Semantics;
 using ProtoLang.Symbols;
 using Xunit;
 
@@ -427,10 +428,31 @@ public class SymbolIdentityTests
         => Compilation.Compile(TestPaths.WriteTempScript(source), [TestPaths.FixtureProtoDirectory]);
 
     private static IEnumerable<IrExpression> Expressions(CompilationResult result)
-        => IrWalk.Expressions(result.Module!);
+        => IrWalk.DescendantsAndSelf(result.Module!).OfType<IrExpression>();
 
+    /// <summary>
+    /// Every declaration a module makes: each method, its parameters, and every local and loop
+    /// binding in its body.
+    /// </summary>
+    /// <remarks>
+    /// Here rather than beside the published walkers, because a reference index wants exactly this
+    /// sweep and what shape it should take is #40's decision to make. Tests contribute none: a
+    /// <c>test</c> declares nothing of its own, and walking its target's parameters would report one
+    /// declaration once per test that calls it.
+    /// </remarks>
     private static IEnumerable<DeclarationSite> Declarations(CompilationResult result)
-        => IrWalk.Declarations(result.Module!);
+        => result.Module!.Methods.SelectMany(method =>
+            new[] { method.Signature.Declaration }
+                .Concat(method.Parameters.Select(parameter => parameter.Declaration))
+                .Concat(IrWalk.DescendantsAndSelf(method).SelectMany(DeclarationsIn)));
+
+    /// <inheritdoc cref="Declarations"/>
+    private static IReadOnlyList<DeclarationSite> DeclarationsIn(IrNode node) => node switch
+    {
+        IrVariableDeclaration declaration => [declaration.Local.Declaration],
+        IrForEach loop => [loop.Loop.Declaration],
+        _ => [],
+    };
 
     private static List<SymbolId> Identities(CompilationResult result)
         => Declarations(result).Select(declaration => declaration.Id).ToList();

@@ -1718,6 +1718,23 @@ public sealed class Binder
         return new IrLiteral(null, ErrorType.Instance, member.Span);
     }
 
+    /// <summary>Binds a call, whether or not there turns out to be anything to call.</summary>
+    /// <remarks>
+    /// <para>
+    /// Six paths below decide there is no method here. Every one of them still keeps the arguments,
+    /// in an <see cref="IrUncallableInvocation"/>, because the arguments are source the author wrote
+    /// and a call that does not resolve is the ordinary state of one being typed. Collapsing to an
+    /// error-typed literal spanning the whole call -- which is what every path used to do -- leaves
+    /// nothing at the positions inside the parentheses, which is exactly the region completion and
+    /// signature help ask about.
+    /// </para>
+    /// <para>
+    /// Arguments are bound once and only once. The two paths that reach a failure with them already
+    /// bound hand over the list they built; the four that fail before binding anything go through
+    /// <c>Uncallable</c>, which binds with no expected type -- there is no signature to expect
+    /// anything from. Binding twice would report every mistake inside an argument twice.
+    /// </para>
+    /// </remarks>
     private IrExpression BindInvocation(InvocationExpression invocation, Scope scope, MethodContext context)
     {
         IrExpression receiver;
@@ -1727,27 +1744,20 @@ public sealed class Binder
         switch (invocation.Callee)
         {
             // A callee whose name is still being typed is bound for what it is -- a receiver
-            // awaiting a member -- rather than looked up as a method called the empty string. The
-            // arguments are still bound, and dropped: there is no call to hang them off, but they
-            // are the author's code and have to be checked whatever the callee turned out to be.
+            // awaiting a member -- rather than looked up as a method called the empty string.
             case MemberAccessExpression { Name.IsMissing: true } member:
-            {
-                var awaiting = BindMemberAccess(member, scope, context);
-
-                foreach (var argument in invocation.Arguments)
-                {
-                    BindExpression(argument, scope, context, null);
-                }
-
-                return awaiting;
-            }
+                return Uncallable(BindMemberAccess(member, scope, context));
 
             case MemberAccessExpression member:
             {
                 var boundReceiver = BindExpression(member.Receiver, scope, context, null);
+
+                // Nothing is reported here: whatever went wrong with the receiver has been reported
+                // where it went wrong, and saying that a call on it also failed is that same mistake
+                // told a second time.
                 if (boundReceiver.Type is ErrorType)
                 {
-                    return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+                    return Uncallable(boundReceiver);
                 }
 
                 if (boundReceiver.Type is not MessageType messageType)
@@ -1757,7 +1767,7 @@ public sealed class Binder
                         "method call on a non-message value",
                         $"Type '{boundReceiver.Type.DisplayName}' has no methods.",
                         invocation.Span);
-                    return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+                    return Uncallable(boundReceiver);
                 }
 
                 receiver = boundReceiver;
@@ -1779,7 +1789,7 @@ public sealed class Binder
                     "Only ProtoLang methods can be called.",
                     invocation.Span,
                     "Calling target-language functions is not permitted (spec 20).");
-                return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+                return Uncallable(null);
         }
 
         if (!_methods.TryGetValue((receiverDescriptor.FullName, methodName), out var signature))
@@ -1790,7 +1800,7 @@ public sealed class Binder
                 $"'{receiverDescriptor.FullName}' has no ProtoLang method named '{methodName}'.",
                 invocation.Span,
                 "Methods must be defined in an extend block for that message.");
-            return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+            return Uncallable(receiver);
         }
 
         var arguments = new List<IrExpression>();
@@ -1808,7 +1818,11 @@ public sealed class Binder
                 $"'{methodName}' takes {signature.Parameters.Count} argument(s) "
                 + $"but {arguments.Count} were supplied.",
                 invocation.Span);
-            return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+
+            // The list that was just built, not a second binding of the same expressions: the loop
+            // above runs before this check precisely so that a mistake inside an argument is
+            // reported whether or not the right number of them were supplied.
+            return new IrUncallableInvocation(receiver, arguments, invocation.Span);
         }
 
         for (var i = 0; i < arguments.Count; i++)
@@ -1831,6 +1845,15 @@ public sealed class Binder
         }
 
         return new IrMethodCall(receiver, signature, arguments, invocation.Span);
+
+        // For the four paths that give up before any argument has been looked at. There is no
+        // signature to take an expected type from -- that is what they gave up on -- so each
+        // argument is bound for whatever it is on its own.
+        IrUncallableInvocation Uncallable(IrExpression? boundReceiver)
+            => new(
+                boundReceiver,
+                [.. invocation.Arguments.Select(argument => BindExpression(argument, scope, context, null))],
+                invocation.Span);
     }
 
     /// <summary>
