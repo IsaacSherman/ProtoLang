@@ -12,6 +12,25 @@ namespace ProtoLang.Ir;
 /// </summary>
 public sealed record IrModule(IReadOnlyList<IrMethod> Methods, IReadOnlyList<IrTest> Tests);
 
+/// <summary>Anything in the IR that is somewhere in the source text.</summary>
+/// <remarks>
+/// <para>
+/// What <see cref="Syntax.SyntaxNode"/> has always been for the other tree, and what the IR did
+/// without for as long as nothing asked it a question about a position. Every record below already
+/// ended in a <see cref="SourceSpan"/>; this only says so in one place, so that "the innermost node
+/// containing this offset" and "the chain of nodes above it" are expressible at all -- a list needs
+/// an element type, and statements and expressions had no type in common.
+/// </para>
+/// <para>
+/// Four things stay outside it. <see cref="IrModule"/> is the container and is nowhere in
+/// particular. <see cref="IrMethodSignature"/>, <see cref="IrLocal"/> and <see cref="IrParameter"/>
+/// are symbols rather than tree nodes: what they have is a <see cref="Symbols.DeclarationSite"/>,
+/// which is two ranges and an identity, and collapsing that to one span would be choosing which of
+/// the two an editor meant.
+/// </para>
+/// </remarks>
+public abstract record IrNode(SourceSpan Span);
+
 /// <summary>
 /// Identifies a method without carrying its body, so a call can reference a method declared later
 /// in the file (or in another extend block) without a construction cycle.
@@ -60,7 +79,22 @@ public sealed record IrLocal(DeclarationSite Declaration, PlType Type)
     public SymbolId Id => Declaration.Id;
 }
 
+/// <remarks>
+/// <para>
+/// Its <see cref="IrNode.Span"/> is the whole declaration, <c>fn</c> through the closing brace of
+/// the body, which is what it has always been -- taken from the signature's declaration site rather
+/// than recorded twice.
+/// </para>
+/// <para>
+/// It is computed once, at construction, and not on each read, which is the one thing to know before
+/// writing <c>method with { Signature = … }</c>: the copy carries the span of the declaration it was
+/// copied from, and would then report a location belonging to another method. Nothing does that
+/// today -- an <see cref="IrMethod"/> is built in one place, from the signature it keeps -- and if
+/// something needs to, it should build a new one rather than amend this.
+/// </para>
+/// </remarks>
 public sealed record IrMethod(IrMethodSignature Signature, IrBlock Body, bool IsVirtual)
+    : IrNode(Signature.Declaration.Extent)
 {
     public MessageDescriptor Receiver => Signature.Receiver;
 
@@ -69,12 +103,9 @@ public sealed record IrMethod(IrMethodSignature Signature, IrBlock Body, bool Is
     public PlType ReturnType => Signature.ReturnType;
 
     public IReadOnlyList<IrParameter> Parameters => Signature.Parameters;
-
-    /// <summary>The whole declaration, <c>fn</c> through the closing brace of the body.</summary>
-    public SourceSpan Span => Signature.Declaration.Extent;
 }
 
-public abstract record IrStatement(SourceSpan Span);
+public abstract record IrStatement(SourceSpan Span) : IrNode(Span);
 
 public sealed record IrBlock(IReadOnlyList<IrStatement> Statements, SourceSpan Span) : IrStatement(Span);
 
@@ -110,7 +141,7 @@ public sealed record IrContinue(SourceSpan Span) : IrStatement(Span);
 
 public sealed record IrExpressionStatement(IrExpression Expression, SourceSpan Span) : IrStatement(Span);
 
-public abstract record IrExpression(PlType Type, SourceSpan Span);
+public abstract record IrExpression(PlType Type, SourceSpan Span) : IrNode(Span);
 
 /// <summary>The implicit receiver of the enclosing method.</summary>
 public sealed record IrThis(MessageType MessageType, SourceSpan Span) : IrExpression(MessageType, Span);
@@ -305,13 +336,52 @@ public sealed record IrLiteral(object? Value, PlType LiteralType, SourceSpan Spa
 public sealed record IrMissingMemberAccess(IrExpression Receiver, SourceSpan Span)
     : IrExpression(ErrorType.Instance, Span);
 
+/// <summary>
+/// A call that could not be made: the callee is not a method, not a method of that receiver, not
+/// callable at all, or takes a different number of arguments than were written.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The arguments are the reason this exists. Every failure path in <c>BindInvocation</c> used to
+/// collapse to an error-typed literal spanning the whole call, which threw away expressions the
+/// author had written and left nothing at their positions -- and a call that does not resolve is the
+/// normal state of one being typed. Signature help and completion both ask about exactly the region
+/// inside the parentheses, so the arguments have to survive the failure of the call around them.
+/// </para>
+/// <para>
+/// <paramref name="Receiver"/> is null exactly where there is no receiver to speak of: a call
+/// through an expression that could never name a method, <c>1()</c> or <c>(quantity + 1)()</c>, has
+/// nothing that was resolved to hold. <b>Its callee is not bound either, and that is a limit rather
+/// than an oversight.</b> The parser's nesting budget bounds its own recursion but not the chain its
+/// postfix loop builds, so a file of 5000 unbalanced parentheses recovers into 2436 nested
+/// invocations; descending them turned a bind that took 183ms into one that did not finish inside a
+/// minute, and a language server may not be hung by a buffer. A position on such a callee is a
+/// question for the syntax tree, which has the whole of it.
+/// </para>
+/// <para>
+/// A wrong-typed argument does <em>not</em> produce one of these. That call resolved: the receiver,
+/// the method and the signature are all known, and only one argument's type is wrong, so it stays an
+/// <see cref="IrMethodCall"/> and keeps the callee that go-to-definition and signature help are
+/// going to ask it for.
+/// </para>
+/// <para>
+/// No backend handles this, and none has to, for the reason <see cref="IrMissingMemberAccess"/>
+/// gives: one exists only when a diagnostic was reported, so <c>CompilationResult.Success</c> is
+/// false and no backend is ever handed the module.
+/// </para>
+/// </remarks>
+public sealed record IrUncallableInvocation(
+    IrExpression? Receiver,
+    IReadOnlyList<IrExpression> Arguments,
+    SourceSpan Span) : IrExpression(ErrorType.Instance, Span);
+
 public sealed record IrTest(
     IrMethodSignature Target,
     string Name,
     IrTestMessageValue Receiver,
     IReadOnlyList<IrTestArgument> Arguments,
     IrTestExpectation Expectation,
-    SourceSpan Span)
+    SourceSpan Span) : IrNode(Span)
 {
     /// <summary>
     /// A stable name for this test that does not depend on any target language.
@@ -324,20 +394,20 @@ public sealed record IrTest(
     public string Identity => $"{Target.Receiver.FullName}.{Target.Name}: {Name}";
 }
 
-public sealed record IrTestArgument(string Name, IrExpression Value, SourceSpan Span);
+public sealed record IrTestArgument(string Name, IrExpression Value, SourceSpan Span) : IrNode(Span);
 
 public sealed record IrTestMessageValue(
     MessageDescriptor Descriptor,
     IReadOnlyList<IrTestFieldValue> Fields,
-    SourceSpan Span);
+    SourceSpan Span) : IrNode(Span);
 
 public sealed record IrTestFieldValue(
     FieldDescriptor Field,
     IrExpression? ScalarValue,
     IrTestMessageValue? MessageValue,
-    SourceSpan Span);
+    SourceSpan Span) : IrNode(Span);
 
-public abstract record IrTestExpectation(SourceSpan Span);
+public abstract record IrTestExpectation(SourceSpan Span) : IrNode(Span);
 
 public sealed record IrTestReturnExpectation(IrExpression Value, SourceSpan Span) : IrTestExpectation(Span);
 

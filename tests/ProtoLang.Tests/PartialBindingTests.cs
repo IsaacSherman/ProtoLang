@@ -1,4 +1,5 @@
 using ProtoLang.Ir;
+using ProtoLang.Semantics;
 using ProtoLang.Types;
 using Xunit;
 
@@ -335,6 +336,88 @@ public class PartialBindingTests
         Assert.Same(result.Module, result.EmittableModule);
     }
 
+    // ------- a call that could not be made
+
+    /// <summary>
+    /// A call fails for six different reasons and keeps its arguments for one: they are source the
+    /// author wrote, they are where the caret is while the call is being typed, and every one of
+    /// these paths used to answer an editor with an error-typed literal spanning the whole call.
+    /// </summary>
+    [Theory]
+    [InlineData("return nosuchname.f(1, 2);")]
+    [InlineData("return quantity.f(1, 2);")]
+    [InlineData("return 1(1, 2);")]
+    [InlineData("return nosuchmethod(1, 2);")]
+    [InlineData("return f(1, 2);")]
+    [InlineData("return quantity.(1, 2);")]
+    public void ACallThatCouldNotBeMadeStillHoldsItsArguments(string body)
+    {
+        var result = CompileSource(Prelude + "extend InvoiceItem { fn f() -> int64 { " + body + " } }");
+
+        var call = Assert.Single(Walk(result.Module!).OfType<IrUncallableInvocation>());
+
+        Assert.Equal(2, call.Arguments.Count);
+    }
+
+    /// <summary>
+    /// A call whose only fault is an argument's type is not one of those. The receiver, the method
+    /// and the signature all resolved, and an editor asking what is being called there has an
+    /// answer that would be thrown away by treating it as uncallable.
+    /// </summary>
+    [Fact]
+    public void ACallWhoseArgumentHasTheWrongTypeStillKnowsWhatItCalls()
+    {
+        var result = CompileSource(
+            Prelude
+            + "extend InvoiceItem {\n"
+            + "    fn g(a: int64) -> int64 { return a; }\n"
+            + "    fn f() -> int64 { return g(\"s\"); }\n"
+            + "}");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0046");
+
+        var call = Assert.Single(Walk(result.Module!).OfType<IrMethodCall>());
+
+        Assert.Equal("g", call.Target.Name);
+    }
+
+    /// <summary>
+    /// A callee that could never name a method keeps the call's arguments and nothing else. The
+    /// callee is where this stops: the parser's nesting budget bounds its own recursion and not the
+    /// chain its postfix loop builds, so descending one is how a buffer of unbalanced parentheses
+    /// stops a bind from finishing. <see cref="BinderResilienceTests"/> is what says so out loud.
+    /// </summary>
+    [Fact]
+    public void ACalleeThatCouldNeverNameAMethodLeavesNoReceiverBehind()
+    {
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn f() -> int64 { return (quantity + 1)(77); } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0043");
+
+        var call = Assert.Single(Walk(result.Module!).OfType<IrUncallableInvocation>());
+
+        Assert.Null(call.Receiver);
+        Assert.Equal(77L, Assert.IsType<IrLiteral>(Assert.Single(call.Arguments)).Value);
+    }
+
+    /// <summary>
+    /// The receiver survives too, where there was one. It is the value the call would have been made
+    /// on, and go-to-definition and hover are asked about it whether or not the call resolved.
+    /// </summary>
+    [Fact]
+    public void ACallOnAValueWithNoMethodsKeepsTheReceiverItWasMadeOn()
+    {
+        var result = CompileSource(
+            Prelude + "extend InvoiceItem { fn f() -> int64 { return quantity.nope(1); } }");
+
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0042");
+
+        var call = Assert.Single(Walk(result.Module!).OfType<IrUncallableInvocation>());
+
+        Assert.Equal("quantity", Assert.IsType<IrFieldAccess>(call.Receiver).Field.Name);
+    }
+
     // ------- one mistake, one diagnostic
 
     /// <summary>
@@ -349,6 +432,29 @@ public class PartialBindingTests
             + "extend InvoiceItem { fn f() -> int64 { var x: int64 = nope; return x + x * x; } }");
 
         Assert.Equal("PL0037", Assert.Single(result.Diagnostics).Code);
+    }
+
+    /// <summary>
+    /// The same property inside a call that cannot be made. Every failure path binds its arguments
+    /// exactly once: two of them arrive with the arguments already bound and hand over the list they
+    /// built, and binding a second time would report one bad name twice.
+    /// </summary>
+    [Theory]
+    [InlineData("return nosuchname.f(nope);")]
+    [InlineData("return quantity.f(nope);")]
+    [InlineData("return 1(nope);")]
+    [InlineData("return nosuchmethod(nope);")]
+    [InlineData("return f(nope, 1);")]
+    [InlineData("return quantity.(nope);")]
+    public void OneUnresolvableNameInsideAFailedCallAlsoProducesOneDiagnostic(string body)
+    {
+        var result = CompileSource(Prelude + "extend InvoiceItem { fn f() -> int64 { " + body + " } }");
+
+        // The name in the argument, not every unresolvable name: the receiver of the first case is
+        // itself unknown, which is what puts that call on the path being tested.
+        Assert.Single(
+            result.Diagnostics,
+            d => d.Code == "PL0037" && d.Message.Contains("'nope'", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -465,5 +571,6 @@ public class PartialBindingTests
     }
 
     /// <summary>Every expression in a module, however deeply nested. See <see cref="IrWalk"/>.</summary>
-    private static IEnumerable<IrExpression> Walk(IrModule module) => IrWalk.Expressions(module);
+    private static IEnumerable<IrExpression> Walk(IrModule module)
+        => IrWalk.DescendantsAndSelf(module).OfType<IrExpression>();
 }

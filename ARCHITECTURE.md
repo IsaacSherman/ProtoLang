@@ -72,6 +72,13 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    compilation produced a whole program.
 9. **Emit.** Backends consume the IR only.
 
+Both trees are **addressable**: [`SemanticModel.For(result)`](src/ProtoLang.Core/Semantics/SemanticModel.cs)
+answers "what is at this offset" for the syntax tree and for the IR, hands back the chain of nodes
+above the answer, and crosses between the two by span. The rule the awkward positions follow — a
+caret at the end of an identifier, between two nodes, on an empty range — is written once in
+`PositionSearch` and documented on the query methods. Nothing is indexed or cached: a keystroke
+produces a new compilation and a new model over it.
+
 ## Key types
 
 | Concern | Type | File |
@@ -82,7 +89,10 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
 | Offset ↔ line/column | `LineMap` | [Diagnostics/LineMap.cs](src/ProtoLang.Core/Diagnostics/LineMap.cs) |
 | Messages | `Diagnostic`, `DiagnosticBag` | [Diagnostics/Diagnostic.cs](src/ProtoLang.Core/Diagnostics/Diagnostic.cs) |
 | Type system | `PlType` and friends | [Types/PlType.cs](src/ProtoLang.Core/Types/PlType.cs) |
-| Typed IR | `IrModule` … `IrLiteral` | [Ir/Ir.cs](src/ProtoLang.Core/Ir/Ir.cs) |
+| Typed IR | `IrNode`, `IrModule` … `IrLiteral` | [Ir/Ir.cs](src/ProtoLang.Core/Ir/Ir.cs) |
+| Position queries | `SemanticModel` | [Semantics/SemanticModel.cs](src/ProtoLang.Core/Semantics/SemanticModel.cs) |
+| What is here, and what holds it | `SyntaxLocation`, `IrLocation` | [Semantics/NodePath.cs](src/ProtoLang.Core/Semantics/NodePath.cs) |
+| Down through a tree | `SyntaxWalk`, `IrWalk` | [Semantics/SyntaxWalk.cs](src/ProtoLang.Core/Semantics/SyntaxWalk.cs) |
 | Where a declaration is | `DeclarationSite` | [Symbols/DeclarationSite.cs](src/ProtoLang.Core/Symbols/DeclarationSite.cs) |
 | Which symbol a reference means | `SymbolId` | [Symbols/SymbolId.cs](src/ProtoLang.Core/Symbols/SymbolId.cs) |
 | What kind of symbol it is | `SymbolKind` | [Symbols/SymbolKind.cs](src/ProtoLang.Core/Symbols/SymbolKind.cs) |
@@ -121,8 +131,8 @@ reaches a backend only as prose for the generated file's header.
 One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized by layer:
 `LexerTests`, `ParserTests`, `ParserResilienceTests` and `BinderResilienceTests` (fuzz),
 `SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
-`ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`, and the
-scaffolding and smoke suites.
+`SymbolIdentityTests`, `PositionQueryTests`, `TreeWalkTests`, `ImportResolutionTests`,
+`ProjectConfigTests`, `BackendTests`, `NameMappingTests`, and the scaffolding and smoke suites.
 
 - **Conformance corpus** — [tests/conformance/vectors](tests/conformance/vectors) holds `.protolang`
   files whose `test` blocks *are* the vectors, compiled and executed in both backends. This is the
@@ -152,7 +162,9 @@ There is **no CI**. `dotnet test` locally is the gate.
 
 Epic [#47](https://github.com/IsaacSherman/ProtoLang/issues/47) makes the semantic model
 *addressable* ("what is at line 12, column 7?") and *durable* (the binder discarded everything it
-knew about a declaration as it went), then builds a language server on top. Only four sub-issues
-touch existing compiler code — #35, #36, #37 and #39 — and all four are done. Everything from here
-should be additive: new types, new projects. Rewriting the binder is the signal to stop and
-re-scope.
+knew about a declaration as it went), then builds a language server on top. Both properties are in:
+#35, #36, #37 and #39 were the four sub-issues expected to touch existing compiler code, and #38
+touched two more things than it meant to — the IR gained an `IrNode` base so a path through it is
+expressible, and `BindInvocation` stopped discarding the arguments of a call it could not resolve.
+Everything from here should be additive: new types, new projects. Rewriting the binder is the signal
+to stop and re-scope.
