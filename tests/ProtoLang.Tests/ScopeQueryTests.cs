@@ -432,11 +432,37 @@ public class ScopeQueryTests
     [Fact]
     public void ALoopBodyWithNoClosingBraceStillAnswersAtItsEnd()
     {
-        var source = Truncated("for value in nested_values {\n            var inner: int64 = 1;");
+        var source = Truncated("for value in nested_values {\n            var stride: int64 = 1;");
         var names = NamesAt(SemanticModel.For(Compile(source, TestPaths.FixtureProtoDirectory)), source.Length);
 
         Assert.Contains("value", names);
-        Assert.Contains("inner", names);
+        Assert.Contains("stride", names);
+    }
+
+    /// <summary>
+    /// A closed block can be the last thing in an unclosed file, and it is still closed. The caret
+    /// at the end of the file is inside the method, which nothing terminated, and outside the loop,
+    /// which a brace did -- so the loop's names are gone there and the method's are not. Inferring
+    /// "unterminated" from "ends where the file ends" gets this exactly backwards, and a file being
+    /// typed into ends this way constantly: the last whole construct before the hole is a closed one.
+    /// </summary>
+    /// <remarks>
+    /// Neither local is named for a field of <c>Outer</c>, which would make its assertion pass
+    /// whatever the query did with the local.
+    /// </remarks>
+    [Fact]
+    public void AClosedBlockAtTheEndOfAnUnclosedFileIsStillClosed()
+    {
+        var source = Truncated(
+            "var total: int64 = 1;\n\n        for value in nested_values {\n"
+            + "            var stride: int64 = 2;\n        }");
+        var names = NamesAt(SemanticModel.For(Compile(source, TestPaths.FixtureProtoDirectory)), source.Length);
+
+        Assert.EndsWith("}", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("value", names);
+        Assert.DoesNotContain("stride", names);
+        Assert.Contains("total", names);
+        Assert.Contains("count", names);
     }
 
     [Fact]

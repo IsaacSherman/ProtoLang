@@ -56,9 +56,6 @@ public sealed class Binder
     /// the fact this list exists to carry, and the one no later walk of the tree could recover.
     /// </remarks>
     private readonly List<ScopeEntry> _scope = [];
-
-    /// <summary>Where the source being bound ran out. See <see cref="LastVisibleOffsetIn"/>.</summary>
-    private int _endOfFile;
     private readonly NumericPolicy _policy;
     private readonly ProjectConfig _config;
     private readonly SourceIdentity _document;
@@ -152,8 +149,6 @@ public sealed class Binder
     /// </remarks>
     public IrModule Bind(CompilationUnit unit)
     {
-        _endOfFile = unit.Span.End.Offset;
-
         // Pass 1: resolve extend targets and collect signatures.
         var resolvedExtends = new List<(ExtendDeclaration Declaration, MessageDescriptor Receiver)>();
 
@@ -243,8 +238,8 @@ public sealed class Binder
         => _scope.Add(new ScopeEntry(declaration, type, visibleFrom, scope.LastVisibleOffset));
 
     /// <inheritdoc cref="ScopeEntry.LastOffsetInside"/>
-    private int LastVisibleOffsetIn(SourceSpan block)
-        => ScopeEntry.LastOffsetInside(block, _endOfFile);
+    private static int LastVisibleOffsetIn(BlockStatement block)
+        => ScopeEntry.LastOffsetInside(block.Span, block.IsClosed);
 
     /// <summary>A scope holding nothing, for an expression with no locals or parameters to see.</summary>
     /// <remarks>
@@ -599,7 +594,7 @@ public sealed class Binder
         // The body, not the whole declaration. A parameter is only ever written as a value, and the
         // header holds no expression to write one in: a later parameter's type resolves to a message
         // or an enum and could not name a parameter if it tried.
-        var scope = new Scope(null, LastVisibleOffsetIn(method.Body.Span));
+        var scope = new Scope(null, LastVisibleOffsetIn(method.Body));
 
         foreach (var parameter in signature.Parameters)
         {
@@ -1026,7 +1021,7 @@ public sealed class Binder
 
     private IrBlock BindBlock(BlockStatement block, Scope parent, MethodContext context)
     {
-        var scope = new Scope(parent, LastVisibleOffsetIn(block.Span));
+        var scope = new Scope(parent, LastVisibleOffsetIn(block));
         var statements = new List<IrStatement>();
 
         foreach (var statement in block.Statements)
@@ -1039,7 +1034,7 @@ public sealed class Binder
             context = context with { Present = Advance(context.Present, bound) };
         }
 
-        return new IrBlock(statements, block.Span);
+        return new IrBlock(statements, block.Span) { IsClosed = block.IsClosed };
     }
 
     /// <summary>
@@ -1314,7 +1309,11 @@ public sealed class Binder
             elementType = ErrorType.Instance;
         }
 
-        var loopScope = new Scope(scope, LastVisibleOffsetIn(statement.Span));
+        // The for statement ends where its body does, so the body is what says whether anything
+        // closed it.
+        var loopScope = new Scope(
+            scope,
+            ScopeEntry.LastOffsetInside(statement.Span, statement.Body.IsClosed));
 
         // The extent is the whole loop rather than its header: the parser records no span for the
         // header alone, and a client showing a loop binding in context wants the loop it binds over.
@@ -2566,7 +2565,7 @@ public sealed class Binder
         /// The last offset at which what this scope holds can still be named. It exists so a scope
         /// can be published rather than only used: a chain of parent pointers means nothing once the
         /// descent that built it has returned, while an offset still answers the question a caret
-        /// asks. See <see cref="LastVisibleOffsetIn"/> for why it is not simply the end of a span.
+        /// asks. See <see cref="ScopeEntry.LastOffsetInside"/> for why it is not simply the end of a span.
         /// </param>
         public Scope(Scope? parent, int lastVisibleOffset)
         {

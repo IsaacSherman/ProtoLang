@@ -25,11 +25,7 @@ namespace ProtoLang.Semantics;
 internal static class ScopeSearch
 {
     /// <inheritdoc cref="SemanticModel.ScopeAt"/>
-    /// <param name="endOfFile">
-    /// Where the source ran out, which is what tells a method whose body the parser closed from one
-    /// it could not; see <see cref="ScopeEntry.LastOffsetInside"/>.
-    /// </param>
-    public static ScopeAtPosition? At(IrModule module, int offset, int endOfFile)
+    public static ScopeAtPosition? At(IrModule module, int offset)
     {
         // The containment and tie-break rules are PositionSearch's, borrowed rather than restated so
         // that one caret cannot be told it is inside a method by one query and outside it by this.
@@ -64,7 +60,7 @@ internal static class ScopeSearch
         // is what keeps the two from drifting apart.
         return enclosing[0] switch
         {
-            IrMethod method when ScopeEntry.Inside(method.Body.Span, offset, endOfFile) => new ScopeAtPosition(
+            IrMethod method when ScopeEntry.Inside(method.Body.Span, offset, method.Body.IsClosed) => new ScopeAtPosition(
                 new MessageType(method.Signature.Receiver),
                 [.. declared, .. ReachableFields(method.Signature.Receiver, declared)]),
 

@@ -368,10 +368,12 @@ public sealed class Parser
             else if (!TryEnterNesting())
             {
                 // Message fixtures nest, so they carry the same budget as blocks and expressions.
+                // Whether the closer was found does not change a fixture: it declares no name, so
+                // nothing's visibility ends at its brace.
                 var abandonedEnd = Current.Span;
                 if (Match(TokenKind.OpenBrace))
                 {
-                    abandonedEnd = SkipBalancedBlock();
+                    TrySkipBalancedBlock(out abandonedEnd);
                 }
 
                 fields.Add(new TestMessageFieldInitializer(fieldName, [], Spanning(start, abandonedEnd)));
@@ -607,7 +609,8 @@ public sealed class Parser
         // Blocks nest through if/while/for bodies, so they need the same budget expressions do.
         if (!TryEnterNesting())
         {
-            return new BlockStatement([], Spanning(start, SkipBalancedBlock()));
+            var skipped = TrySkipBalancedBlock(out var closer);
+            return new BlockStatement([], Spanning(start, closer)) { IsClosed = skipped };
         }
 
         try
@@ -626,8 +629,8 @@ public sealed class Parser
                 }
             }
 
-            var end = Expect(TokenKind.CloseBrace).Span;
-            return new BlockStatement(statements, Spanning(start, end));
+            var closed = TryExpect(TokenKind.CloseBrace, out var end);
+            return new BlockStatement(statements, Spanning(start, end.Span)) { IsClosed = closed };
         }
         finally
         {
@@ -636,10 +639,21 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// Consumes tokens through the closer matching an already-consumed <c>{</c>, and returns that
-    /// closer's span. Used to step over a construct too deeply nested to descend into.
+    /// Consumes tokens through the closer matching an already-consumed <c>{</c>. Used to step over a
+    /// construct too deeply nested to descend into.
     /// </summary>
-    private SourceSpan SkipBalancedBlock()
+    /// <param name="closer">
+    /// The closing brace's range, or the empty range at the end of the file when the tokens ran out
+    /// before it did.
+    /// </param>
+    /// <returns>True when a matching closer was really there.</returns>
+    /// <remarks>
+    /// The answer is published rather than inferred from <paramref name="closer"/>, for the reason
+    /// <see cref="TryExpect"/> gives: a stand-in is indistinguishable from a real token, and here
+    /// what turns on the difference is where the block's names stop. See
+    /// <see cref="BlockStatement.IsClosed"/>.
+    /// </remarks>
+    private bool TrySkipBalancedBlock(out SourceSpan closer)
     {
         var depth = 1;
 
@@ -654,14 +668,16 @@ public sealed class Parser
                 depth--;
                 if (depth == 0)
                 {
-                    return Advance().Span;
+                    closer = Advance().Span;
+                    return true;
                 }
             }
 
             Advance();
         }
 
-        return Current.Span;
+        closer = Current.Span;
+        return false;
     }
 
     private Statement ParseStatement()

@@ -71,24 +71,26 @@ public sealed record ScopeEntry(
     public static int FirstOffsetInside(SourceSpan block) => block.Start.Offset + 1;
 
     /// <summary>The last offset inside <paramref name="block"/>: the brace that closes it.</summary>
-    /// <param name="endOfFile">
-    /// Where the source ran out, which is what tells a closed block from one nothing closed.
+    /// <param name="closed">
+    /// Whether the parser found that brace; see <see cref="Syntax.BlockStatement.IsClosed"/>.
     /// </param>
     /// <remarks>
-    /// One before the end, because a <see cref="SourceSpan"/> is half-open and the last character of
-    /// a block is its closing brace: a caret one past that brace has left the block, and that is
-    /// precisely where <c>} else {</c> and the end of every nested block put one.
+    /// One before the end when there is a brace, because a <see cref="SourceSpan"/> is half-open and
+    /// the last character of a block is that brace: a caret one past it has left the block, and that
+    /// is precisely where <c>} else {</c> and the end of every nested block put one.
     /// <para>
-    /// Unless the parser never found the brace. A block that ran out of file ends where the file
-    /// does, and that offset is not a delimiter -- it is the hole the author is typing into, and the
-    /// position an editor asks about most while a file is incomplete. Nothing else can put a block's
-    /// end there, which is what makes the comparison sound.
+    /// When there is no brace the end is not a delimiter at all -- it is the hole the author is
+    /// typing into, the position an editor asks about most while a file is incomplete -- so it is
+    /// inside. This is asked of the parser rather than inferred from the end of the file, because a
+    /// block that <em>was</em> closed is very often the last thing before the hole, and its brace is
+    /// then the final character of the file.
     /// </para>
     /// </remarks>
-    public static int LastOffsetInside(SourceSpan block, int endOfFile)
-        => block.End.Offset >= endOfFile ? endOfFile : block.End.Offset - 1;
+    public static int LastOffsetInside(SourceSpan block, bool closed)
+        => closed ? block.End.Offset - 1 : block.End.Offset;
 
     /// <summary>Whether <paramref name="offset"/> is inside <paramref name="block"/>'s braces.</summary>
-    public static bool Inside(SourceSpan block, int offset, int endOfFile)
-        => offset >= FirstOffsetInside(block) && offset <= LastOffsetInside(block, endOfFile);
+    /// <inheritdoc cref="LastOffsetInside" path="/param"/>
+    public static bool Inside(SourceSpan block, int offset, bool closed)
+        => offset >= FirstOffsetInside(block) && offset <= LastOffsetInside(block, closed);
 }

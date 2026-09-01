@@ -164,7 +164,16 @@ public sealed record IrMethod(IrMethodSignature Signature, IrBlock Body, bool Is
 
 public abstract record IrStatement(SourceSpan Span) : IrNode(Span);
 
-public sealed record IrBlock(IReadOnlyList<IrStatement> Statements, SourceSpan Span) : IrStatement(Span);
+public sealed record IrBlock(IReadOnlyList<IrStatement> Statements, SourceSpan Span) : IrStatement(Span)
+{
+    /// <inheritdoc cref="Syntax.BlockStatement.IsClosed"/>
+    /// <remarks>
+    /// Carried through from the syntax rather than re-derived, because it is a fact about the tokens
+    /// and nothing below the parser has any. True for a block the binder synthesized, which is not
+    /// delimited at all and so is missing nothing.
+    /// </remarks>
+    public bool IsClosed { get; init; } = true;
+}
 
 public sealed record IrVariableDeclaration(IrLocal Local, IrExpression Initializer, SourceSpan Span)
     : IrStatement(Span);
