@@ -1,16 +1,16 @@
-# ProtoLang Specification Template
+# ProtoLang Specification
 
-Status: Draft template  
+Status: Living draft, synchronized with current implementation
 Spec version: TBD  
-Last updated: 2026-08-13  
+Last updated: 2026-08-30
 Target protobuf versions: TBD  
-Target language backends: C#, C++, Python, TBD  
+Target language backends: C# and C++ implemented; Python is planned but not present
 
 ## 1. Purpose
 
 ProtoLang is a deliberately small language for defining portable behavior over Protocol Buffer message types.
 
-ProtoLang source files define methods, helper functions, and related behavior once, then compile that behavior into target languages such as C#, C++, Python, and potentially others.
+ProtoLang source files define methods and related behavior once, then compile that behavior into target languages. The current implementation emits C# and C++.
 
 The language is intended to describe core semantic behavior, not target-language idioms.
 
@@ -35,7 +35,7 @@ ProtoLang should:
 - Compile through a typed intermediate representation before target-language emission.
 - Support per-language translation backends.
 - Be small enough that generated behavior can be audited and tested across languages.
-- Produce predictable generated APIs for C#, C++, Python, and future backends.
+- Produce predictable generated APIs for C#, C++, and future backends.
 - Allow conformance testing from shared source and expected behavior vectors.
 
 ## 3. Non-Goals
@@ -64,7 +64,7 @@ Field:
 : A protobuf field belonging to a message.
 
 ProtoLang method:
-: A method defined by ProtoLang and associated with a protobuf message or namespace.
+: A method defined by ProtoLang and associated with a protobuf message.
 
 Receiver:
 : The message instance a method operates on, equivalent to `this` or `self` in target languages.
@@ -99,13 +99,14 @@ ProtoLang source files use the extension:
 .protolang
 ```
 
-Open Question:
+Decision:
 
-- Should the extension be `.plang`, `.protox`, `.pbehavior`, or something else?
+- The extension is `.protolang`. The CLI and tests use this extension, and path-based compilation
+  treats the file path as a source identity rather than deriving semantics from any alternate suffix.
 
 ### 5.2 Relationship to `.proto`
 
-A ProtoLang file imports one or more protobuf schema files.
+A ProtoLang file imports one or more protobuf schema files directly.
 
 Example:
 
@@ -119,20 +120,35 @@ extend InventoryItem {
 }
 ```
 
+Normative Requirements:
+
+- Imports use `import proto "path/to/schema.proto";`.
+- The path is resolved against compiler include paths, then against the source file's own directory.
+- Well-known protobuf imports may be resolved by the descriptor loader's implicit include paths.
+- A file with no `import proto` declaration does not reach binding (`PL0001`).
+- ProtoLang does not define an independent package declaration. Message, enum, and field names come
+  from protobuf descriptors.
+- One file may import schemas whose descriptors contain multiple protobuf packages; each `extend`
+  resolves its target message through the descriptor pool.
+
 Open Questions:
 
-- Should imports reference `.proto` files directly, compiled descriptor sets, or both? `Ultimately, I'd like to see this code embedded IN proto files... but I don't know if we can. ~IS`
-- Should ProtoLang support packages/namespaces independently of protobuf packages?
-- Should one ProtoLang file be allowed to extend messages from multiple protobuf packages?
+- Should descriptor-set input exist in addition to direct `.proto` imports?
+- Should ProtoLang ever be embedded directly in `.proto` files?
 
 ### 5.3 Compilation Unit
 
-A compilation unit consists of:
+A compilation unit currently consists of:
 
-- One or more ProtoLang source files.
+- One ProtoLang source file.
 - The protobuf descriptors referenced by those files.
 - Compiler options.
 - Backend target configuration.
+
+Implementation Note:
+
+- The `Compilation` object is internally shaped around a source set, but the public implementation
+  still binds only one source document. Multi-file binding is intentionally not exposed yet.
 
 ## 6. Lexical Structure
 
@@ -140,21 +156,16 @@ This section defines the token-level syntax.
 
 ### 6.1 Character Set
 
-TBD.
-
-Recommended baseline:
-
 - Source files are UTF-8.
-- Identifiers use a restricted ASCII subset initially.
-- String literals support explicit escape sequences.
-
-Open Question:
-
-- Should Unicode identifiers be allowed in version 1?
+- Identifiers use .NET character classification: the first character is `char.IsLetter` or `_`, and
+  following characters are `char.IsLetterOrDigit` or `_`.
+- String literals support `\n`, `\t`, `\r`, `\\`, and `\"`.
+- A string literal ends at the closing quote or at the end of the line. Multi-line string literals
+  are not supported.
+- Numeric literals use invariant-culture parsing. Integer literals fit in signed 64-bit storage
+  before contextual typing; floating literals contain a fractional part and have no exponent syntax.
 
 ### 6.2 Comments
-
-Candidate syntax:
 
 ```protolang
 // line comment
@@ -164,54 +175,68 @@ Candidate syntax:
 */
 ```
 
-Open Question:
+Normative Requirements:
 
-- Are block comments necessary for version 1?
+- `//` starts a line comment.
+- `/* ... */` starts a block comment.
+- Block comments are not nested.
+- An unterminated block comment is `PL0004`.
 
 ### 6.3 Identifiers
 
-Candidate rule:
+The implemented rule is:
 
 ```text
-identifier = [A-Za-z_][A-Za-z0-9_]*
+identifier = (.NET letter | "_") { .NET letter-or-digit | "_" }
 ```
 
-Identifiers are case-sensitive unless otherwise specified.
+Identifiers are case-sensitive. ProtoLang does not impose a naming convention on source names.
+Backends may map method names to target conventions when emitting public APIs (24).
 
 Open Question:
 
-- Should ProtoLang require a single naming convention, or allow backend-specific casing transformation?
+- Should source names be restricted to ASCII before language stabilization to avoid backend-specific
+  identifier edge cases?
 
 ### 6.4 Keywords
 
-Reserved keywords, candidate list. Note this list is missing `import`, `proto`, `double`, `float`,
-and `bytes`, all of which the language already uses elsewhere in this document; the implementation
-reserves them too, along with `on_zero` and `fail` (10.2.1), `as` (10.3), and the `test`, `receiver`,
-`arg`, and `expect` keywords of the unit test syntax (25).
+Reserved keywords:
 
 ```text
 and
 as
+arg
 bool
 break
+bytes
 case
 continue
+double
 else
 enum
+expect
 extend
+fail
 false
+float
 fn
 for
+has
 if
+import
 in
 int32
 int64
 message
 not
+on_zero
 or
+proto
+receiver
 return
 string
 switch
+test
 true
 uint32
 uint64
@@ -223,18 +248,18 @@ while
 
 Open Question:
 
-- Should `switch` be included in version 1?
+- `case`, `enum`, `message`, and `switch` are reserved by the lexer but do not yet have source
+  syntax.
 
 ## 7. Grammar and Syntax
 
-This section should eventually contain a complete grammar.
+This section describes the grammar implemented by the parser. The grammar is still summarized rather
+than mechanically exhaustive.
 
-### 7.1 Template Grammar
-
-Illustrative, non-final grammar:
+### 7.1 Implemented Grammar
 
 ```ebnf
-source_file       = { import_decl | extend_decl | function_decl };
+source_file       = { import_decl | extend_decl | test_decl };
 
 import_decl       = "import" "proto" string_literal ";";
 
@@ -245,27 +270,58 @@ method_decl       = [ "virtual" ] "fn" identifier
                     [ "->" type_ref ]
                     block;
 
-function_decl     = "fn" qualified_name
-                    "(" [ parameter_list ] ")"
-                    [ "->" type_ref ]
-                    block;
-
 parameter_list    = parameter { "," parameter };
 parameter         = identifier ":" type_ref;
 
 block             = "{" { statement } "}";
+
+statement         = var_decl
+                  | return_stmt
+                  | if_stmt
+                  | while_stmt
+                  | for_in_stmt
+                  | break_stmt
+                  | continue_stmt
+                  | block
+                  | assignment_stmt
+                  | expression_stmt;
+
+var_decl          = "var" identifier [ ":" type_ref ] "=" expression ";";
+return_stmt       = "return" [ expression ] ";";
+if_stmt           = "if" expression block [ "else" ( if_stmt | block ) ];
+while_stmt        = "while" expression block;
+for_in_stmt       = "for" identifier "in" expression block;
+break_stmt        = "break" ";";
+continue_stmt     = "continue" ";";
+assignment_stmt   = expression "=" expression ";";
+expression_stmt   = expression ";";
+
+test_decl         = "test" qualified_name string_literal
+                    "{" { receiver_fixture | test_arg | test_expectation } "}";
+receiver_fixture  = "receiver" "{" { fixture_field } "}";
+test_arg          = "arg" identifier "=" expression ";";
+test_expectation  = "expect" ( "return" expression | "fail" ) ";";
 ```
 
 Normative Requirement:
 
 - The final grammar must be unambiguous.
 - Backend code generation must not depend on parser quirks or target-language parsing.
+- Semicolons are mandatory after imports, variable declarations, `return`, `break`, `continue`,
+  assignment statements, expression statements, scalar fixture fields, test arguments, and test
+  expectations.
+- Top-level helper functions are not implemented.
+- Variable declarations may state an explicit type or infer from the initializer.
+- A test declaration must contain a receiver fixture and an expectation. The parser accepts
+  `receiver`, `arg`, and `expect` members in any order and reports missing required members after
+  the block is parsed.
+- Parser recovery synthesizes missing tokens and missing names so later compiler stages can continue
+  reporting useful diagnostics and editor tooling can still anchor completion points.
 
 Open Questions:
 
-- Should semicolons be mandatory?
-- Should variable declarations require explicit types, inferred types, or both?
-- Should top-level helper functions be allowed in version 1?
+- Should top-level helper functions be allowed in a later version?
+- Should this section be replaced with exact EBNF generated from or checked against the parser?
 
 ## 8. Type System
 
@@ -277,12 +333,14 @@ Types come from:
 - Protobuf enum types.
 - Protobuf message types.
 
-Normative Candidate:
+Normative Requirements:
 
 - ProtoLang does not define an independent application type system.
 - ProtoLang value types are protobuf scalar primitives, protobuf enums, and protobuf messages.
 - ProtoLang does not add non-protobuf numeric types such as `decimal`.
 - `void` is a method return marker only; it is not a protobuf value type and cannot be used for fields, variables, or parameters.
+- Repeated fields have a compiler type, `repeated <element>`, so they can be iterated, but there is
+  no source syntax for declaring a repeated local or parameter.
 
 Open Questions:
 
@@ -291,33 +349,37 @@ Open Questions:
 
 ### 8.2 Protobuf Scalar Mapping
 
-The spec must define exact semantics for:
+ProtoLang accepts all protobuf scalar spellings that name a value domain. Wire-encoding variants
+collapse to the decoded value type:
 
-- `double`
-- `float`
-- `int32`
-- `int64`
-- `uint32`
-- `uint64`
-- `sint32`
-- `sint64`
-- `fixed32`
-- `fixed64`
-- `sfixed32`
-- `sfixed64`
-- `bool`
-- `string`
-- `bytes`
+| Protobuf spelling | ProtoLang type |
+|---|---|
+| `double` | `double` |
+| `float` | `float` |
+| `int32`, `sint32`, `sfixed32` | `int32` |
+| `int64`, `sint64`, `sfixed64` | `int64` |
+| `uint32`, `fixed32` | `uint32` |
+| `uint64`, `fixed64` | `uint64` |
+| `bool` | `bool` |
+| `string` | `string` |
+| `bytes` | `bytes` |
 
-Open Questions:
+Normative Requirements:
 
-- Should ProtoLang expose all protobuf scalar types directly?
-- Should `bytes` be supported in version 1?
-- Should `float` and `double` follow IEEE 754 target behavior exactly, or define stricter portable behavior?
+- The spelling may be used in a ProtoLang type reference when protobuf defines it.
+- Once decoded, `sint32`, `sfixed32`, and `int32` have the same ProtoLang type; likewise for the
+  other encoding families above. Encoding is a schema concern, not a behavior-language concern.
+- `bytes` is a valid type and field value type. The language currently has no bytes literal and no
+  bytes-specific operators.
+- Floating-point behavior is covered by the numeric rules in 10.
+
+Open Question:
+
+- Should version 1 add bytes literals or bytes-specific operations?
 
 ### 8.3 Non-Protobuf Types
 
-Normative Candidate:
+Normative Requirements:
 
 - ProtoLang does not support additional value types outside the protobuf type universe.
 - `decimal` is not supported because Protocol Buffers do not define a decimal scalar type.
@@ -330,7 +392,6 @@ Implementation Note:
 Open Questions:
 
 - Should the standard library eventually provide recommended protobuf message shapes for common non-scalar concepts such as money, fixed-scale decimal, dates, durations, or UUIDs?
-- Should ProtoLang have a distinct nullable type, or should all presence and absence semantics come directly from protobuf field presence?
 
 ### 8.4 Nullability and Presence
 
@@ -381,26 +442,33 @@ Open Question:
 
 ### 9.1 Expression Categories
 
-The language may include:
+The language currently includes:
 
-- Literals.
-- Variable references.
-- Field access.
-- Method calls.
-- Function calls.
-- Arithmetic expressions.
-- Boolean expressions.
-- Comparisons.
-- Collection indexing or iteration.
+- Integer, floating-point, string, and boolean literals.
+- Local, loop-binding, parameter, and implicit receiver field references.
+- Field access through `.`.
+- Method calls on message receivers.
+- Arithmetic, boolean, and comparison expressions.
+- Prefix field-presence checks with `has`.
+- Explicit numeric conversions with `as`.
+- Parenthesized expressions.
+
+Not implemented:
+
+- Top-level function calls.
+- Indexing.
+- Message literals in ordinary method bodies.
+- Bytes literals.
 
 ### 9.2 Operators
 
-Candidate operator set:
+Implemented operator set:
 
 ```text
 +  -  *  /  %
 == != < <= > >=
 and or not
+&& || !
 has
 =
 ```
@@ -409,11 +477,11 @@ has
 `not`, and unlike every other operator its operand is a field rather than a value -- reading the
 value is exactly what it must not do.
 
-Open Questions:
+Normative Requirements:
 
-- Should boolean operators use words (`and`, `or`, `not`) or symbols (`&&`, `||`, `!`)?
-- Should assignment be an expression or statement only?
-- Should modulo be included in version 1?
+- Both word and symbolic boolean operators are accepted: `and`/`&&`, `or`/`||`, and `not`/`!`.
+- Assignment is a statement only.
+- `%` is included and follows the same `on_zero` rule as integer `/`.
 
 ### 9.3 Evaluation Order
 
@@ -422,15 +490,16 @@ Normative Requirement:
 - The evaluation order of expressions must be explicitly defined.
 - Backends must preserve the specified evaluation order.
 
-Candidate:
+Current defined subset:
 
-- Function and method call arguments evaluate left to right.
+- Method call arguments evaluate left to right.
 - Boolean `and` and `or` short-circuit left to right.
 - Assignment evaluates the right-hand side before storing the result.
 
 Open Question:
 
-- Should all binary operators evaluate left operand before right operand?
+- Should all non-short-circuit binary operators evaluate the left operand before the right operand?
+  This only becomes observable when an operand can terminate through `on_zero fail`.
 
 ## 10. Numeric Semantics
 
@@ -502,14 +571,7 @@ Open Question:
 
 ### 10.2 Division
 
-The spec must define:
-
-- Integer division rounding.
-- Division by zero.
-- Signed division edge cases.
-- Floating-point division by zero.
-
-**Decided:**
+Defined behavior:
 
 - Integer division truncates toward zero.
 - Floating-point division follows IEEE 754: `x / 0.0` is `±inf`, `0.0 / 0.0` is `NaN`. No
@@ -740,24 +802,22 @@ Open Questions:
 
 ### 11.1 String Model
 
-The spec must define:
+Strings are Unicode text corresponding to protobuf `string`. The current language supports string
+literals, assignment to string-typed locals, return values, parameters, field reads, and equality
+or inequality against another string value of the same type.
 
-- Encoding model.
-- Length semantics.
-- Indexing semantics, if indexing is supported.
-- Comparison semantics.
-- Case conversion, if supported.
+Normative Requirements:
 
-Candidate baseline:
-
-- Strings are Unicode text corresponding to protobuf `string`.
-- Equality is code-unit or code-point exact TBD.
-- No locale-sensitive operations in version 1.
+- No locale-sensitive operations are available.
+- Ordered string comparison is not supported.
+- String indexing, length, case conversion, and normalization operations are not implemented.
 
 Open Questions:
 
 - Should string indexing be supported at all?
 - Should normalization be specified?
+- Should string equality be specified in terms of Unicode scalar values, UTF-16 code units, or a
+  protobuf-runtime guarantee?
 - Should string comparison beyond equality be supported?
 
 ## 12. Enums
@@ -887,21 +947,28 @@ Open Questions:
 
 - Does message equality mean identity, field-wise equality, or backend-defined equality?
 - Is deep equality part of version 1?
+- Should the binder reject equality on message and repeated values until this is settled? The
+  current type rule permits equality for operands of the same type, while the semantic meaning for
+  messages and repeated collections is not specified here.
 
 ## 14. Repeated Fields and Collections
 
 ### 14.1 Supported Operations
 
-Candidate minimal operation set:
+Implemented operation set:
 
-- Read length.
-- Iterate in order.
-- Read by index.
-- Append value.
-- Clear collection.
-- Assign element by index, if mutable.
+- Iterate in order with `for <name> in <repeated expression> { ... }`.
+- Read the repeated field as a collection value for iteration.
 
-Candidate syntax:
+Not implemented:
+
+- Length.
+- Indexing.
+- Append.
+- Clear.
+- Element assignment.
+
+Example syntax:
 
 ```protolang
 var total: int64 = 0;
@@ -913,19 +980,30 @@ for item in invoice.items {
 return total;
 ```
 
+Normative Requirement:
+
+- `for` may iterate only a protobuf repeated field value. Iterating anything else is `PL0033`.
+- Iteration order is the protobuf repeated-field order.
+
 Open Questions:
 
 - Should filtering, mapping, sorting, or aggregation helpers exist? `No. Basics only. ~IS`
-- Should repeated field mutation be allowed inside iteration? `My vote? Banned. ~IS`
-- Should collection indexing be bounds-checked with explicit error results?  `Ugh... probably. I really want to say no, but... I have a feeling that not doing this could lead to security concerns in some language or another. ~IS`
+- Should repeated field mutation ever be allowed? Current implementation says no by absence: only
+  locals can be assigned.
+- Should collection indexing be bounds-checked with explicit error results if indexing is added?
+  `Ugh... probably. I really want to say no, but... I have a feeling that not doing this could lead to security concerns in some language or another. ~IS`
 
 ### 14.2 Maps
 
 Protobuf maps are repeated key-value structures with language-specific APIs.
 
+Current Status:
+
+- Maps are not supported. A map field is rejected rather than treated as an ordinary repeated
+  key-value message.
+
 Open Questions:
 
-- Are protobuf maps supported in version 1?
 - Is map iteration order specified or explicitly unspecified?
 - What map operations are portable?
 
@@ -956,7 +1034,7 @@ Normative Requirements:
 
 ### 15.2 Loops
 
-Version 1 has two loop forms:
+The current implementation has two loop forms:
 
 ```protolang
 while condition {
@@ -998,12 +1076,10 @@ Open Question:
 
 Methods are attached to protobuf message types using `extend`.
 
-Candidate:
-
 ```protolang
 extend DetectorReading {
     fn calculate_rate() -> double {
-        return counts / live_time;
+        return counts / live_time on_zero fail;
     }
 }
 ```
@@ -1012,53 +1088,60 @@ Normative Requirements:
 
 - All ProtoLang-defined methods are public.
 - Method behavior must not depend on target-language inheritance.
+- Method names share a namespace with protobuf fields on the receiver. A method whose name collides
+  with a field is `PL0023`.
+- Overloading is not supported. Two methods with the same name on the same receiver are `PL0022`,
+  even if their parameter lists differ.
+- A method whose declaration is syntactically incomplete may still be bound into a partial semantic
+  model for editor use, but it is not callable when it lacks a usable declaration name.
 
 Open Questions:
 
-- Should method names share a namespace with protobuf fields?
-- How should we implement overloading?  Operator overloading is banned, but what about regular overloads? `Banned outright is my vote ~IS`
-- Should methods be allowed to mutate the receiver?
+- Should methods ever be allowed to mutate the receiver?
 
 ### 16.2 Parameters and Returns
 
-The spec must define:
+Normative Requirements:
 
-- Parameter passing semantics.
-- Return value semantics.
-- Void returns.
-- Multiple return values, if any.
-- Error-return conventions.
+- Parameters are named and typed: `name: type`.
+- `void` is allowed only as an omitted or explicit method return type. It is not allowed for
+  parameters or variables (`PL0024`).
+- Methods have either one return value or no return value. Multiple return values are not supported.
+- A non-void method must return a value on every path that can reach the end of the body.
+- A void method may use `return;`.
+- Parameters are not assignable. The only assignment target currently supported is a local variable.
 
-Recommendation:
+Open Questions:
 
-- Start with single return values only.
-- Use explicit result types or status patterns for recoverable errors.
+- Should recoverable errors be represented through user-defined protobuf messages, a future standard
+  library `Result`, or some other convention?
 
 ## 17. Virtual and Override Semantics
 
-ProtoLang may support overridable behavior, but must not define inheritance as a language feature.
-
-
+ProtoLang parses `virtual`, but the implemented backends reject virtual methods.
 
 ### 17.1 Design Principle
 
-Normative candidate:
+Current Status:
 
-- `virtual` marks behavior as backend-overridable.
+- `virtual` is accepted by the parser and carried in the IR.
+- The C# and C++ backends reject virtual methods at compile time because portable override semantics
+  are not defined.
 - `virtual` does not define a ProtoLang subclass model.
 - ProtoLang source cannot declare subclasses.
-- Each backend must document how virtual methods may be overridden or replaced.
+- Generated protobuf message subclasses are forbidden as a portability strategy.
 
 ```protolang
 extend DetectorReading {
-	double real_time;
-	virtual fn overridable_count_rate() -> double{
-		return counts / real_time;
-	}
+    virtual fn overridable_count_rate() -> int64 {
+        return counts / live_time on_zero fail;
+    }
 }
 ```
 
-Overridable functions don't behave like classical virtual functions- protobuf compiles into sealed classes in C# so inheritance is impossible.  They'll function something like this by necessity: 
+Possible future shape. Overridable functions cannot behave like classical virtual functions:
+protobuf compiles into sealed classes in C# so inheritance is impossible. They would need something
+like this by necessity:
 
 ```csharp
 	public partial class DetectorReading{
@@ -1101,57 +1184,37 @@ Open Questions:
 - Is `virtual` part of version 1?  `I think yes.  But it's low on the list. We're doing this because we DON'T want to write functions for every language. ~IS`
 - Must all backends support virtual behavior, or may some reject it? `If we're going to do it... we should do it for every language. All languages should be able to support something like this, even if it's not explicitly supported. ~IS`
 - Should there be a portable override registration mechanism? `Out of scope for v1. ~IS`
-- Should generated protobuf message subclasses be explicitly discouraged or forbidden? `Forbidden. ~IS`
 
 ## 18. Mutability
 
-The spec must define whether methods can:
+The current language is read-only with respect to protobuf data. It can mutate local variables only.
 
-- Read receiver fields.
-- Assign receiver fields.
-- Modify repeated fields.
-- Modify nested messages.
-- Allocate new messages.
-- Mutate parameters.
+Normative Requirements:
 
-Candidate method modifiers:
-
-```protolang
-fn total() -> int64 { ... }          // read-only by default? TBD
-mut fn normalize() -> void { ... }   // mutation allowed? TBD
-```
+- Methods may read receiver fields.
+- Methods may read fields through parameters, locals, loop bindings, and other message-valued
+  expressions subject to the presence rule in 13.1.
+- Methods may assign local variables declared with `var`.
+- Methods may not assign receiver fields, nested message fields, repeated fields, parameters, or
+  loop bindings. An assignment target that is not a local is `PL0034`.
+- Methods cannot allocate new protobuf messages in ordinary method bodies.
 
 Open Questions:
 
-- Are methods read-only by default? `I lean toward no.  Methods can mutate receiver members by default. They should be declared const if they're to be read only. ~IS`
+- Should receiver mutation be added later, and if so should read-only or mutable behavior be the
+  default? `I lean toward no.  Methods can mutate receiver members by default. They should be declared const if they're to be read only. ~IS`
 - Should mutation require an explicit marker? `No, but const methods should. ~IS`
 - Should immutable and mutable methods generate different APIs?
 
 ## 19. Error Handling Without Exceptions
 
-ProtoLang has no exceptions.
+ProtoLang has no exceptions. The implemented failure model is:
 
-The spec must define how operations report failure.
+- Compile-time rejection where portability cannot be guaranteed.
+- `on_zero <fallback>` for recoverable integer division and modulo by zero.
+- `on_zero fail` for deterministic terminal failure with exit code 70.
 
-Potential approaches:
-
-- Compile-time rejection where possible.
-- Explicit `Result<T, E>` style return type.
-- Boolean success return plus out parameter. Not recommended unless target language constraints require it.
-- Generated diagnostic/status type.
-- Runtime trap/panic. Not recommended for portable business logic unless tightly scoped.
-
-Candidate:
-
-```protolang
-fn safe_rate() -> Result<double, CalculationError> {
-    if live_time == 0 {
-        return error CalculationError.DivideByZero;
-    }
-
-    return ok counts / live_time;
-}
-```
+No built-in `Result` type, generated status type, or catchable runtime error model exists today.
 
 Open Questions:
 
@@ -1164,42 +1227,53 @@ Open Questions:
 
 ## 20. I/O, Threading, and Side Effects
 
-Normative Candidate:
+Normative Requirements:
 
 - ProtoLang has no I/O primitives.
 - ProtoLang has no threading or concurrency primitives.
 - ProtoLang has no clock, randomness, environment, filesystem, network, console, or process APIs.
 - Backends must not silently introduce observable I/O or concurrency behavior into generated method bodies.
+- Generated terminal-failure paths are the exception: `on_zero fail` writes a diagnostic to standard
+  error and terminates the process as specified in 10.2.1.
+- ProtoLang methods may call only ProtoLang methods resolved by the compiler.
 
 Open Questions:
 
 - Should deterministic pure helper functions be explicitly marked? `Seems unnecessary. ~IS`
-- Should generated code be allowed to call user-provided external functions? If yes, how are purity and portability enforced? `Hard no.  The only functions available to ProtoLang methods are those defined in ProtoLang. ~IS`
 
 ## 21. Interoperability With Protobuf
 
 ### 21.1 Descriptor Input
 
-The compiler should consume protobuf descriptors rather than reparsing `.proto` files independently.
+The compiler consumes protobuf descriptors produced from the `.proto` files named by `import proto`
+declarations. The default descriptor loader invokes `protoc` with include paths and asks for
+transitive imports.
 
 Implementation Note:
 
 - This aligns ProtoLang with `protoc`, Buf, and plugin-based code generation workflows.
+- `CompilationResult.Imports` records every import declaration and whether it resolved, was not
+  found, or was syntactically unwritten. Descriptor-load failures preserve this resolved-import list
+  rather than replacing it with an empty one.
 
 Open Questions:
 
 - Should the compiler run as a `protoc` plugin?  `Eventually. I don't think it's necessary right away, but should happen before v1. ~IS`
 - Should it also support Buf plugin workflows?
-- Should direct `.proto` parsing be supported for developer tooling only?
+- Should descriptor-set input be accepted directly, and how would it report per-import diagnostics?
 
 ### 21.2 Generated Code Integration
 
-The spec must define, or require each backend to define:
+The current implementation defines:
 
-- Whether generated behavior is emitted into partial classes, extension methods, free functions, wrappers, mixins, or helper modules.
-- How generated method names map to target-language conventions.
-- How namespace/package mapping works.
-- How generated code is imported by user code.
+- C# behavior is emitted as extension methods in generated static classes.
+- C++ behavior is emitted as header-only free functions in the protobuf namespace.
+- Target method names are mapped by the backend's protobuf naming convention helpers.
+- Namespace/package mapping follows the generated protobuf target's conventions.
+
+Open Question:
+
+- Python and any future backend must define its generated API shape before it can be conforming.
 
 ### 21.3 Protobuf Editions and Syntax Versions
 
@@ -1232,36 +1306,50 @@ Open Question:
 
 This section is implementation-facing, not source-language syntax.
 
-### 22.1 Suggested Pipeline
+### 22.1 Implemented Pipeline
 
 ```text
 ProtoLang source
-    -> lexer/parser
-    -> AST
-    -> protobuf descriptor binding
-    -> name resolution
-    -> type checking
+    -> lexer/parser with recovery
+    -> syntax tree
+    -> import resolution
+    -> protobuf descriptor loading
+    -> binder: descriptor binding, name resolution, and type checking
     -> typed IR
-    -> optimization/lowering
     -> backend code generation
     -> target-language source
     -> target-language tests/conformance
 ```
 
+Pipeline gates:
+
+- Configuration-file errors stop before lexing or binding.
+- Parse errors do not stop binding. The parser recovers and the binder produces a partial semantic
+  model where it has descriptors to bind against.
+- Unusable include paths, zero imports, unwritten imports, unresolved imports, missing default
+  descriptor loader, and descriptor-load failures stop before binding.
+- `CompilationResult.Module` is the partial semantic model. `CompilationResult.EmittableModule` is
+  non-null only when the module exists and there are no errors.
+
 ### 22.2 Typed IR Requirements
 
-The IR should preserve:
+The IR preserves:
 
 - Source locations for diagnostics.
+- Declaration sites and stable symbol identities for ProtoLang-declared methods, parameters, locals,
+  and loop bindings.
+- Descriptor identities for protobuf fields, enum values, message types, and enum types.
 - Resolved protobuf type references.
 - Exact numeric operation kinds.
 - Presence checks. `IrFieldPresence` carries the field descriptor rather than a lowered boolean,
   because the two targets spell the test in unrelated ways.
 - Field access semantics.
-- Mutability intent.
-- Error-result behavior.
+- Local assignment intent.
+- Terminal-failure behavior for `on_zero fail`.
 - Evaluation order.
 - Virtual/overridable annotations.
+- Error placeholder nodes and types so one failed bind does not necessarily suppress later useful
+  diagnostics.
 
 Open Questions:
 
@@ -1282,8 +1370,6 @@ A backend is conforming if it:
 
 ### 23.1 Backend Feature Matrix
 
-Template:
-
 Status as of the first working compiler. "No" means the backend rejects the feature at compile
 time rather than emitting something whose semantics differ.
 
@@ -1299,6 +1385,7 @@ time rather than emitting something whose semantics differ.
 | IEEE 754 float division | Yes | Yes | — | Native in both. Python will need a helper. |
 | Repeated iteration | Yes | Yes | — | `foreach` / range-`for` over the protobuf container. |
 | Cross-message method calls | Yes | Yes | — | C++ emits all declarations before any definition. |
+| Local variables and assignment | Yes | Yes | — | Only locals can be assigned. |
 | Mutable methods | No | No | — | Blocked on the open question in 16.1. |
 | Virtual methods | No | No | — | Blocked on 17; both backends reject. |
 | Maps | No | No | — | Blocked on 14.2. |
@@ -1312,6 +1399,10 @@ time rather than emitting something whose semantics differ.
 | Proto3 optional | Yes | Yes | — | Same mechanism. |
 | Editions | Yes | Yes | — | Same mechanism; presence is a resolved feature (21.3). |
 | Oneof | No | No | — | Blocked on the open question in 8.4. |
+| ProtoLang `test` declarations | Yes | Yes | — | Both backends emit generated tests. |
+| Test project scaffolding | Yes | Yes | — | C# `.csproj`; C++ `CMakeLists.txt`. |
+| Partial semantic model after parse errors | Yes | Yes | — | Front-end feature; emitters use only `EmittableModule`. |
+| Declaration sites and symbol IDs | Yes | Yes | — | Front-end/IR feature for editor tooling and stable references. |
 
 ## 24. Generated API Strategy
 
@@ -1368,6 +1459,8 @@ Questions:
 
 ### 24.3 Python
 
+No Python backend exists in the current implementation.
+
 Potential strategies:
 
 - Helper functions.
@@ -1409,22 +1502,10 @@ The conformance suite should include:
 - Repeated field and map tests.
 - Error handling tests.
 - Virtual/override behavior tests, if supported.
+- Partial-binding and diagnostic-recovery tests.
+- Symbol identity tests for editor-facing semantic data.
 
 ### 25.2 Conformance Vector Format
-
-Candidate structure:
-
-```yaml
-name: total_value_basic
-proto: inventory.proto
-source: inventory.protolang
-method: InventoryItem.total_value
-input:
-  quantity: 3
-  unit_price: 10
-expected:
-  ok: 30
-```
 
 Decided. A conformance vector is not a separate file format at all: it is a ProtoLang `test`
 declaration (25.3) in a `.protolang` file, paired with the `.proto` it imports.
@@ -1447,13 +1528,13 @@ The reference corpus lives in `tests/conformance/`.
 
 ### 25.3 Author-Written ProtoLang Unit Tests
 
-ProtoLang should support author-written unit tests for behavior defined in ProtoLang source.
-These tests are distinct from the compiler's own conformance suite:
+ProtoLang supports author-written unit tests for behavior defined in ProtoLang source. These tests
+are distinct from the compiler's own conformance suite:
 
 - Conformance vectors test whether a ProtoLang compiler/backend implements the language correctly.
 - ProtoLang unit tests test whether a project's ProtoLang behavior is correct for that project.
 
-Recommended direction:
+Normative Requirements:
 
 - Unit tests are written in a ProtoLang test declaration, either in the same `.protolang` file as
   the behavior or in a companion test file imported by the test command.
@@ -1466,7 +1547,7 @@ Recommended direction:
 - The compiler should not execute tests by default. Execution belongs to the target language's
   normal test runner or build system.
 
-Candidate syntax:
+Syntax:
 
 ```protolang
 import proto "invoice.proto";
@@ -1535,7 +1616,7 @@ test InvoiceItem.strict_ratio "zero divisor fails" {
 }
 ```
 
-Test generation should follow the same shape as normal backend generation:
+Test generation follows the same shape as normal backend generation in the CLI:
 
 ```text
 protolangc behavior.protolang \
@@ -1558,20 +1639,14 @@ protoc \
   invoice.proto
 ```
 
-The exact flag names remain open, but the important constraint is that test output is a separate
-artifact root. This lets users choose whether generated test code is checked in, compiled only in
-CI, copied into an existing test project, or adapted by downstream build tooling.
+`--scaffold` writes a target-specific test project beside generated tests and requires
+`--test-out`. Each test backend writes under `<test-out>/<target>/`.
 
-Backend expectations:
+Implemented backend behavior:
 
-- C# should generate ordinary test source that can live in a user-selected test project. The test
-  framework binding is an option; xUnit is a reasonable default for this repository but should not
-  be a language-level requirement.
-- C++ should initially generate a small standalone test executable source, because this avoids
-  requiring GoogleTest/Catch2 before the language has a package story. A backend option can later
-  select a test framework.
-- Python should generate test functions compatible with the standard `unittest` module by default,
-  with pytest-compatible output as an option.
+- C# generates ordinary test source and can scaffold a `.csproj`.
+- C++ generates standalone test executables and can scaffold a CMake project.
+- Python has no implementation.
 
 Open Questions:
 
@@ -1584,6 +1659,7 @@ Open Questions:
 - Should target test framework selection be a backend option such as
   `--test-opt framework=xunit|standalone|gtest`?
 - Should generated tests be stable enough to check in, or treated as build artifacts only?
+- What should the eventual `protoc` plugin flag names be?
 
 Decided: `expect fail` runs out of process. A terminal failure cannot be observed from inside the
 process it ends, so a backend generates such a test as a driver that relaunches itself for that one
@@ -1609,6 +1685,8 @@ The compiler should provide deterministic diagnostics for:
 - Invalid mutation.
 - Missing return statements.
 - Possible arithmetic errors, where statically detectable.
+- Parser recovery without duplicate follow-on diagnostics for the same missing token or name.
+- Partial binding diagnostics when a source has parse errors but valid descriptors.
 
 Diagnostic template:
 
@@ -1634,15 +1712,15 @@ than a position in a `.protolang` source.
 Open Questions:
 
 - Should diagnostic codes be part of the compatibility contract?
-- Should warnings exist, or should all portability concerns be errors?
+- Warnings exist today, so which warnings are compatibility-stable and which remain advisory?
 
 ## 27. Versioning and Compatibility
 
 ### 27.1 Language Versioning
 
-Each source file may declare a language version.
+No language-version declaration is implemented today.
 
-Candidate:
+Possible future syntax:
 
 ```protolang
 language "1.0";
@@ -1675,11 +1753,13 @@ Open Question:
 
 ## 28. Security and Determinism
 
-Normative Candidate:
+Normative Requirements:
 
 - ProtoLang behavior must be deterministic for a fixed input message and method arguments.
 - No source-level access is provided to time, randomness, environment variables, filesystem, network, process state, or threads.
 - Generated code must not depend on locale unless explicitly specified.
+- Parser nesting is bounded to avoid compiler stack exhaustion on malformed or generated input.
+- Runtime loops and recursive method calls are not currently resource-limited.
 
 Open Questions:
 
@@ -1738,13 +1818,19 @@ Expected semantic behavior:
 
 This section should be maintained as the authoritative list of open decisions.
 
-- File extension.
-- Import model: `.proto`, descriptor set, or both.
-- Package and namespace model.
-- Semicolon requirement.
-- Type inference policy.
-- Helper functions.
-- Complete scalar type support.
+- ~~File extension.~~ Decided: `.protolang` (5.1).
+- ~~Direct import model.~~ Decided: `import proto "file.proto";` resolves `.proto` files through
+  include paths and the source directory (5.2). Descriptor-set input remains open.
+- ~~Package and namespace model for current source.~~ Decided: no independent ProtoLang package
+  declaration; names come from protobuf descriptors (5.2). Future embedded-in-proto design remains
+  open.
+- ~~Semicolon requirement.~~ Decided: semicolons are mandatory for declarations/statements listed
+  in 7.1.
+- ~~Type inference policy.~~ Decided: local variables may state an explicit type or infer from the
+  initializer (7.1, 8).
+- Helper functions and whether top-level functions belong in the language.
+- ~~Complete scalar type support.~~ Decided: all protobuf scalar spellings map into the supported
+  ProtoLang value domains (8.2).
 - Decimal support.
 - ~~Nullability and presence syntax.~~ Decided: `has <field>`, with the field's own presence
   rules taken from the protobuf descriptor (8.4).
@@ -1754,9 +1840,9 @@ This section should be maintained as the authoritative list of open decisions.
   no version check in the compiler (21.3).
 - ~~Whether arithmetic behavior is selectable per project.~~ Decided: `protolang.config.xml`,
   with the file winning over command-line flags (10.4).
-- Boolean operator spelling.
-- Assignment expression vs statement.
-- Evaluation order details.
+- ~~Boolean operator spelling.~~ Decided: both word and symbolic forms are accepted (9.2).
+- ~~Assignment expression vs statement.~~ Decided: assignment is statement-only (9.2).
+- Evaluation order details for non-short-circuit binary operators.
 - ~~Integer overflow model.~~ Decided: wrapping (10.1).
 - ~~Division and modulo by zero.~~ Decided: mandatory `on_zero` clause, with `fail` for the case
   where no substitute value is correct (10.2.1). `Result` (19) is explicitly deferred, not blocked.
@@ -1768,25 +1854,32 @@ This section should be maintained as the authoritative list of open decisions.
 - Enum unknown-value behavior, and whether an enum converts to or from an integer.
 - Message construction support.
 - Message equality semantics.
-- Repeated field mutation rules.
+- ~~Repeated field mutation rules for current implementation.~~ Decided: no repeated mutation;
+  only locals can be assigned (14, 18). Future mutation syntax remains open.
 - Map support and map iteration order.
 - Switch support.
-- Method overloading.
-- Receiver mutation.
+- ~~Method overloading.~~ Decided: not supported (16.1).
+- Receiver mutation and possible const/mut method split.
 - Virtual method inclusion in version 1.
 - Portable override registration model.
 - Error result model.
-- External function support.
+- ~~External function support.~~ Decided: hard no for current language; methods call only ProtoLang
+  methods (20).
 - `protoc` plugin and Buf integration strategy.
-- ProtoLang unit test declaration syntax and file extension.
-- Generated test output flags and target test framework options.
+- ~~ProtoLang unit test declaration syntax.~~ Decided: `test` declarations in `.protolang` files
+  (25.3). Separate `.protolangtest` files remain open.
+- Generated test output framework options and future `protoc` plugin flag names.
 - Stable IR format.
 - Third-party backend support.
-- Generated API shape per target language.
+- ~~Generated API shape for implemented backends.~~ Decided: C# extension methods and C++ header-only
+  free functions (24). Python remains open because no backend exists.
 - Diagnostic compatibility.
 - Language version declaration.
 - Generated API compatibility.
 - Recursion and resource limits.
+- Partial semantic model policy after descriptor-load failures and unresolved imports. Current
+  implementation does not bind without usable descriptors; whether to produce a lighter semantic
+  model for unresolved imports remains open.
 
 ## 31. Decision Log
 
@@ -1818,3 +1911,11 @@ Use this table to record decisions as the language stabilizes.
 | 2026-08-27 | Presence | Using the value of a singular message field requires an established presence test; without one it is PL0078 (13.1) | C# yields null and throws, C++ yields the default instance and returns zero, and neither can be made to match the other without a runtime check in every target. Making the situation unrepresentable is what `on_zero` does for a zero divisor, and it costs nothing at runtime: a guarded read emits the same accessor chain it always did. The rule is on the value rather than on reading through it, because binding to a local or passing as an argument launders the same divergence | Draft |
 | 2026-08-27 | Presence | The analysis is a plain set of access paths with no fixpoint, and guard clauses fall out of the existing all-paths-return reachability predicate (13.1) | Presence facts are monotone within a method, because ProtoLang cannot assign to a field, so nothing shown to be set can become unset. If receiver mutation ever arrives (18), that is the assumption to revisit | Draft |
 | 2026-08-27 | Protobuf interop | proto2, proto3, and editions are all supported, and the compiler does not branch on the syntax version (21.3) | The version was standing in for presence, and presence now has a first-class answer. `FileDescriptor.Syntax` is deprecated in current runtimes with a note pointing at feature resolution, which is what `HasPresence` consults; protoc 31.1 was checked to generate C# for both proto2 and edition 2023 rather than assumed to | Draft |
+| 2026-08-30 | Source organization | ProtoLang source files use `.protolang`, import schemas with `import proto`, and do not declare their own packages (5) | This is the compiler surface that now exists: include paths plus the source directory resolve `.proto` imports, and protobuf descriptors provide the package/type namespace | Draft |
+| 2026-08-30 | Grammar | Top-level declarations are `import`, `extend`, and `test`; semicolons are mandatory; local variables may infer from initializers; no top-level helper functions are implemented (7) | The parser has a concrete recovery grammar, and keeping the spec in "template" language hid decisions that tests and callers already rely on | Draft |
+| 2026-08-30 | Scalar types | Protobuf scalar wire spellings collapse to ProtoLang value-domain types, including `bytes` as a type without bytes literals or operations (8.2) | Once a field is decoded, `sint32`, `sfixed32`, and `int32` have the same behavior-language type. Preserving the wire spelling in the type system would create distinctions with no expression semantics | Draft |
+| 2026-08-30 | Methods | Method names share the receiver namespace with fields, and overloading is rejected (16.1) | Bare receiver-field lookup and method lookup would otherwise disagree or require target-specific overload conventions. Rejecting the collision in the binder keeps calls portable and unambiguous | Draft |
+| 2026-08-30 | Mutability | Only local variables can be assigned; receiver fields, parameters, loop bindings, repeated fields, and nested message fields are read-only in the current language (18) | This matches the generated API shapes already chosen: C# extension methods and C++ `const T&` free functions. Receiver mutation remains a future language design, not an accidental backend behavior | Draft |
+| 2026-08-30 | Partial compilation | Parse errors no longer stop binding when descriptors are available; callers use `Module` for partial semantic data and `EmittableModule` for generated artifacts (22.1) | Editors need symbol/type answers in broken buffers, while code generation must not accidentally consume a partial model. Expressing the distinction in the result type is safer than asking every caller to remember a diagnostic-bag convention | Draft |
+| 2026-08-30 | Import results | Import resolution is returned as per-import outcomes, and descriptor-load failures preserve the resolved import list (21.1, 22.1) | A count or empty list cannot distinguish an unwritten import, a not-found import, and a schema that was found but rejected by protoc. Tooling needs the declaration-to-file mapping even when descriptor loading fails | Draft |
+| 2026-08-30 | Symbols | The IR carries declaration sites and stable symbol IDs for ProtoLang declarations, and descriptor-based IDs for schema symbols (22.2) | Editor features, occurrence highlighting, and caching need identities that survive a rebind of unchanged text and do not collapse same-named locals or fields from different scopes/messages | Draft |
