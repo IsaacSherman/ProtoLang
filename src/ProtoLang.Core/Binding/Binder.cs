@@ -242,24 +242,9 @@ public sealed class Binder
     private void Declare(Scope scope, DeclarationSite declaration, PlType type, int visibleFrom)
         => _scope.Add(new ScopeEntry(declaration, type, visibleFrom, scope.LastVisibleOffset));
 
-    /// <summary>
-    /// The last offset at which a name declared in a scope covering <paramref name="extent"/> can
-    /// still be written.
-    /// </summary>
-    /// <remarks>
-    /// One before the end, because a span is half-open and the last character of a scope is the
-    /// brace that closes it: a caret one past that brace has left the scope, and that is precisely
-    /// where <c>} else {</c> and the end of any nested block put one.
-    /// <para>
-    /// Unless the parser never found the brace. A block that ran out of file ends where the file
-    /// does, and that offset is not a delimiter -- it is the hole the author is typing into, and the
-    /// position an editor asks about most while a file is incomplete. The two cases are told apart
-    /// by the end of the compilation unit, which is the only place a scope's span can reach without
-    /// something having closed it.
-    /// </para>
-    /// </remarks>
-    private int LastVisibleOffsetIn(SourceSpan extent)
-        => extent.End.Offset >= _endOfFile ? _endOfFile : extent.End.Offset - 1;
+    /// <inheritdoc cref="ScopeEntry.LastOffsetInside"/>
+    private int LastVisibleOffsetIn(SourceSpan block)
+        => ScopeEntry.LastOffsetInside(block, _endOfFile);
 
     /// <summary>A scope holding nothing, for an expression with no locals or parameters to see.</summary>
     /// <remarks>
@@ -636,7 +621,7 @@ public sealed class Binder
                 continue;
             }
 
-            Declare(scope, parameter.Declaration, parameter.Type, method.Body.Span.Start.Offset);
+            Declare(scope, parameter.Declaration, parameter.Type, ScopeEntry.FirstOffsetInside(method.Body.Span));
         }
 
         var context = new MethodContext(receiver, signature.ReturnType);
@@ -1341,9 +1326,11 @@ public sealed class Binder
         {
             if (loopScope.TryDeclareLocal(loop))
             {
-                // From the start of the body, not of the loop: the collection was bound above,
-                // against the enclosing scope, so 'for x in x { }' does not see its own binding.
-                Declare(loopScope, loop.Declaration, loop.Type, statement.Body.Span.Start.Offset);
+                // From inside the body, not from the loop and not from its brace: the collection was
+                // bound above, against the enclosing scope, so 'for x in x { }' does not see its own
+                // binding -- and the brace is where the collection ends rather than where the body
+                // begins.
+                Declare(loopScope, loop.Declaration, loop.Type, ScopeEntry.FirstOffsetInside(statement.Body.Span));
             }
             else
             {

@@ -264,14 +264,17 @@ public sealed class SemanticModel
     /// </remarks>
     public ScopeAtPosition? ScopeAt(int offset)
     {
-        if (_module is null)
+        // The syntax tree answers two things the IR cannot: whether this is type position, and
+        // where the source ran out -- which is what tells a body the parser closed from one it could
+        // not. Without it there is neither, and a compilation that has a module always has it.
+        if (_module is null || _syntaxTree is null)
         {
             return null;
         }
 
         // A name written here resolves to a message or an enum, and to none of what this reports.
         return SyntaxAt(offset)?.Enclosing<TypeReference>() is null
-            ? ScopeSearch.At(_module, offset)
+            ? ScopeSearch.At(_module, offset, _syntaxTree.Span.End.Offset)
             : null;
     }
 }

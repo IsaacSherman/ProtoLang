@@ -25,7 +25,11 @@ namespace ProtoLang.Semantics;
 internal static class ScopeSearch
 {
     /// <inheritdoc cref="SemanticModel.ScopeAt"/>
-    public static ScopeAtPosition? At(IrModule module, int offset)
+    /// <param name="endOfFile">
+    /// Where the source ran out, which is what tells a method whose body the parser closed from one
+    /// it could not; see <see cref="ScopeEntry.LastOffsetInside"/>.
+    /// </param>
+    public static ScopeAtPosition? At(IrModule module, int offset, int endOfFile)
     {
         // The containment and tie-break rules are PositionSearch's, borrowed rather than restated so
         // that one caret cannot be told it is inside a method by one query and outside it by this.
@@ -43,11 +47,16 @@ internal static class ScopeSearch
 
         var declared = InScopeAt(module, offset);
 
-        // Only where an expression can be written, which is the body of a method and everything
-        // after a test's header. A declaration's header holds names -- the method's own, its
+        // Only where an expression can be written, which is inside the body of a method and
+        // anywhere past a test's header. A declaration's header holds names -- the method's own, its
         // parameters', the receiver a test targets -- and none of them is a place a bare identifier
         // is looked up as a value, so answering there would be answering a question nobody asked
         // with a list that does not apply.
+        //
+        // A body is delimited, so its braces are outside it: a name written at either one is written
+        // in the header or after the body, and Inside is the rule that says so. A test's value
+        // region is not delimited -- it is the span of the parts that hold expressions -- so every
+        // offset in it is genuinely in it, and ordinary containment is right there instead.
         //
         // The two arms differ in exactly what the binder's AllowImplicitReceiverFields says: a
         // method body reaches its receiver's fields by bare name, and everything inside a test binds
@@ -55,7 +64,7 @@ internal static class ScopeSearch
         // is what keeps the two from drifting apart.
         return enclosing[0] switch
         {
-            IrMethod method when PositionSearch.Contains(method.Body.Span, offset) => new ScopeAtPosition(
+            IrMethod method when ScopeEntry.Inside(method.Body.Span, offset, endOfFile) => new ScopeAtPosition(
                 new MessageType(method.Signature.Receiver),
                 [.. declared, .. ReachableFields(method.Signature.Receiver, declared)]),
 

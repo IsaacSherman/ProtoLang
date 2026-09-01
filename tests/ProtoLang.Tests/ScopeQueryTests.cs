@@ -178,6 +178,39 @@ public class ScopeQueryTests
         Assert.Contains("count", names);
     }
 
+    /// <summary>
+    /// The same boundary at the other end. A name written at the brace is written before it, in the
+    /// header the block follows -- <c>for value in nested_values |{</c> is where the collection goes,
+    /// and the binder resolves that against the enclosing scope, which is why the loop's own binding
+    /// does not appear in it.
+    /// </summary>
+    [Fact]
+    public void ALoopBindingIsNotVisibleAtTheBraceThatOpensItsBody()
+    {
+        var openingBrace = Fixture.IndexOf("{", Offset("for value in"), StringComparison.Ordinal);
+
+        Assert.DoesNotContain("value", NamesAt(openingBrace));
+        Assert.Contains("value", NamesAt(openingBrace + 1));
+    }
+
+    /// <summary>
+    /// Neither brace of a method body is inside it, so neither is a place a bare identifier is
+    /// looked up -- not even for the fields of the receiver, which are the one thing in this list
+    /// that no offset gates. Taken from the bound body rather than from a search of the text, so the
+    /// two ends are exactly the ones the query is comparing against.
+    /// </summary>
+    [Fact]
+    public void NeitherBraceOfABodyIsInsideIt()
+    {
+        var body = Fixed.Value.Module!.Methods[0].Body.Span;
+
+        Assert.Null(Model().ScopeAt(body.Start.Offset));
+        Assert.Null(Model().ScopeAt(body.End.Offset));
+
+        Assert.Contains("factor", NamesAt(body.Start.Offset + 1));
+        Assert.Contains("count", NamesAt(body.End.Offset - 1));
+    }
+
     // ------- fields of the receiver
 
     [Fact]
