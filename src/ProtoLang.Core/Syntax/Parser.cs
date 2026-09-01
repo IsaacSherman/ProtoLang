@@ -443,14 +443,6 @@ public sealed class Parser
         return new TestFailExpectation(Spanning(start, recoveredEnd));
     }
 
-    /// <summary>Parses <c>Foo</c> or <c>pkg.Foo</c> into a single dotted name.</summary>
-    /// <remarks>
-    /// A dot with no identifier after it is consumed and modelled as a missing name rather than
-    /// left in the stream. Leaving it made the caller's next <c>Expect</c> report the dot as the
-    /// unexpected token, which blamed the wrong thing and left nothing in the tree to anchor a
-    /// completion list to. It is still an error, reported here against the token that should have
-    /// been the name.
-    /// </remarks>
     /// <summary>Parses <c>Invoice.total_cents</c> into the message and the method it names.</summary>
     /// <remarks>
     /// The last dot separates them, which is the rule the binder used to apply to the joined string.
@@ -501,6 +493,14 @@ public sealed class Parser
             Spanning(tokens[0].Span, tokens[^1].Span));
     }
 
+    /// <summary>Parses <c>Foo</c> or <c>pkg.Foo</c> into a single dotted name.</summary>
+    /// <remarks>
+    /// A dot with no identifier after it is consumed and modelled as a missing name rather than
+    /// left in the stream. Leaving it made the caller's next <c>Expect</c> report the dot as the
+    /// unexpected token, which blamed the wrong thing and left nothing in the tree to anchor a
+    /// completion list to. It is still an error, reported here against the token that should have
+    /// been the name.
+    /// </remarks>
     private SyntaxName ParseQualifiedName()
     {
         var insertionPoint = InsertionPointAfterPreviousToken();

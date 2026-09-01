@@ -479,7 +479,7 @@ public class ReferenceIndexTests
     [Theory]
     [InlineData("quantity = 1;", "quantity", SymbolKind.Field)]
     [InlineData("by = 1;", "by", SymbolKind.Parameter)]
-    public void ATargetThatMayNotBeAssignedIsStillAReferenceToWhatItNames(
+    public void ATargetThatMayNotBeAssignedIsStillAWriteOfWhatItNames(
         string statement,
         string written,
         SymbolKind kind)
@@ -499,6 +499,78 @@ public class ReferenceIndexTests
 
         Assert.Equal(kind, reference.Symbol.Kind);
         Assert.Equal(written.Length, reference.Span.Length);
+
+        // Illegal is not the same as absent. The author wrote an assignment, so the name on its left
+        // is a write however the compiler feels about it.
+        Assert.Equal(ReferenceKind.Write, reference.Kind);
+    }
+
+    /// <summary>
+    /// Only the last name in a target is written. Renaming <c>line</c> and renaming
+    /// <c>quantity</c> are different edits, and an editor that tinted both as writes would be saying
+    /// the receiver had been assigned to.
+    /// </summary>
+    [Fact]
+    public void OnlyTheLastNameOfARefusedTargetIsAWrite()
+    {
+        const string source =
+            """
+            import proto "invoice.proto";
+            extend Invoice {
+                fn f() -> int64 {
+                    for line in items {
+                        line.quantity = 2;
+                    }
+
+                    return 0;
+                }
+            }
+            """;
+
+        var result = Compile(source, TestPaths.ExampleProtoDirectory);
+        var model = SemanticModel.For(result);
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "PL0034");
+
+        Assert.Equal(ReferenceKind.Read, At(model, source, "line.quantity = 2", "line").Kind);
+        Assert.Equal(ReferenceKind.Write, At(model, source, "line.quantity = 2", "quantity").Kind);
+    }
+
+    /// <summary>
+    /// Review found this: the receiver was recorded inside the branch that found the method, so a
+    /// test naming a message correctly and a method that is not there indexed neither.
+    /// </summary>
+    [Fact]
+    public void ATestTargetNamingNoMethodStillReferencesItsReceiver()
+    {
+        const string source =
+            """
+            import proto "invoice.proto";
+            extend InvoiceItem {
+                fn f() -> int64 { return quantity; }
+            }
+
+            test InvoiceItem.nope "names a method that is not there" {
+                receiver {
+                    quantity = 1;
+                }
+
+                expect return 1;
+            }
+            """;
+
+        var result = Compile(source, TestPaths.ExampleProtoDirectory);
+        var model = SemanticModel.For(result);
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "PL0058");
+
+        var receiver = At(model, source, "test InvoiceItem.nope", "InvoiceItem");
+
+        Assert.Equal("protolang.examples.InvoiceItem", receiver.Symbol.Key);
+        Assert.Equal(At(model, source, "extend InvoiceItem", "InvoiceItem").Symbol, receiver.Symbol);
+
+        // The method half named nothing, so nothing is recorded there.
+        Assert.Null(model.ReferenceAt(source.IndexOf("nope", StringComparison.Ordinal)));
     }
 
     // ------- reads, writes, and declarations

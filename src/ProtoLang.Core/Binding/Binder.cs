@@ -211,6 +211,51 @@ public sealed class Binder
     private void Use(SymbolId symbol, SourceSpan span, ReferenceKind kind = ReferenceKind.Read)
         => _references.Add(new SymbolReference(symbol, _document, span, kind));
 
+    /// <summary>The name an assignment writes to, or null when its target names nothing.</summary>
+    /// <remarks>
+    /// Only the last name in the target is written. <c>line.quantity = 2;</c> reads <c>line</c> and
+    /// writes <c>quantity</c>, and <c>1 = 2;</c> writes nothing at all -- which is a shape only a
+    /// refused assignment can have, since a legal one names a local and nothing else.
+    /// </remarks>
+    private static SyntaxName? AssignedNameOf(Expression target) => target switch
+    {
+        NameExpression name => name.Name,
+        MemberAccessExpression member => member.Name,
+        _ => null,
+    };
+
+    /// <summary>Re-files an already-recorded reference as a write.</summary>
+    /// <remarks>
+    /// <para>
+    /// Assignment is the only thing in the language that writes a name, and it is the statement --
+    /// never the expression -- that knows which of the names it just bound was the one assigned to.
+    /// The expression binder resolved <c>line</c> and <c>quantity</c> the same way and has nothing to
+    /// tell them apart with, so rather than thread a kind down through every name binding for the one
+    /// caller that needs it, the assignment amends the entry it is about.
+    /// </para>
+    /// <para>
+    /// Backwards from the end, because the target has just been bound and its entries are the last
+    /// ones added. A span nothing was recorded at -- a member name never written, a literal target --
+    /// leaves the list alone.
+    /// </para>
+    /// </remarks>
+    private void MarkWritten(SyntaxName? name)
+    {
+        if (name is not { } written)
+        {
+            return;
+        }
+
+        for (var index = _references.Count - 1; index >= 0; index--)
+        {
+            if (_references[index].Span == written.Span)
+            {
+                _references[index] = _references[index] with { Kind = ReferenceKind.Write };
+                return;
+            }
+        }
+    }
+
     /// <summary>
     /// Extending a well-known type is allowed, but it is not self-contained the way extending a
     /// project's own message is, and nothing in the source says so.
@@ -594,12 +639,15 @@ public sealed class Binder
             return null;
         }
 
+        // Recorded as soon as the message is in hand, ahead of the method lookup that may fail. The
+        // receiver half is a use of the message the same way an extend header is, and `test
+        // InvoiceItem.nope` still named InvoiceItem correctly -- what is wrong there is the method.
+        // It is the day #41 can send a reader into the .proto that this matters most, and by then
+        // the file will still be one someone is in the middle of fixing.
+        Use(SymbolId.ForType(receiver), target.Receiver.Span);
+
         if (_methods.TryGetValue((receiver.FullName, target.Method.Text), out var signature))
         {
-            // Two names, two references. The receiver half is a use of the message the same way an
-            // extend header is, and the day #41 can send a reader into the .proto this is one of the
-            // places they will ask from.
-            Use(SymbolId.ForType(receiver), target.Receiver.Span);
             Use(signature.Id, target.Method.Span);
             return signature;
         }
@@ -1331,11 +1379,15 @@ public sealed class Binder
             // Both halves in a block, because a statement has one slot and the alternative is to bind
             // an expression and throw it away. No backend sees this: PL0034 has been reported, so the
             // compilation has errors and EmittableModule is null.
+            var refusedTarget = new IrExpressionStatement(
+                BindExpression(statement.Target, scope, context, null),
+                statement.Target.Span);
+
+            MarkWritten(AssignedNameOf(statement.Target));
+
             return new IrBlock(
                 [
-                    new IrExpressionStatement(
-                        BindExpression(statement.Target, scope, context, null),
-                        statement.Target.Span),
+                    refusedTarget,
                     new IrExpressionStatement(
                         BindExpression(statement.Value, scope, context, null),
                         statement.Value.Span),
