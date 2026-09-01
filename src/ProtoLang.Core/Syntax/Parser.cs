@@ -266,7 +266,7 @@ public sealed class Parser
     private TestDeclaration ParseTestDeclaration()
     {
         var start = Expect(TokenKind.Test).Span;
-        var targetName = ParseQualifiedName();
+        var target = ParseTestTarget();
         var name = Expect(TokenKind.StringLiteral);
         Expect(TokenKind.OpenBrace);
 
@@ -332,7 +332,7 @@ public sealed class Parser
         }
 
         return new TestDeclaration(
-            targetName,
+            target,
             (string?)name.Value ?? string.Empty,
             receiver,
             arguments,
@@ -451,6 +451,56 @@ public sealed class Parser
     /// completion list to. It is still an error, reported here against the token that should have
     /// been the name.
     /// </remarks>
+    /// <summary>Parses <c>Invoice.total_cents</c> into the message and the method it names.</summary>
+    /// <remarks>
+    /// The last dot separates them, which is the rule the binder used to apply to the joined string.
+    /// Applied here instead, because only the parser holds the tokens and therefore the range of each
+    /// half; see <see cref="TestTarget"/> for what a missing half means and why the binder reads the
+    /// shape rather than the text.
+    /// </remarks>
+    private TestTarget ParseTestTarget()
+    {
+        // Taken before the attempt, for the reason ExpectName gives.
+        var insertionPoint = InsertionPointAfterPreviousToken();
+
+        if (!TryExpect(TokenKind.Identifier, out var first))
+        {
+            return new TestTarget(
+                SyntaxName.Missing(insertionPoint),
+                SyntaxName.Missing(insertionPoint),
+                insertionPoint);
+        }
+
+        var parts = new List<Token> { first };
+
+        while (Current.Kind == TokenKind.Dot)
+        {
+            var dot = Advance();
+            if (!TryExpect(TokenKind.Identifier, out var part))
+            {
+                // The name stops here. What has been written names a receiver; the method is the
+                // hole after the dot, which TryExpect has already reported.
+                var hole = InsertionPointAfter(dot);
+                return new TestTarget(Joined(parts), SyntaxName.Missing(hole), Spanning(first.Span, hole));
+            }
+
+            parts.Add(part);
+        }
+
+        var method = new SyntaxName(parts[^1].Text, parts[^1].Span);
+
+        return parts.Count == 1
+            ? new TestTarget(SyntaxName.Missing(insertionPoint), method, method.Span)
+            : new TestTarget(
+                Joined(parts.GetRange(0, parts.Count - 1)),
+                method,
+                Spanning(first.Span, method.Span));
+
+        SyntaxName Joined(IReadOnlyList<Token> tokens) => new(
+            string.Join('.', tokens.Select(token => token.Text)),
+            Spanning(tokens[0].Span, tokens[^1].Span));
+    }
+
     private SyntaxName ParseQualifiedName()
     {
         var insertionPoint = InsertionPointAfterPreviousToken();

@@ -546,7 +546,7 @@ public sealed class Binder
 
     private IrTest? BindTest(TestDeclaration test)
     {
-        var signature = ResolveTestTarget(test.TargetName, test.Span);
+        var signature = ResolveTestTarget(test.Target, test.Span);
         if (signature is null)
         {
             return null;
@@ -568,49 +568,46 @@ public sealed class Binder
     /// as a syntax error where it is missing, and saying it again as an invalid test target adds
     /// nothing.
     /// </remarks>
-    private IrMethodSignature? ResolveTestTarget(SyntaxName target, SourceSpan span)
+    private IrMethodSignature? ResolveTestTarget(TestTarget target, SourceSpan span)
     {
-        if (target.IsMissing)
+        // Which half is missing is the whole of what the parser is saying here; see TestTarget. No
+        // method means the name was never finished, and that has been reported where it stops.
+        if (target.Method.IsMissing)
         {
             return null;
         }
 
-        var targetName = target.Text;
-        var dot = targetName.LastIndexOf('.');
-        if (dot <= 0 || dot == targetName.Length - 1)
+        if (target.Receiver.IsMissing)
         {
             _diagnostics.Error(
                 "PL0057",
                 "invalid test target",
-                $"'{targetName}' is not a method target.",
+                $"'{target.Method}' is not a method target.",
                 span,
                 "Write tests against a receiver method, for example 'test Invoice.total_cents'.");
             return null;
         }
 
-        var receiverName = targetName[..dot];
-        var methodName = targetName[(dot + 1)..];
-        var receiver = ResolveMessage(receiverName, span);
+        var receiver = ResolveMessage(target.Receiver.Text, span);
         if (receiver is null)
         {
             return null;
         }
 
-        if (_methods.TryGetValue((receiver.FullName, methodName), out var signature))
+        if (_methods.TryGetValue((receiver.FullName, target.Method.Text), out var signature))
         {
-            // The whole target, receiver half included. `ParseQualifiedName` produces one name for
-            // `Invoice.total_cents`, so the two halves share a range and there is no narrower one to
-            // record the method against -- and the method is what a reader following this wants
-            // anyway. The receiver is therefore not recorded here: two entries over one range would
-            // make which of them a position finds a matter of sort order.
-            Use(signature.Id, target.Span);
+            // Two names, two references. The receiver half is a use of the message the same way an
+            // extend header is, and the day #41 can send a reader into the .proto this is one of the
+            // places they will ask from.
+            Use(SymbolId.ForType(receiver), target.Receiver.Span);
+            Use(signature.Id, target.Method.Span);
             return signature;
         }
 
         _diagnostics.Error(
             "PL0058",
             "unknown test target",
-            $"'{receiver.FullName}' has no ProtoLang method named '{methodName}'.",
+            $"'{receiver.FullName}' has no ProtoLang method named '{target.Method}'.",
             span,
             "Tests can only target methods declared in an extend block.");
         return null;
@@ -763,6 +760,14 @@ public sealed class Binder
         }
 
         var arguments = new List<IrTestArgument>();
+
+        // Which names have already been credited to a parameter. A signature can hold two parameters
+        // of one name -- `fn f(a: int64, a: int64)` is PL0026 and is still bound -- and both would
+        // otherwise claim the same `arg a` range, so one written name would answer with two symbols
+        // and highlighting, go-to-definition and rename would each get a different one. The first
+        // wins, which is the parameter BindMethod put in scope and therefore the one the body means.
+        var credited = new HashSet<string>(StringComparer.Ordinal);
+
         foreach (var parameter in signature.Parameters)
         {
             // A parameter nobody has named yet cannot be supplied and cannot be demanded: there is
@@ -793,11 +798,14 @@ public sealed class Binder
             // occurrence and not only `declared`'s, which holds the first of a name supplied twice:
             // the duplicate has been reported, but it is still that parameter's name written in that
             // place, and an index that skipped it would rename around it.
-            foreach (var written in test.Arguments)
+            if (credited.Add(name))
             {
-                if (!written.Name.IsMissing && written.Name.Text == name)
+                foreach (var written in test.Arguments)
                 {
-                    Use(parameter.Id, written.Name.Span);
+                    if (!written.Name.IsMissing && written.Name.Text == name)
+                    {
+                        Use(parameter.Id, written.Name.Span);
+                    }
                 }
             }
 
@@ -1312,8 +1320,27 @@ public sealed class Binder
                 statement.Target.Span,
                 "Whether methods may mutate the receiver is still an open question (spec 16.1).");
 
-            var boundValue = BindExpression(statement.Value, scope, context, null);
-            return new IrExpressionStatement(boundValue, statement.Span);
+            // The target is bound even though nothing may be assigned to it. What PL0034 refuses is
+            // the assignment, not the expression on its left: `quantity`, `factor` and `line.quantity`
+            // all name something that resolves, and leaving them unbound put those names in the index
+            // nowhere and left an editor with nothing at a position the author is looking straight at.
+            // It is the same rule the map field in a fixture and the presence test on a field without
+            // presence already follow, and it is why binding a call that cannot be made keeps its
+            // arguments.
+            //
+            // Both halves in a block, because a statement has one slot and the alternative is to bind
+            // an expression and throw it away. No backend sees this: PL0034 has been reported, so the
+            // compilation has errors and EmittableModule is null.
+            return new IrBlock(
+                [
+                    new IrExpressionStatement(
+                        BindExpression(statement.Target, scope, context, null),
+                        statement.Target.Span),
+                    new IrExpressionStatement(
+                        BindExpression(statement.Value, scope, context, null),
+                        statement.Value.Span),
+                ],
+                statement.Span);
         }
 
         Use(local.Id, name.Name.Span, ReferenceKind.Write);

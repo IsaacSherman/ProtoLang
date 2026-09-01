@@ -362,7 +362,7 @@ public class ReferenceIndexTests
     [Fact]
     public void ATestNamesTheMethodItRunsTheFieldsItSetsAndTheParametersItSupplies()
     {
-        var target = ReferenceAt(Offset("Outer.scaled \"multiplies"));
+        var target = ReferenceAt(Offset("Outer.scaled \"multiplies") + "Outer.".Length);
         var field = ReferenceAt(Offset("count = 7"));
         var argument = ReferenceAt(Offset("factor = 2"));
 
@@ -372,18 +372,133 @@ public class ReferenceIndexTests
     }
 
     /// <summary>
-    /// A test target is the one range the compiler cannot narrow: the parser produces one name for
-    /// <c>Outer.scaled</c>, so both halves share it and the method is what the range is recorded
-    /// against. Pinned rather than left to be discovered, because splitting it later is a change to
-    /// the parser.
+    /// The two halves of a test target are two names and answer as two. Recording the method over
+    /// the whole of <c>Outer.scaled</c> would have made a caret on <c>Outer</c> answer with the
+    /// method, which is the wrong node to navigate from and the wrong range to rename.
     /// </summary>
     [Fact]
-    public void ATestTargetIsRecordedOverItsWholeQualifiedName()
+    public void TheTwoHalvesOfATestTargetAnswerSeparately()
     {
-        var target = ReferenceAt(Offset("Outer.scaled \"multiplies"));
+        var at = Offset("Outer.scaled \"multiplies");
 
-        Assert.Equal("Outer.scaled".Length, target.Span.Length);
-        Assert.Equal(SymbolKind.Method, target.Symbol.Kind);
+        var receiver = ReferenceAt(at);
+        var method = ReferenceAt(at + "Outer.".Length);
+
+        Assert.Equal(SymbolKind.MessageType, receiver.Symbol.Kind);
+        Assert.Equal("Outer".Length, receiver.Span.Length);
+        Assert.Equal(ReferenceAt(Offset("Outer {")).Symbol, receiver.Symbol);
+
+        Assert.Equal(SymbolKind.Method, method.Symbol.Kind);
+        Assert.Equal("scaled".Length, method.Span.Length);
+        Assert.Equal(ReferenceAt(Offset("scaled(2)")).Symbol, method.Symbol);
+    }
+
+    /// <summary>
+    /// A qualified receiver keeps its whole range, because that is what names the message; the
+    /// method is still only its own last segment.
+    /// </summary>
+    [Fact]
+    public void AQualifiedTestReceiverIsOneReferenceOverItsWholeName()
+    {
+        const string source =
+            """
+            import proto "invoice.proto";
+            extend InvoiceItem {
+                fn f() -> int64 { return quantity; }
+            }
+
+            test protolang.examples.InvoiceItem.f "reads the quantity" {
+                receiver {
+                    quantity = 3;
+                }
+
+                expect return 3;
+            }
+            """;
+
+        var result = Compile(source, TestPaths.ExampleProtoDirectory);
+        var model = SemanticModel.For(result);
+
+        Assert.True(result.Success, Rendered(result));
+
+        var qualified = "protolang.examples.InvoiceItem";
+        var receiver = At(model, source, "test " + qualified, qualified);
+        var method = At(model, source, qualified + ".f \"", "f \"");
+
+        Assert.Equal("protolang.examples.InvoiceItem", receiver.Symbol.Key);
+        Assert.Equal(qualified.Length, receiver.Span.Length);
+        Assert.Equal(SymbolKind.Method, method.Symbol.Kind);
+        Assert.Equal(1, method.Span.Length);
+    }
+
+    /// <summary>
+    /// Review found this: two parameters of one name are two symbols, and both used to claim the one
+    /// <c>arg</c> range that names them, so a caret there answered with whichever the sort happened
+    /// to put first.
+    /// </summary>
+    [Fact]
+    public void AnArgumentNamingADuplicatedParameterAnswersWithOneSymbol()
+    {
+        const string source =
+            """
+            import proto "invoice.proto";
+            extend InvoiceItem {
+                fn f(n: int64, n: int64) -> int64 {
+                    return quantity;
+                }
+            }
+
+            test InvoiceItem.f "names the duplicated parameter once" {
+                receiver {
+                    quantity = 1;
+                }
+
+                arg n = 1;
+
+                expect return 1;
+            }
+            """;
+
+        var result = Compile(source, TestPaths.ExampleProtoDirectory);
+        var model = SemanticModel.For(result);
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "PL0026");
+
+        var written = source.IndexOf("arg n", StringComparison.Ordinal) + "arg ".Length;
+
+        Assert.Single(result.Module!.References, reference => reference.Span.Start.Offset == written);
+        Assert.Equal(
+            source.IndexOf("n: int64", StringComparison.Ordinal),
+            model.DeclarationOf(model.ReferenceAt(written)!.Symbol)!.Name.Span.Start.Offset);
+    }
+
+    /// <summary>
+    /// Also from review. What PL0034 refuses is the assignment, not the name on its left, and every
+    /// other resolved-but-refused case in this issue records the name anyway.
+    /// </summary>
+    [Theory]
+    [InlineData("quantity = 1;", "quantity", SymbolKind.Field)]
+    [InlineData("by = 1;", "by", SymbolKind.Parameter)]
+    public void ATargetThatMayNotBeAssignedIsStillAReferenceToWhatItNames(
+        string statement,
+        string written,
+        SymbolKind kind)
+    {
+        var source =
+            "import proto \"invoice.proto\";\n"
+            + "extend InvoiceItem {\n"
+            + "    fn f(by: int64) -> int64 { " + statement + " return quantity; }\n"
+            + "}\n";
+
+        var result = Compile(source, TestPaths.ExampleProtoDirectory);
+        var model = SemanticModel.For(result);
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "PL0034");
+
+        var reference = At(model, source, statement, written);
+
+        Assert.Equal(kind, reference.Symbol.Kind);
+        Assert.Equal(written.Length, reference.Span.Length);
     }
 
     // ------- reads, writes, and declarations
@@ -614,6 +729,9 @@ public class ReferenceIndexTests
         var key = reference.Symbol.Key;
         return key[(key.LastIndexOf('.') + 1)..];
     }
+
+    private static string Rendered(CompilationResult result)
+        => string.Join(Environment.NewLine, result.Diagnostics.Select(diagnostic => diagnostic.ToString()));
 
     private static int Offset(string text)
     {

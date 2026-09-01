@@ -81,7 +81,8 @@ public class ParserTests
         Assert.Empty(diagnostics);
 
         var test = Assert.Single(unit.Tests);
-        Assert.Equal("Invoice.total_cents", test.TargetName.Text);
+        Assert.Equal("Invoice", test.Target.Receiver.Text);
+        Assert.Equal("total_cents", test.Target.Method.Text);
         Assert.Equal("sums line totals", test.Name);
         Assert.IsType<TestReturnExpectation>(test.Expectation);
 
@@ -686,7 +687,8 @@ public class ParserTests
 
         foreach (var test in unit.Tests)
         {
-            yield return test.TargetName;
+            yield return test.Target.Receiver;
+            yield return test.Target.Method;
 
             foreach (var name in Names(test.Receiver.Fields))
             {
