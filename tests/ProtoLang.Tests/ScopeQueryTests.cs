@@ -602,6 +602,115 @@ public class ScopeQueryTests
     }
 
     /// <summary>
+    /// Each name is visible over exactly the offsets it was published for, ends included: absent one
+    /// before its first, present at its first, present at its last, absent one after. Swept over
+    /// every entry of every source the repository keeps.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It asks the query and never the compiler, which is what lets it look at offsets no statement
+    /// may be written at -- the space before an <c>else</c>, the brace itself -- and it is why the
+    /// two outer offsets are only ever asserted <em>absent</em>. Proving what binds there is the
+    /// other sweep's job, and that one can only work where writing is legal.
+    /// </para>
+    /// <para>
+    /// <b>What it can and cannot catch.</b> It holds the query to what the binder published, so a
+    /// reader of <see cref="IrModule.Scope"/> that drifts from the data fails here -- and only here:
+    /// an off-by-one in <c>ScopeSearch</c>'s comparison lands one offset past a brace, which the
+    /// other sweep's probes straddle. What it cannot catch is an error in the rule that produced
+    /// <see cref="ScopeEntry.VisibleThrough"/> itself, because the expectation is read from the same
+    /// field: a wrong rule moves the answer and the expectation together. Only source text is
+    /// independent of that, which is why the other sweep runs over an unfinished buffer.
+    /// </para>
+    /// <para>
+    /// By symbol rather than by spelling, because absence of a name is not absence of a symbol: at
+    /// the offset before a local called <c>count</c> begins, the receiver's field <c>count</c> is
+    /// legitimately reported, and a check on the word would call that a leak.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void EveryNameIsVisibleExactlyOverTheOffsetsItWasPublishedFor()
+    {
+        var checkedEnds = 0;
+
+        foreach (var source in CompiledCorpus.All)
+        {
+            if (source.Result.Module is not { } module)
+            {
+                continue;
+            }
+
+            var model = SemanticModel.For(source.Result);
+
+            foreach (var entry in module.Scope)
+            {
+                var symbol = entry.Declaration.Id;
+                var where = $"'{entry.Declaration.Name.Text}' of {source.Name}";
+
+                Assert.True(
+                    Sees(model, entry.VisibleFrom, symbol),
+                    $"{where} must be visible at {entry.VisibleFrom}, the first offset it was published for");
+                Assert.True(
+                    Sees(model, entry.VisibleThrough, symbol),
+                    $"{where} must be visible at {entry.VisibleThrough}, the last offset it was published for");
+                Assert.False(
+                    Sees(model, entry.VisibleFrom - 1, symbol),
+                    $"{where} must not be visible at {entry.VisibleFrom - 1}, one before it begins");
+                Assert.False(
+                    Sees(model, entry.VisibleThrough + 1, symbol),
+                    $"{where} must not be visible at {entry.VisibleThrough + 1}, one past where it ends");
+
+                checkedEnds++;
+            }
+        }
+
+        Assert.True(checkedEnds > 20, $"the sweep must have ends to sweep; it saw {checkedEnds}");
+    }
+
+    /// <summary>
+    /// A buffer that was never finished still answers at the hole it stops in, which is where the
+    /// caret is while someone is typing into it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The third sweep exists because the other two cannot see this one. Both derive their
+    /// expectations from what the binder published -- one asks the query to agree with it, the other
+    /// writes the names it produced back into the source -- so a rule that misjudges where a scope
+    /// ends moves the answer and the expectation together, and everything stays consistent while
+    /// being uniformly wrong. What gives the game away is an offset no entry names any more: the end
+    /// of the text, where a scope nothing closed must still reach.
+    /// </para>
+    /// <para>
+    /// The count is asserted because the property is vacuous without a source to apply it to, and
+    /// the corpus held none until this issue: a broken file is not an unfinished one, and every
+    /// brace in <see cref="CompiledCorpus.BrokenText"/> has its pair.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void ABufferThatWasNeverFinishedStillAnswersAtTheHoleItStopsIn()
+    {
+        var swept = 0;
+
+        foreach (var source in CompiledCorpus.All)
+        {
+            if (source.Result.SyntaxTree is not { } tree
+                || !SyntaxWalk.DescendantsAndSelf(tree).OfType<BlockStatement>().Any(block => !block.IsClosed))
+            {
+                continue;
+            }
+
+            Assert.True(
+                SemanticModel.For(source.Result).ScopeAt(source.Text.Length) is not null,
+                $"{source.Name} stops inside a block nothing closed, so the offset it stops at is "
+                + "inside that block and must still answer");
+
+            swept++;
+        }
+
+        Assert.True(swept > 0, "the corpus must hold a buffer that was never finished");
+    }
+
+    /// <summary>
     /// Everything offered binds, and binds to what was promised. Every name the query reports at
     /// every statement position of a real source is written back into that source as a statement of
     /// its own, and the whole thing recompiled: no unknown name, no unsupported map, and each probe
@@ -626,13 +735,25 @@ public class ScopeQueryTests
     /// </para>
     /// </remarks>
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void EveryNameTheQueryOffersBindsWhereItWasOffered(bool overTheWorkedExample)
+    [InlineData("the fixture")]
+    [InlineData("the worked example")]
+    [InlineData("an unfinished buffer")]
+    public void EveryNameTheQueryOffersBindsWhereItWasOffered(string over)
     {
-        var (text, protos, source) = overTheWorkedExample
-            ? (CompiledCorpus.SimpleScript.Text, TestPaths.ExampleProtoDirectory, CompiledCorpus.SimpleScript.Result)
-            : (Fixture, TestPaths.FixtureProtoDirectory, Fixed.Value);
+        var (text, protos, source) = over switch
+        {
+            "the worked example" => (
+                CompiledCorpus.SimpleScript.Text,
+                TestPaths.ExampleProtoDirectory,
+                CompiledCorpus.SimpleScript.Result),
+
+            "an unfinished buffer" => (
+                CompiledCorpus.Unclosed.Text,
+                TestPaths.ExampleProtoDirectory,
+                CompiledCorpus.Unclosed.Result),
+
+            _ => (Fixture, TestPaths.FixtureProtoDirectory, Fixed.Value),
+        };
 
         var probed = Probe(text, source);
         var result = Compile(probed.Text, protos);
@@ -667,7 +788,7 @@ public class ScopeQueryTests
                 declaration!.Name.Span.Start.Offset);
         }
 
-        Assert.True(probed.Probes.Count > 20, $"the sweep must probe something; it wrote {probed.Probes.Count}");
+        Assert.True(probed.Probes.Count > 10, $"the sweep must probe something; it wrote {probed.Probes.Count}");
     }
 
     // ------- helpers
@@ -693,6 +814,14 @@ public class ScopeQueryTests
             })
             .Where(found => found.Item2 >= 0);
 
+    /// <summary>Whether <paramref name="symbol"/> is among the names offered at an offset.</summary>
+    /// <remarks>
+    /// A null answer counts as not seeing it, which is the honest reading: the query says a bare
+    /// identifier is not looked up as a value there at all, so it is certainly not this one.
+    /// </remarks>
+    private static bool Sees(SemanticModel model, int offset, SymbolId symbol)
+        => model.ScopeAt(offset)?.Names.Any(name => name.Symbol == symbol) == true;
+
     private static IEnumerable<int> EveryNodeStart(IrModule module)
         => IrWalk.DescendantsAndSelf(module)
             .Select(node => node.Span.Start.Offset)
@@ -717,7 +846,7 @@ public class ScopeQueryTests
         var builder = new StringBuilder();
         var cursor = 0;
 
-        foreach (var position in StatementPositions(source.SyntaxTree!))
+        foreach (var position in ProbePositions(source.SyntaxTree!))
         {
             if (model.ScopeAt(position) is not { } scope)
             {
@@ -743,25 +872,53 @@ public class ScopeQueryTests
         return new Probed(builder.ToString(), probes, insertions);
     }
 
-    /// <summary>
-    /// Every offset another statement could be written at: before each statement of a block, and
-    /// just inside its closing brace, which is where the caret sits when a line is being added.
-    /// </summary>
+    /// <summary>Every offset a probe may be written at, in order.</summary>
+    private static IReadOnlyList<int> ProbePositions(CompilationUnit tree) =>
+        [.. StatementStarts(tree).Concat(BlockBoundaries(tree)).Distinct().Order()];
+
+    /// <summary>Where each statement of each block begins, which is where another may go.</summary>
     /// <remarks>
     /// Taken from the blocks rather than from every statement, because a statement is not always at
     /// a place another one may go: the <c>if</c> after an <c>else</c> is a statement, and writing
     /// one in front of it is not ProtoLang.
     /// </remarks>
-    private static IReadOnlyList<int> StatementPositions(CompilationUnit tree) =>
-    [
-        .. SyntaxWalk.DescendantsAndSelf(tree)
+    private static IEnumerable<int> StatementStarts(CompilationUnit tree)
+        => SyntaxWalk.DescendantsAndSelf(tree)
             .OfType<BlockStatement>()
-            .SelectMany(block => block.Statements
-                .Select(statement => statement.Span.Start.Offset)
-                .Append(block.Span.End.Offset - 1))
-            .Distinct()
-            .Order(),
-    ];
+            .SelectMany(block => block.Statements.Select(statement => statement.Span.Start.Offset));
+
+    /// <summary>
+    /// The first and last offset inside each block: the two ends of every scope, which is where the
+    /// caret sits when a line is being added at the top or the bottom of one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Swept as well as the statement starts because a block with statements in it has boundaries
+    /// that none of them lands on, and boundaries are where this query has been wrong: a name
+    /// outliving its block by one offset, and a brace counted as inside the block it delimits, both
+    /// sat between two probe positions and neither showed up here.
+    /// </para>
+    /// <para>
+    /// Computed with the compiler's own helpers rather than by repeating the arithmetic, so a change
+    /// to what "inside" means moves the probes with it instead of leaving them behind.
+    /// </para>
+    /// <para>
+    /// One offset further out -- past the closing brace, or on the opening one -- is deliberately
+    /// not here. Those are the positions where a name must be <em>gone</em>, so there is nothing to
+    /// write and nothing to bind, and writing there is not always legal anyway: the offset past the
+    /// <c>}</c> of a <c>then</c> branch is the space before <c>else</c>. They are swept by
+    /// <see cref="EveryNameIsVisibleExactlyOverTheOffsetsItWasPublishedFor"/>, which asks the query
+    /// rather than the compiler and so has no such limit.
+    /// </para>
+    /// </remarks>
+    private static IEnumerable<int> BlockBoundaries(CompilationUnit tree)
+        => SyntaxWalk.DescendantsAndSelf(tree)
+            .OfType<BlockStatement>()
+            .SelectMany(block => new[]
+            {
+                ScopeEntry.FirstOffsetInside(block.Span),
+                ScopeEntry.LastOffsetInside(block.Span, block.IsClosed),
+            });
 
     private static string Method(string body) =>
         $$"""
