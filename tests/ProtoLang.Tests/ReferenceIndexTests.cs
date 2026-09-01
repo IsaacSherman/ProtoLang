@@ -76,9 +76,9 @@ public class ReferenceIndexTests
     /// the range covers, its last dotted segment has to be what the symbol is called.
     /// </summary>
     /// <remarks>
-    /// Dotted rather than exact, because two ranges legitimately cover a qualified name -- an enum
-    /// named <c>protolang.conformance.EnumCase.Level</c>, and a test target written
-    /// <c>Invoice.total_cents</c> -- and in both the compiler has no narrower range to offer.
+    /// Dotted rather than exact, because a range can legitimately cover a qualified name -- for
+    /// example an enum named <c>protolang.conformance.EnumCase.Level</c>, where the whole name is
+    /// what resolves to the type.
     /// </remarks>
     [Fact]
     public void EveryRecordedRangeCoversTheNameItClaims()
