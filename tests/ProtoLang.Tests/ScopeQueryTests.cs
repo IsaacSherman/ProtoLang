@@ -313,6 +313,56 @@ public class ScopeQueryTests
         Assert.Null(Model().ScopeAt(Offset("\"multiplies the count\"")));
     }
 
+    [Fact]
+    public void ATestHeaderWithAMissingExpectationIsStillNotAValuePosition()
+    {
+        const string source =
+            """
+            import proto "fixtures.proto";
+
+            extend Outer {
+                fn f() -> int64 {
+                    return count;
+                }
+            }
+
+            test Outer.f "missing expectation" {
+                receiver {
+                    count = 7;
+                }
+            }
+            """;
+
+        var model = SemanticModel.For(Compile(source, TestPaths.FixtureProtoDirectory));
+
+        Assert.Null(model.ScopeAt(source.IndexOf("Outer.f", StringComparison.Ordinal)));
+        Assert.Null(model.ScopeAt(source.IndexOf("\"missing expectation\"", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void ATestHeaderWithAMissingReceiverIsStillNotAValuePosition()
+    {
+        const string source =
+            """
+            import proto "fixtures.proto";
+
+            extend Outer {
+                fn f() -> int64 {
+                    return count;
+                }
+            }
+
+            test Outer.f "missing receiver" {
+                expect return 7;
+            }
+            """;
+
+        var model = SemanticModel.For(Compile(source, TestPaths.FixtureProtoDirectory));
+
+        Assert.Null(model.ScopeAt(source.IndexOf("Outer.f", StringComparison.Ordinal)));
+        Assert.Null(model.ScopeAt(source.IndexOf("\"missing receiver\"", StringComparison.Ordinal)));
+    }
+
     /// <summary>
     /// The one exclusion that cannot be made from the IR, which keeps no node for a type reference
     /// at all -- so the syntax tree answers it. A name written here resolves to a message or an

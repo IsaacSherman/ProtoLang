@@ -270,6 +270,10 @@ public sealed class Parser
         var name = Expect(TokenKind.StringLiteral);
         Expect(TokenKind.OpenBrace);
 
+        // Where a part nobody wrote would be written: just inside the brace. Taken before the body
+        // is parsed, because that is the only moment the position is at hand.
+        var insertionPoint = InsertionPointAfterPreviousToken();
+
         TestReceiverFixture? receiver = null;
         var arguments = new List<TestArgumentDeclaration>();
         TestExpectation? expectation = null;
@@ -318,7 +322,13 @@ public sealed class Parser
                 "A ProtoLang unit test must declare the protobuf receiver fixture.",
                 Spanning(start, end),
                 "Add a 'receiver { ... }' block.");
-            receiver = new TestReceiverFixture([], Spanning(start, end));
+
+            // The diagnostic is about the whole test; the node stands for a block that is not there,
+            // and spans the empty point one would be typed at -- the rule SyntaxName.Missing and
+            // IrMissingMemberAccess already follow. Spanning the test instead made a fixture nobody
+            // wrote the innermost thing at every offset of the declaration, its header included, so a
+            // position query on 'test Outer.f' answered with a receiver fixture.
+            receiver = new TestReceiverFixture([], insertionPoint);
         }
 
         if (expectation is null)
@@ -328,7 +338,10 @@ public sealed class Parser
                 "test is missing an expectation",
                 "A ProtoLang unit test must declare 'expect return <value>;' or 'expect fail;'.",
                 Spanning(start, end));
-            expectation = new TestFailExpectation(Spanning(start, end));
+
+            // Same rule, same point. Both stand-ins share it when both are absent, which is what a
+            // caret between the braces of an empty test should find: two things that are not there.
+            expectation = new TestFailExpectation(insertionPoint);
         }
 
         return new TestDeclaration(
