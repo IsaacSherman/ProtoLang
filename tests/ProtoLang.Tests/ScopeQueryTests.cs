@@ -59,7 +59,13 @@ public class ScopeQueryTests
 
             fn shadows() -> int64 {
                 var count: int64 = 5;
-                return count;
+                var level: TopLevelStatus = TopLevelStatus.TOP_LEVEL_STATUS_OK;
+
+                if level == status {
+                    return count;
+                }
+
+                return 0;
             }
         }
 
@@ -152,9 +158,24 @@ public class ScopeQueryTests
     [Fact]
     public void APositionAfterTheLastStatementOfABlockStillSeesTheBlock()
     {
-        var closingBrace = Fixture.IndexOf("}", Offset("running = running + 1"), StringComparison.Ordinal);
+        Assert.Contains("value", NamesAt(ClosingBraceOfTheLoop));
+    }
 
-        Assert.Contains("value", NamesAt(closingBrace));
+    /// <summary>
+    /// The offset on the other side of the same brace, which is where <c>} else {</c> and the end of
+    /// every nested block put a caret. A span is half-open, so its end is one past the brace and
+    /// already outside the scope -- but the containment rule position queries use is deliberately
+    /// end-inclusive, and borrowing it here would keep a block's names alive for exactly this one
+    /// offset. The names of the block that closed are gone; the ones around it are not.
+    /// </summary>
+    [Fact]
+    public void ALocalIsGoneAtTheCaretPastTheBraceThatClosedItsBlock()
+    {
+        var names = NamesAt(ClosingBraceOfTheLoop + 1);
+
+        Assert.DoesNotContain("value", names);
+        Assert.Contains("running", names);
+        Assert.Contains("count", names);
     }
 
     // ------- fields of the receiver
@@ -235,6 +256,40 @@ public class ScopeQueryTests
     {
         Assert.Null(Model().ScopeAt(Offset("import proto")));
         Assert.Null(Model().ScopeAt(Offset("extend Outer")));
+    }
+
+    /// <summary>
+    /// A method's header is inside the method and is not a place a bare identifier is looked up as a
+    /// value: the name being declared, the parameter names, and the return type are each names, and
+    /// none of them is one this list could be the answer for. Null rather than a list that does not
+    /// apply, which is what makes the contract above hold wherever there is an answer at all.
+    /// </summary>
+    [Fact]
+    public void AMethodHeaderIsNotAPlaceABareNameIsLookedUp()
+    {
+        Assert.Null(Model().ScopeAt(Offset("scaled(factor")));
+        Assert.Null(Model().ScopeAt(Offset("factor: int64")));
+        Assert.Null(Model().ScopeAt(Offset("-> int64 {") + "-> ".Length));
+    }
+
+    /// <inheritdoc cref="AMethodHeaderIsNotAPlaceABareNameIsLookedUp"/>
+    [Fact]
+    public void ATestHeaderIsNotAPlaceABareNameIsLookedUp()
+    {
+        Assert.Null(Model().ScopeAt(Offset("test Outer.scaled") + "test ".Length));
+        Assert.Null(Model().ScopeAt(Offset("\"multiplies the count\"")));
+    }
+
+    /// <summary>
+    /// The one exclusion that cannot be made from the IR, which keeps no node for a type reference
+    /// at all -- so the syntax tree answers it. A name written here resolves to a message or an
+    /// enum, never to a local, a parameter or a field.
+    /// </summary>
+    [Fact]
+    public void ATypePositionIsNotAPlaceAValueNameIsLookedUp()
+    {
+        Assert.Null(Model().ScopeAt(Offset("int64 = count")));
+        Assert.Null(Model().ScopeAt(Offset("TopLevelStatus = ")));
     }
 
     // ------- names that never entered scope
@@ -680,6 +735,10 @@ public class ScopeQueryTests
         Assert.True(offset >= 0, $"the fixture must contain '{text}'");
         return offset;
     }
+
+    /// <summary>The brace closing the loop body, which is the last offset its binding is visible at.</summary>
+    private static int ClosingBraceOfTheLoop
+        => Fixture.IndexOf("}", Offset("running = running + 1"), StringComparison.Ordinal);
 
     private static ScopeAtPosition ScopeAt(int offset) => ScopeAt(Model(), offset);
 

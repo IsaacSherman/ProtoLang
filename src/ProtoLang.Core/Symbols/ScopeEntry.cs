@@ -27,6 +27,15 @@ namespace ProtoLang.Symbols;
 /// copying it into every method would be one copy per method of something the descriptor already
 /// holds. The query adds them; see <c>ScopeSearch</c>.
 /// </para>
+/// <para>
+/// <b>A closed range of offsets, not a span.</b> The scope's own extent would be the obvious thing
+/// to carry and is the wrong one twice over. Its start is redundant, because a name is visible from
+/// a point inside its scope and never before it. And its end is one past the closing brace, since a
+/// <see cref="Diagnostics.SourceSpan"/> is half-open -- so containment against it would keep a
+/// block's locals alive for one offset after the brace that closed them, which is exactly where
+/// <c>} else {</c> puts a caret. Two integers and two comparisons say what is meant and cannot be
+/// read the other way.
+/// </para>
 /// </remarks>
 /// <param name="Declaration">
 /// What was declared. Carries the identity, the kind, the spelling and both ranges already, so none
@@ -36,20 +45,19 @@ namespace ProtoLang.Symbols;
 /// What the name is worth. The one thing a <see cref="DeclarationSite"/> does not hold, because a
 /// declaration site is written by the parser's shape and a type is settled by the binder.
 /// </param>
-/// <param name="Region">
-/// The extent of the scope this name entered -- the whole method for a parameter, the block for a
-/// local, the whole <c>for</c> statement for a loop binding. A position outside it cannot see the
-/// name however far along the file it is.
-/// </param>
 /// <param name="VisibleFrom">
-/// The offset from which the name resolves. Not the same as the start of <paramref name="Region"/>,
-/// and that difference is the whole of the declaration-order rule: a local enters scope after its
-/// own initializer is bound, so <c>var x: int64 = x;</c> reports an unknown name, and a loop binding
+/// The first offset at which the name resolves. Not the start of the scope it entered, and that
+/// difference is the whole of the declaration-order rule: a local enters scope after its own
+/// initializer is bound, so <c>var x: int64 = x;</c> reports an unknown name, and a loop binding
 /// enters after its collection, so <c>for x in x { }</c> does too. Recording the point rather than
 /// the rule means neither case has to be restated anywhere else.
+/// </param>
+/// <param name="VisibleThrough">
+/// The last offset at which the name resolves, inclusive -- the closing brace of the scope it
+/// entered, or the end of the file when the parser never found one.
 /// </param>
 public sealed record ScopeEntry(
     DeclarationSite Declaration,
     PlType Type,
-    SourceSpan Region,
-    int VisibleFrom);
+    int VisibleFrom,
+    int VisibleThrough);

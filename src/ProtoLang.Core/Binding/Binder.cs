@@ -56,6 +56,9 @@ public sealed class Binder
     /// the fact this list exists to carry, and the one no later walk of the tree could recover.
     /// </remarks>
     private readonly List<ScopeEntry> _scope = [];
+
+    /// <summary>Where the source being bound ran out. See <see cref="LastVisibleOffsetIn"/>.</summary>
+    private int _endOfFile;
     private readonly NumericPolicy _policy;
     private readonly ProjectConfig _config;
     private readonly SourceIdentity _document;
@@ -149,6 +152,8 @@ public sealed class Binder
     /// </remarks>
     public IrModule Bind(CompilationUnit unit)
     {
+        _endOfFile = unit.Span.End.Offset;
+
         // Pass 1: resolve extend targets and collect signatures.
         var resolvedExtends = new List<(ExtendDeclaration Declaration, MessageDescriptor Receiver)>();
 
@@ -235,18 +240,36 @@ public sealed class Binder
     /// it here would mean offering an author a name that then binds elsewhere.
     /// </remarks>
     private void Declare(Scope scope, DeclarationSite declaration, PlType type, int visibleFrom)
-        => _scope.Add(new ScopeEntry(declaration, type, scope.Extent, visibleFrom));
+        => _scope.Add(new ScopeEntry(declaration, type, visibleFrom, scope.LastVisibleOffset));
+
+    /// <summary>
+    /// The last offset at which a name declared in a scope covering <paramref name="extent"/> can
+    /// still be written.
+    /// </summary>
+    /// <remarks>
+    /// One before the end, because a span is half-open and the last character of a scope is the
+    /// brace that closes it: a caret one past that brace has left the scope, and that is precisely
+    /// where <c>} else {</c> and the end of any nested block put one.
+    /// <para>
+    /// Unless the parser never found the brace. A block that ran out of file ends where the file
+    /// does, and that offset is not a delimiter -- it is the hole the author is typing into, and the
+    /// position an editor asks about most while a file is incomplete. The two cases are told apart
+    /// by the end of the compilation unit, which is the only place a scope's span can reach without
+    /// something having closed it.
+    /// </para>
+    /// </remarks>
+    private int LastVisibleOffsetIn(SourceSpan extent)
+        => extent.End.Offset >= _endOfFile ? _endOfFile : extent.End.Offset - 1;
 
     /// <summary>A scope holding nothing, for an expression with no locals or parameters to see.</summary>
     /// <remarks>
     /// Every expression inside a <c>test</c> binds against one of these -- a fixture value, an
     /// argument, an expectation -- which together with
     /// <see cref="MethodContext.AllowImplicitReceiverFields"/> being false there is why a bare name
-    /// in a test resolves to nothing at all. It carries no extent because nothing may be declared in
-    /// it: it covers no position, so it can contribute nothing to <see cref="IrModule.Scope"/> and
-    /// hide nothing from a query.
+    /// in a test resolves to nothing at all. It reaches nowhere because nothing may be declared in
+    /// it: it can contribute nothing to <see cref="IrModule.Scope"/> and hide nothing from a query.
     /// </remarks>
-    private static Scope NoNames() => new(null, SourceSpan.None);
+    private static Scope NoNames() => new(null, -1);
 
     /// <summary>The name an assignment writes to, or null when its target names nothing.</summary>
     /// <remarks>
@@ -588,10 +611,10 @@ public sealed class Binder
             return null;
         }
 
-        // The whole declaration, 'fn' through the closing brace, because a parameter is nameable
-        // everywhere inside one -- including in a later parameter's type position, which is harmless
-        // and is what the binder does today.
-        var scope = new Scope(null, method.Span);
+        // The body, not the whole declaration. A parameter is only ever written as a value, and the
+        // header holds no expression to write one in: a later parameter's type resolves to a message
+        // or an enum and could not name a parameter if it tried.
+        var scope = new Scope(null, LastVisibleOffsetIn(method.Body.Span));
 
         foreach (var parameter in signature.Parameters)
         {
@@ -613,7 +636,7 @@ public sealed class Binder
                 continue;
             }
 
-            Declare(scope, parameter.Declaration, parameter.Type, scope.Extent.Start.Offset);
+            Declare(scope, parameter.Declaration, parameter.Type, method.Body.Span.Start.Offset);
         }
 
         var context = new MethodContext(receiver, signature.ReturnType);
@@ -1018,7 +1041,7 @@ public sealed class Binder
 
     private IrBlock BindBlock(BlockStatement block, Scope parent, MethodContext context)
     {
-        var scope = new Scope(parent, block.Span);
+        var scope = new Scope(parent, LastVisibleOffsetIn(block.Span));
         var statements = new List<IrStatement>();
 
         foreach (var statement in block.Statements)
@@ -1306,7 +1329,7 @@ public sealed class Binder
             elementType = ErrorType.Instance;
         }
 
-        var loopScope = new Scope(scope, statement.Span);
+        var loopScope = new Scope(scope, LastVisibleOffsetIn(statement.Span));
 
         // The extent is the whole loop rather than its header: the parser records no span for the
         // header alone, and a client showing a loop binding in context wants the loop it binds over.
@@ -2552,21 +2575,20 @@ public sealed class Binder
         private readonly Dictionary<string, IrLocal> _locals = new(StringComparer.Ordinal);
         private readonly Dictionary<string, IrParameter> _parameters = new(StringComparer.Ordinal);
 
-        /// <param name="extent">
-        /// The range over which what this scope holds can be named. It exists so a scope can be
-        /// published rather than only used: a chain of parent pointers means nothing once the
-        /// descent that built it has returned, and a range still answers "is this position inside
-        /// me". <see cref="SourceSpan.None"/> for a scope nothing may be declared in, which is
-        /// nowhere and therefore contains no position.
+        /// <param name="lastVisibleOffset">
+        /// The last offset at which what this scope holds can still be named. It exists so a scope
+        /// can be published rather than only used: a chain of parent pointers means nothing once the
+        /// descent that built it has returned, while an offset still answers the question a caret
+        /// asks. See <see cref="LastVisibleOffsetIn"/> for why it is not simply the end of a span.
         /// </param>
-        public Scope(Scope? parent, SourceSpan extent)
+        public Scope(Scope? parent, int lastVisibleOffset)
         {
             _parent = parent;
-            Extent = extent;
+            LastVisibleOffset = lastVisibleOffset;
         }
 
-        /// <inheritdoc cref="ScopeEntry.Region"/>
-        public SourceSpan Extent { get; }
+        /// <inheritdoc cref="ScopeEntry.VisibleThrough"/>
+        public int LastVisibleOffset { get; }
 
         public bool TryDeclareLocal(IrLocal local)
         {

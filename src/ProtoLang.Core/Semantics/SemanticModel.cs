@@ -241,20 +241,37 @@ public sealed class SemanticModel
     /// and it is why the set is narrower than "everything nameable": a method resolves only in call
     /// position and a type only in type position, so neither is here. A local hides a field of the
     /// receiver with the same spelling, and only the winner is listed, because a list that offered
-    /// both would offer a word that means something other than what it says.
+    /// both would offer a word that means something other than what it says. Where a bare
+    /// identifier would not be looked up as a value at all, the answer is null rather than a list
+    /// that does not apply -- so the contract holds wherever there is an answer.
     /// </para>
     /// <para>
-    /// Null means the offset is between declarations, in an import, in an <c>extend</c> header, or
-    /// outside the file -- places where a bare identifier means nothing rather than nothing being in
-    /// scope. Inside a <c>test</c> the answer is an empty list with a receiver, which is a different
-    /// statement: there is a message being tested, and no unqualified name resolves against it.
+    /// <b>Null means a bare identifier is not looked up as a value here</b>, which is not the same
+    /// as nothing being in scope. An import, an <c>extend</c> header, the gap between two
+    /// declarations, a method's own name or parameter list or return type, a test's target, and any
+    /// type position all answer null: each of them holds names, and none of them holds one this
+    /// list could ever be the answer for. Inside a <c>test</c>, past its header, the answer is a
+    /// receiver and an empty list -- the other statement, and the true one there, because every
+    /// expression in a test binds against an empty scope with no implicit receiver fields.
     /// </para>
     /// <para>
-    /// A position in <em>type</em> position gets an answer too, and it is the wrong list -- the
-    /// names of values, where a type name belongs. Deciding which question a caret is asking is the
-    /// caller's, from <see cref="SyntaxAt"/>; this answers only the one it was asked.
+    /// Type position is the one exclusion this cannot make from the IR, which keeps no node for a
+    /// type reference at all -- <c>ResolveTypeReference</c> produces a <c>PlType</c> and drops the
+    /// site. So the syntax tree is asked, through the <see cref="NodePath{T}.Enclosing{T}"/> whose
+    /// own documentation names this exact question. It costs a second walk on a query that is
+    /// already linear, and it is what lets the contract above be stated without an exception.
     /// </para>
     /// </remarks>
     public ScopeAtPosition? ScopeAt(int offset)
-        => _module is null ? null : ScopeSearch.At(_module, offset);
+    {
+        if (_module is null)
+        {
+            return null;
+        }
+
+        // A name written here resolves to a message or an enum, and to none of what this reports.
+        return SyntaxAt(offset)?.Enclosing<TypeReference>() is null
+            ? ScopeSearch.At(_module, offset)
+            : null;
+    }
 }
