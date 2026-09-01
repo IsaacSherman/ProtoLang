@@ -39,6 +39,34 @@ public sealed record IrModule(IReadOnlyList<IrMethod> Methods, IReadOnlyList<IrT
     /// </para>
     /// </remarks>
     public IReadOnlyList<SymbolReference> References { get; init; } = [];
+
+    /// <summary>
+    /// Every name the binder put in scope, with the range it is in scope over and the point it
+    /// becomes visible from.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The binder's <c>Scope</c> chain, published instead of discarded. Completion on a bare
+    /// identifier is the consumer, and it asks at a position the binder never knew about -- so the
+    /// chain has to outlive the descent that built it, and the only shape that survives the descent
+    /// is a flat one keyed by range.
+    /// </para>
+    /// <para>
+    /// Recorded where each name is declared, on the branch where the declaration succeeded, for the
+    /// reason <see cref="References"/> gives about resolution: only that point knows whether the
+    /// name won. Reconstructing it from the tree would mean restating four rules the binder owns --
+    /// which parameters enter, that a duplicate does not and the outer name keeps binding, that a
+    /// local enters after its own initializer, and that a loop binding enters after its collection
+    /// -- and the fourth copy of a rule is where an editor starts offering a name that then binds to
+    /// something else.
+    /// </para>
+    /// <para>
+    /// Init-only with an empty default, on the same terms as <see cref="References"/>: every
+    /// existing construction of a module stays valid, and a module hand-built for a test answers
+    /// "nothing is in scope" rather than null.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<ScopeEntry> Scope { get; init; } = [];
 }
 
 /// <summary>Anything in the IR that is somewhere in the source text.</summary>
@@ -136,7 +164,16 @@ public sealed record IrMethod(IrMethodSignature Signature, IrBlock Body, bool Is
 
 public abstract record IrStatement(SourceSpan Span) : IrNode(Span);
 
-public sealed record IrBlock(IReadOnlyList<IrStatement> Statements, SourceSpan Span) : IrStatement(Span);
+public sealed record IrBlock(IReadOnlyList<IrStatement> Statements, SourceSpan Span) : IrStatement(Span)
+{
+    /// <inheritdoc cref="Syntax.BlockStatement.IsClosed"/>
+    /// <remarks>
+    /// Carried through from the syntax rather than re-derived, because it is a fact about the tokens
+    /// and nothing below the parser has any. True for a block the binder synthesized, which is not
+    /// delimited at all and so is missing nothing.
+    /// </remarks>
+    public bool IsClosed { get; init; } = true;
+}
 
 public sealed record IrVariableDeclaration(IrLocal Local, IrExpression Initializer, SourceSpan Span)
     : IrStatement(Span);

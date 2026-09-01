@@ -100,7 +100,30 @@ public sealed record TestFailExpectation(SourceSpan Span) : TestExpectation(Span
 
 public abstract record Statement(SourceSpan Span) : SyntaxNode(Span);
 
-public sealed record BlockStatement(IReadOnlyList<Statement> Statements, SourceSpan Span) : Statement(Span);
+public sealed record BlockStatement(IReadOnlyList<Statement> Statements, SourceSpan Span) : Statement(Span)
+{
+    /// <summary>Whether the parser found the brace that closes this block.</summary>
+    /// <remarks>
+    /// <para>
+    /// Only the parser can answer it, and only it holds the token that says so, so it is recorded
+    /// here rather than inferred later. The inference that suggests itself -- a block whose span
+    /// ends where the file ends was never closed -- is wrong for the case that matters most: a file
+    /// being typed into ends mid-construct, and the last thing before the hole is very often a
+    /// block that <em>was</em> closed. Its brace is then the final character of the file and the
+    /// inference calls it open.
+    /// </para>
+    /// <para>
+    /// What turns on it is where a block's names stop. A span is half-open, so its end is one past
+    /// the closing brace and already outside; a block nothing closed ends at the point the author is
+    /// typing at, which is inside. See <see cref="Symbols.ScopeEntry.LastOffsetInside"/>.
+    /// </para>
+    /// <para>
+    /// Init-only and true by default, so every existing construction stays valid and a block built
+    /// by hand is a whole one. A parser is the only thing that can have found a brace missing.
+    /// </para>
+    /// </remarks>
+    public bool IsClosed { get; init; } = true;
+}
 
 public sealed record VariableDeclarationStatement(
     SyntaxName Name,

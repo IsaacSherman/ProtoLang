@@ -447,6 +447,43 @@ public class PositionQueryTests
             Assert.IsType<NameExpression>(model.SyntaxAt(inTheCallee)?.Node).Name.Text);
     }
 
+    /// <summary>
+    /// A part of a test that was never written stands at the empty point one would be typed at, not
+    /// over the declaration it is missing from. The rule <see cref="SyntaxName.Missing"/> and
+    /// <see cref="IrMissingMemberAccess"/> already follow, applied to the two stand-ins the parser
+    /// builds for an absent <c>receiver</c> block and an absent <c>expect</c>.
+    /// </summary>
+    /// <remarks>
+    /// Spanning the whole test made a fixture nobody wrote the shortest node covering every offset
+    /// of the declaration -- so a caret on the target of <c>test InvoiceItem.f</c> was told it was
+    /// standing on a receiver fixture, which is neither what is written there nor anywhere a client
+    /// could navigate to.
+    /// </remarks>
+    [Fact]
+    public void APartOfATestThatWasNeverWrittenStandsWhereItWouldGo()
+    {
+        const string source =
+            """
+            import proto "invoice.proto";
+
+            extend InvoiceItem {
+                fn f() -> int64 {
+                    return quantity;
+                }
+            }
+
+            test InvoiceItem.f "neither half" {
+            }
+            """;
+
+        var model = SemanticModel.For(Compile(source, TestPaths.ExampleProtoDirectory));
+        var target = source.IndexOf("InvoiceItem.f", StringComparison.Ordinal);
+        var brace = source.IndexOf("{", source.IndexOf("\"neither half\"", StringComparison.Ordinal), StringComparison.Ordinal);
+
+        Assert.Null(model.IrAt(target)?.Node as IrTestMessageValue);
+        Assert.NotNull(model.IrAt(brace + 1)?.Node as IrTestMessageValue);
+    }
+
     // ------- every position at once
 
     /// <summary>

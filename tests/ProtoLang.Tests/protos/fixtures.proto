@@ -53,3 +53,11 @@ message Outer {
   // and a scalar that never needed guarding.
   Inner other_inner = 14;
 }
+
+// A message of its own rather than a field on Outer, so that adding the language's one unsupported
+// field kind cannot reach a test that was not asking about it. Reading a map is PL0038, so this is
+// what says a name that would be refused is never offered.
+message Mapped {
+  map<string, int64> tags = 1;
+  int64 count = 2;
+}

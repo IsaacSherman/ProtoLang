@@ -224,4 +224,54 @@ public sealed class SemanticModel
     /// </para>
     /// </remarks>
     public SymbolReference? ReferenceAt(int offset) => _references.Value?.ReferenceAt(offset);
+
+    /// <summary>
+    /// What a bare identifier written at <paramref name="offset"/> could mean, or null when the
+    /// offset is not inside a method body or a test.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The binder knows what is in scope at every point of a method body and used to discard it as
+    /// it descended. This is that set handed back, at a position nobody knew about while binding,
+    /// and it is what completion on a bare identifier -- the most common completion in any language
+    /// -- is made of.
+    /// </para>
+    /// <para>
+    /// <b>Every name here binds, and nothing that binds is missing.</b> That is the whole contract,
+    /// and it is why the set is narrower than "everything nameable": a method resolves only in call
+    /// position and a type only in type position, so neither is here. A local hides a field of the
+    /// receiver with the same spelling, and only the winner is listed, because a list that offered
+    /// both would offer a word that means something other than what it says. Where a bare
+    /// identifier would not be looked up as a value at all, the answer is null rather than a list
+    /// that does not apply -- so the contract holds wherever there is an answer.
+    /// </para>
+    /// <para>
+    /// <b>Null means a bare identifier is not looked up as a value here</b>, which is not the same
+    /// as nothing being in scope. An import, an <c>extend</c> header, the gap between two
+    /// declarations, a method's own name or parameter list or return type, a test's target, and any
+    /// type position all answer null: each of them holds names, and none of them holds one this
+    /// list could ever be the answer for. Inside a <c>test</c>, past its header, the answer is a
+    /// receiver and an empty list -- the other statement, and the true one there, because every
+    /// expression in a test binds against an empty scope with no implicit receiver fields.
+    /// </para>
+    /// <para>
+    /// Type position is the one exclusion this cannot make from the IR, which keeps no node for a
+    /// type reference at all -- <c>ResolveTypeReference</c> produces a <c>PlType</c> and drops the
+    /// site. So the syntax tree is asked, through the <see cref="NodePath{T}.Enclosing{T}"/> whose
+    /// own documentation names this exact question. It costs a second walk on a query that is
+    /// already linear, and it is what lets the contract above be stated without an exception.
+    /// </para>
+    /// </remarks>
+    public ScopeAtPosition? ScopeAt(int offset)
+    {
+        if (_module is null)
+        {
+            return null;
+        }
+
+        // A name written here resolves to a message or an enum, and to none of what this reports.
+        return SyntaxAt(offset)?.Enclosing<TypeReference>() is null
+            ? ScopeSearch.At(_module, offset)
+            : null;
+    }
 }

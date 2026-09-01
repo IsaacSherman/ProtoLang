@@ -270,6 +270,10 @@ public sealed class Parser
         var name = Expect(TokenKind.StringLiteral);
         Expect(TokenKind.OpenBrace);
 
+        // Where a part nobody wrote would be written: just inside the brace. Taken before the body
+        // is parsed, because that is the only moment the position is at hand.
+        var insertionPoint = InsertionPointAfterPreviousToken();
+
         TestReceiverFixture? receiver = null;
         var arguments = new List<TestArgumentDeclaration>();
         TestExpectation? expectation = null;
@@ -318,7 +322,13 @@ public sealed class Parser
                 "A ProtoLang unit test must declare the protobuf receiver fixture.",
                 Spanning(start, end),
                 "Add a 'receiver { ... }' block.");
-            receiver = new TestReceiverFixture([], Spanning(start, end));
+
+            // The diagnostic is about the whole test; the node stands for a block that is not there,
+            // and spans the empty point one would be typed at -- the rule SyntaxName.Missing and
+            // IrMissingMemberAccess already follow. Spanning the test instead made a fixture nobody
+            // wrote the innermost thing at every offset of the declaration, its header included, so a
+            // position query on 'test Outer.f' answered with a receiver fixture.
+            receiver = new TestReceiverFixture([], insertionPoint);
         }
 
         if (expectation is null)
@@ -328,7 +338,10 @@ public sealed class Parser
                 "test is missing an expectation",
                 "A ProtoLang unit test must declare 'expect return <value>;' or 'expect fail;'.",
                 Spanning(start, end));
-            expectation = new TestFailExpectation(Spanning(start, end));
+
+            // Same rule, same point. Both stand-ins share it when both are absent, which is what a
+            // caret between the braces of an empty test should find: two things that are not there.
+            expectation = new TestFailExpectation(insertionPoint);
         }
 
         return new TestDeclaration(
@@ -368,10 +381,12 @@ public sealed class Parser
             else if (!TryEnterNesting())
             {
                 // Message fixtures nest, so they carry the same budget as blocks and expressions.
+                // Whether the closer was found does not change a fixture: it declares no name, so
+                // nothing's visibility ends at its brace.
                 var abandonedEnd = Current.Span;
                 if (Match(TokenKind.OpenBrace))
                 {
-                    abandonedEnd = SkipBalancedBlock();
+                    TrySkipBalancedBlock(out abandonedEnd);
                 }
 
                 fields.Add(new TestMessageFieldInitializer(fieldName, [], Spanning(start, abandonedEnd)));
@@ -607,7 +622,8 @@ public sealed class Parser
         // Blocks nest through if/while/for bodies, so they need the same budget expressions do.
         if (!TryEnterNesting())
         {
-            return new BlockStatement([], Spanning(start, SkipBalancedBlock()));
+            var skipped = TrySkipBalancedBlock(out var closer);
+            return new BlockStatement([], Spanning(start, closer)) { IsClosed = skipped };
         }
 
         try
@@ -626,8 +642,8 @@ public sealed class Parser
                 }
             }
 
-            var end = Expect(TokenKind.CloseBrace).Span;
-            return new BlockStatement(statements, Spanning(start, end));
+            var closed = TryExpect(TokenKind.CloseBrace, out var end);
+            return new BlockStatement(statements, Spanning(start, end.Span)) { IsClosed = closed };
         }
         finally
         {
@@ -636,10 +652,21 @@ public sealed class Parser
     }
 
     /// <summary>
-    /// Consumes tokens through the closer matching an already-consumed <c>{</c>, and returns that
-    /// closer's span. Used to step over a construct too deeply nested to descend into.
+    /// Consumes tokens through the closer matching an already-consumed <c>{</c>. Used to step over a
+    /// construct too deeply nested to descend into.
     /// </summary>
-    private SourceSpan SkipBalancedBlock()
+    /// <param name="closer">
+    /// The closing brace's range, or the empty range at the end of the file when the tokens ran out
+    /// before it did.
+    /// </param>
+    /// <returns>True when a matching closer was really there.</returns>
+    /// <remarks>
+    /// The answer is published rather than inferred from <paramref name="closer"/>, for the reason
+    /// <see cref="TryExpect"/> gives: a stand-in is indistinguishable from a real token, and here
+    /// what turns on the difference is where the block's names stop. See
+    /// <see cref="BlockStatement.IsClosed"/>.
+    /// </remarks>
+    private bool TrySkipBalancedBlock(out SourceSpan closer)
     {
         var depth = 1;
 
@@ -654,14 +681,16 @@ public sealed class Parser
                 depth--;
                 if (depth == 0)
                 {
-                    return Advance().Span;
+                    closer = Advance().Span;
+                    return true;
                 }
             }
 
             Advance();
         }
 
-        return Current.Span;
+        closer = Current.Span;
+        return false;
     }
 
     private Statement ParseStatement()

@@ -48,6 +48,14 @@ public sealed class Binder
     /// reports by recording -- or by failing to.
     /// </remarks>
     private readonly List<SymbolReference> _references = [];
+
+    /// <summary>Every name this binder put in scope, in the order it declared them.</summary>
+    /// <remarks>
+    /// Published as <see cref="IrModule.Scope"/> once binding is done. Appended to only where a
+    /// <see cref="Scope"/> accepted a declaration, so a name that lost its own is absent -- which is
+    /// the fact this list exists to carry, and the one no later walk of the tree could recover.
+    /// </remarks>
+    private readonly List<ScopeEntry> _scope = [];
     private readonly NumericPolicy _policy;
     private readonly ProjectConfig _config;
     private readonly SourceIdentity _document;
@@ -195,6 +203,7 @@ public sealed class Binder
         return new IrModule(methods, tests)
         {
             References = SymbolReference.InSourceOrder(_references),
+            Scope = [.. _scope],
         };
     }
 
@@ -210,6 +219,37 @@ public sealed class Binder
     /// </remarks>
     private void Use(SymbolId symbol, SourceSpan span, ReferenceKind kind = ReferenceKind.Read)
         => _references.Add(new SymbolReference(symbol, _document, span, kind));
+
+    /// <summary>
+    /// Records that <paramref name="scope"/> accepted <paramref name="declaration"/>, and that it
+    /// can be named from <paramref name="visibleFrom"/> onwards.
+    /// </summary>
+    /// <param name="visibleFrom">
+    /// Where the name starts resolving, which is not always where its scope starts. See
+    /// <see cref="ScopeEntry.VisibleFrom"/>; each caller below is the only place that knows its own
+    /// answer, which is why the point is passed rather than worked out here.
+    /// </param>
+    /// <remarks>
+    /// Called only on the branch where a declaration succeeded, which is the whole discipline of
+    /// this list: a refused name is one the binder went on resolving to something else, and putting
+    /// it here would mean offering an author a name that then binds elsewhere.
+    /// </remarks>
+    private void Declare(Scope scope, DeclarationSite declaration, PlType type, int visibleFrom)
+        => _scope.Add(new ScopeEntry(declaration, type, visibleFrom, scope.LastVisibleOffset));
+
+    /// <inheritdoc cref="ScopeEntry.LastOffsetInside"/>
+    private static int LastVisibleOffsetIn(BlockStatement block)
+        => ScopeEntry.LastOffsetInside(block.Span, block.IsClosed);
+
+    /// <summary>A scope holding nothing, for an expression with no locals or parameters to see.</summary>
+    /// <remarks>
+    /// Every expression inside a <c>test</c> binds against one of these -- a fixture value, an
+    /// argument, an expectation -- which together with
+    /// <see cref="MethodContext.AllowImplicitReceiverFields"/> being false there is why a bare name
+    /// in a test resolves to nothing at all. It reaches nowhere because nothing may be declared in
+    /// it: it can contribute nothing to <see cref="IrModule.Scope"/> and hide nothing from a query.
+    /// </remarks>
+    private static Scope NoNames() => new(null, -1);
 
     /// <summary>The name an assignment writes to, or null when its target names nothing.</summary>
     /// <remarks>
@@ -551,7 +591,10 @@ public sealed class Binder
             return null;
         }
 
-        var scope = new Scope(null);
+        // The body, not the whole declaration. A parameter is only ever written as a value, and the
+        // header holds no expression to write one in: a later parameter's type resolves to a message
+        // or an enum and could not name a parameter if it tried.
+        var scope = new Scope(null, LastVisibleOffsetIn(method.Body));
 
         foreach (var parameter in signature.Parameters)
         {
@@ -570,7 +613,10 @@ public sealed class Binder
                     "duplicate parameter",
                     $"A parameter named '{parameter.Name}' is already declared.",
                     parameter.Declaration.Extent);
+                continue;
             }
+
+            Declare(scope, parameter.Declaration, parameter.Type, ScopeEntry.FirstOffsetInside(method.Body.Span));
         }
 
         var context = new MethodContext(receiver, signature.ReturnType);
@@ -740,7 +786,7 @@ public sealed class Binder
                         continue;
                     }
 
-                    var value = BindExpression(scalar.Value, new Scope(null), context, expectedType);
+                    var value = BindExpression(scalar.Value, NoNames(), context, expectedType);
                     if (value.Type is not ErrorType && !TypesMatch(expectedType, value.Type))
                     {
                         _diagnostics.Error(
@@ -858,7 +904,7 @@ public sealed class Binder
             }
 
             var expectedType = parameter.Type;
-            var value = BindExpression(declaration.Value, new Scope(null), context, expectedType);
+            var value = BindExpression(declaration.Value, NoNames(), context, expectedType);
             if (value.Type is not ErrorType && !TypesMatch(expectedType, value.Type))
             {
                 _diagnostics.Error(
@@ -910,7 +956,7 @@ public sealed class Binder
                         returns.Span);
                 }
 
-                var value = BindExpression(returns.Value, new Scope(null), context, signature.ReturnType);
+                var value = BindExpression(returns.Value, NoNames(), context, signature.ReturnType);
                 if (signature.ReturnType is not VoidType
                     && value.Type is not ErrorType
                     && !TypesMatch(signature.ReturnType, value.Type))
@@ -975,7 +1021,7 @@ public sealed class Binder
 
     private IrBlock BindBlock(BlockStatement block, Scope parent, MethodContext context)
     {
-        var scope = new Scope(parent);
+        var scope = new Scope(parent, LastVisibleOffsetIn(block));
         var statements = new List<IrStatement>();
 
         foreach (var statement in block.Statements)
@@ -988,7 +1034,7 @@ public sealed class Binder
             context = context with { Present = Advance(context.Present, bound) };
         }
 
-        return new IrBlock(statements, block.Span);
+        return new IrBlock(statements, block.Span) { IsClosed = block.IsClosed };
     }
 
     /// <summary>
@@ -1180,7 +1226,14 @@ public sealed class Binder
             return new IrVariableDeclaration(local, initializer, declaration.Span);
         }
 
-        if (!scope.TryDeclareLocal(local))
+        if (scope.TryDeclareLocal(local))
+        {
+            // From the end of its own declaration, because TryDeclareLocal runs after the
+            // initializer above has been bound: 'var x: int64 = x;' is an unknown name, and a query
+            // that offered x there would be offering a name that does not bind.
+            Declare(scope, local.Declaration, local.Type, declaration.Span.End.Offset);
+        }
+        else
         {
             _diagnostics.Error(
                 "PL0029",
@@ -1256,7 +1309,11 @@ public sealed class Binder
             elementType = ErrorType.Instance;
         }
 
-        var loopScope = new Scope(scope);
+        // The for statement ends where its body does, so the body is what says whether anything
+        // closed it.
+        var loopScope = new Scope(
+            scope,
+            ScopeEntry.LastOffsetInside(statement.Span, statement.Body.IsClosed));
 
         // The extent is the whole loop rather than its header: the parser records no span for the
         // header alone, and a client showing a loop binding in context wants the loop it binds over.
@@ -1264,13 +1321,24 @@ public sealed class Binder
             new DeclarationSite(SymbolKind.LoopBinding, _document, statement.VariableName, statement.Span),
             elementType);
 
-        if (!statement.VariableName.IsMissing && !loopScope.TryDeclareLocal(loop))
+        if (!statement.VariableName.IsMissing)
         {
-            _diagnostics.Error(
-                "PL0029",
-                "duplicate variable",
-                $"A variable named '{statement.VariableName}' is already in scope.",
-                statement.Span);
+            if (loopScope.TryDeclareLocal(loop))
+            {
+                // From inside the body, not from the loop and not from its brace: the collection was
+                // bound above, against the enclosing scope, so 'for x in x { }' does not see its own
+                // binding -- and the brace is where the collection ends rather than where the body
+                // begins.
+                Declare(loopScope, loop.Declaration, loop.Type, ScopeEntry.FirstOffsetInside(statement.Body.Span));
+            }
+            else
+            {
+                _diagnostics.Error(
+                    "PL0029",
+                    "duplicate variable",
+                    $"A variable named '{statement.VariableName}' is already in scope.",
+                    statement.Span);
+            }
         }
 
         var body = BindBlock(statement.Body, loopScope, context with { LoopDepth = context.LoopDepth + 1 });
@@ -2493,7 +2561,20 @@ public sealed class Binder
         private readonly Dictionary<string, IrLocal> _locals = new(StringComparer.Ordinal);
         private readonly Dictionary<string, IrParameter> _parameters = new(StringComparer.Ordinal);
 
-        public Scope(Scope? parent) => _parent = parent;
+        /// <param name="lastVisibleOffset">
+        /// The last offset at which what this scope holds can still be named. It exists so a scope
+        /// can be published rather than only used: a chain of parent pointers means nothing once the
+        /// descent that built it has returned, while an offset still answers the question a caret
+        /// asks. See <see cref="ScopeEntry.LastOffsetInside"/> for why it is not simply the end of a span.
+        /// </param>
+        public Scope(Scope? parent, int lastVisibleOffset)
+        {
+            _parent = parent;
+            LastVisibleOffset = lastVisibleOffset;
+        }
+
+        /// <inheritdoc cref="ScopeEntry.VisibleThrough"/>
+        public int LastVisibleOffset { get; }
 
         public bool TryDeclareLocal(IrLocal local)
         {
