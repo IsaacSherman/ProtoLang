@@ -10,7 +10,36 @@ namespace ProtoLang.Ir;
 /// protobuf type references, exact numeric operation kinds, evaluation order, and virtual
 /// annotations. Backends consume only this; they never see the AST.
 /// </summary>
-public sealed record IrModule(IReadOnlyList<IrMethod> Methods, IReadOnlyList<IrTest> Tests);
+public sealed record IrModule(IReadOnlyList<IrMethod> Methods, IReadOnlyList<IrTest> Tests)
+{
+    /// <summary>
+    /// Every place a name was written and resolved to a symbol, in
+    /// <see cref="SymbolReference.InSourceOrder">source order</see>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The half of spec 22.2's "resolved protobuf type references" the IR was not keeping. It kept
+    /// what a name resolved <em>to</em> -- a <see cref="PlType"/> on a local, a
+    /// <see cref="FieldDescriptor"/> on a field access -- and dropped where the name was written,
+    /// which is the half a declaration needs in order to find its uses. Some of it was never
+    /// expressible here at all: a type reference resolves to a type and leaves no node behind, so
+    /// <c>fn f(x: Money)</c> mentions <c>Money</c> nowhere in this tree.
+    /// </para>
+    /// <para>
+    /// Recorded by the binder as it resolves, because that is the only place holding both the
+    /// identity and the range of the name alone; see <see cref="SymbolReference"/>. Declarations are
+    /// deliberately <b>not</b> here -- <see cref="DeclarationSite"/> is their one home, and a second
+    /// copy of where a name was introduced is a second thing that can be wrong. The reference index
+    /// composes the two.
+    /// </para>
+    /// <para>
+    /// Init-only with an empty default, so every existing construction of a module stays valid and
+    /// a caller that hand-builds one for a test gets a module that answers "no references" rather
+    /// than a null.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<SymbolReference> References { get; init; } = [];
+}
 
 /// <summary>Anything in the IR that is somewhere in the source text.</summary>
 /// <remarks>
@@ -112,7 +141,19 @@ public sealed record IrBlock(IReadOnlyList<IrStatement> Statements, SourceSpan S
 public sealed record IrVariableDeclaration(IrLocal Local, IrExpression Initializer, SourceSpan Span)
     : IrStatement(Span);
 
-public sealed record IrAssignment(IrLocal Target, IrExpression Value, SourceSpan Span) : IrStatement(Span);
+/// <param name="Target">
+/// The local being written, as a reference to it rather than as the local itself.
+/// </param>
+/// <remarks>
+/// <see cref="IrLocalReference"/> and not <see cref="IrLocal"/>, which is what it held for as long
+/// as the only question asked of it was which storage to emit into. An <see cref="IrLocal"/> is a
+/// symbol and has no span, so the <c>total</c> on the left of <c>total = 5;</c> was the one written
+/// name in the whole IR that was nowhere: every other use of a name is a spanned node, and a
+/// position query on this one reached the statement and stopped. The two backends spell the target
+/// by asking the expression emitter for it, which is what they already did for a local read.
+/// </remarks>
+public sealed record IrAssignment(IrLocalReference Target, IrExpression Value, SourceSpan Span)
+    : IrStatement(Span);
 
 public sealed record IrReturn(IrExpression? Value, SourceSpan Span) : IrStatement(Span);
 

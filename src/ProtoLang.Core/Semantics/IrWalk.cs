@@ -1,4 +1,5 @@
 using ProtoLang.Ir;
+using ProtoLang.Symbols;
 
 namespace ProtoLang.Semantics;
 
@@ -48,6 +49,47 @@ public static class IrWalk
         }
     }
 
+    /// <summary>
+    /// Every declaration a module makes: each method, its parameters, and every local and loop
+    /// binding in its body.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The other half of what a reference index needs. <see cref="IrModule.References"/> says where
+    /// each name was used; this says where each was introduced, and it is a walk rather than a
+    /// second list because <see cref="DeclarationSite"/> already holds the answer -- recording it
+    /// twice would be two places for it to be wrong.
+    /// </para>
+    /// <para>
+    /// A <c>test</c> contributes nothing. It declares no name of its own, and its target's
+    /// parameters are declared by the method: walking them here would report one parameter once per
+    /// test that supplies it.
+    /// </para>
+    /// <para>
+    /// A declaration whose name was never written is included. It has an identity, an extent, and an
+    /// empty range where the name would go, and a buffer being typed into is full of them; leaving
+    /// them out would mean the index disagreed with itself about what exists for as long as someone
+    /// was mid-word.
+    /// </para>
+    /// </remarks>
+    public static IEnumerable<DeclarationSite> DeclarationsOf(IrModule module)
+    {
+        ArgumentNullException.ThrowIfNull(module);
+
+        return module.Methods.SelectMany(method =>
+            new[] { method.Signature.Declaration }
+                .Concat(method.Parameters.Select(parameter => parameter.Declaration))
+                .Concat(DescendantsAndSelf(method).SelectMany(DeclarationsIn)));
+    }
+
+    /// <inheritdoc cref="DeclarationsOf"/>
+    private static IReadOnlyList<DeclarationSite> DeclarationsIn(IrNode node) => node switch
+    {
+        IrVariableDeclaration declaration => [declaration.Local.Declaration],
+        IrForEach loop => [loop.Loop.Declaration],
+        _ => [],
+    };
+
     /// <summary>Where a walk of a module begins: every method, then every test.</summary>
     public static IReadOnlyList<IrNode> RootsOf(IrModule module)
     {
@@ -73,7 +115,7 @@ public static class IrWalk
 
             IrBlock block => [.. block.Statements],
             IrVariableDeclaration declaration => [declaration.Initializer],
-            IrAssignment assignment => [assignment.Value],
+            IrAssignment assignment => [assignment.Target, assignment.Value],
             IrReturn { Value: { } returned } => [returned],
             IrForEach loop => [loop.Collection, loop.Body],
             IrIf branch => branch.Else is { } otherwise

@@ -44,8 +44,30 @@ public sealed record ParameterDeclaration(SyntaxName Name, TypeReference Type, S
 /// </summary>
 public sealed record TypeReference(SyntaxName Name, SourceSpan Span) : SyntaxNode(Span);
 
+/// <summary>
+/// The <c>Invoice.total_cents</c> of a test declaration: which message, and which of its methods.
+/// </summary>
+/// <remarks>
+/// <para>
+/// One name for both halves is what this was until a reference index had to say which of the two a
+/// position is on. Go-to-definition on <c>Invoice</c> should reach the message and on
+/// <c>total_cents</c> the method, and a single range covering both can only ever answer for one of
+/// them. The split is at the last dot, which is the rule the binder was applying to the joined
+/// string; doing it here is what gives each half a range of its own.
+/// </para>
+/// <para>
+/// <b>Which half is missing says what went wrong</b>, and the binder reads it that way rather than
+/// re-examining the text. A target with no dot has named a method and no receiver, so its receiver
+/// is the empty point before it and <c>PL0057</c> follows. A target the parser could not finish --
+/// <c>Invoice.</c> -- has a receiver and no method, and the identifier that is missing has already
+/// been reported where it is missing, so the binder says nothing further. A target that was never
+/// written at all is missing on both halves.
+/// </para>
+/// </remarks>
+public sealed record TestTarget(SyntaxName Receiver, SyntaxName Method, SourceSpan Span) : SyntaxNode(Span);
+
 public sealed record TestDeclaration(
-    SyntaxName TargetName,
+    TestTarget Target,
     string Name,
     TestReceiverFixture Receiver,
     IReadOnlyList<TestArgumentDeclaration> Arguments,

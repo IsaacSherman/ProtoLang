@@ -41,7 +41,7 @@ public static class SyntaxWalk
                 : [.. method.Parameters, method.Body],
             ParameterDeclaration parameter => [parameter.Type],
 
-            TestDeclaration test => [test.Receiver, .. test.Arguments, test.Expectation],
+            TestDeclaration test => [test.Target, test.Receiver, .. test.Arguments, test.Expectation],
             TestReceiverFixture fixture => [.. fixture.Fields],
             TestScalarFieldInitializer field => [field.Value],
             TestMessageFieldInitializer field => [.. field.Fields],

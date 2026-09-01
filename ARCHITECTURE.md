@@ -62,8 +62,12 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    message to bind against. Declarations inside a resolvable receiver are kept as far as possible:
    every local, parameter, loop binding and method carries a
    [`DeclarationSite`](src/ProtoLang.Core/Symbols/DeclarationSite.cs), so a reference can reach the
-   declaration it means and say which symbol that is. The binder's `Scope` chain itself is still
-   discarded as it descends; #49 is what publishes it.
+   declaration it means and say which symbol that is. It also records the other direction as it
+   goes: every name it resolves becomes a [`SymbolReference`](src/ProtoLang.Core/Symbols/SymbolReference.cs)
+   in `IrModule.References`, spanning the name alone. That has to happen here rather than in a later
+   pass, because a type reference resolves to a type and leaves no IR node behind, and because the
+   spans the IR does carry are extents — `IrMethodCall` covers its arguments — rather than names. The
+   binder's `Scope` chain itself is still discarded as it descends; #49 is what publishes it.
 8. **Result.** `CompilationResult` carries the IR *even when the file did not parse*, the syntax
    tree, the descriptors, the import outcomes, the diagnostics, the settled config, and the search
    paths that were used. `Module` is null only when the compilation stopped before the binder: an
@@ -76,8 +80,14 @@ Both trees are **addressable**: [`SemanticModel.For(result)`](src/ProtoLang.Core
 answers "what is at this offset" for the syntax tree and for the IR, hands back the chain of nodes
 above the answer, and crosses between the two by span. The rule the awkward positions follow — a
 caret at the end of an identifier, between two nodes, on an empty range — is written once in
-`PositionSearch` and documented on the query methods. Nothing is indexed or cached: a keystroke
-produces a new compilation and a new model over it.
+`PositionSearch` and documented on the query methods.
+
+The same model answers the reference questions: `ReferenceAt` turns a caret into a symbol,
+`ReferencesTo` gives every place that symbol is written with its declaration among them and marked,
+and `DeclarationOf` gives the two ranges an editor navigates with — null for a field, an enum
+constant or a type, whose declaration is in a `.proto` this compiler does not own. Nothing is cached:
+a keystroke produces a new compilation and a new model over it, and the index that merges the
+binder's references with the declarations is built on the first question that needs it.
 
 ## Key types
 
@@ -90,11 +100,12 @@ produces a new compilation and a new model over it.
 | Messages | `Diagnostic`, `DiagnosticBag` | [Diagnostics/Diagnostic.cs](src/ProtoLang.Core/Diagnostics/Diagnostic.cs) |
 | Type system | `PlType` and friends | [Types/PlType.cs](src/ProtoLang.Core/Types/PlType.cs) |
 | Typed IR | `IrNode`, `IrModule` … `IrLiteral` | [Ir/Ir.cs](src/ProtoLang.Core/Ir/Ir.cs) |
-| Position queries | `SemanticModel` | [Semantics/SemanticModel.cs](src/ProtoLang.Core/Semantics/SemanticModel.cs) |
+| Position and reference queries | `SemanticModel` | [Semantics/SemanticModel.cs](src/ProtoLang.Core/Semantics/SemanticModel.cs) |
 | What is here, and what holds it | `SyntaxLocation`, `IrLocation` | [Semantics/NodePath.cs](src/ProtoLang.Core/Semantics/NodePath.cs) |
 | Down through a tree | `SyntaxWalk`, `IrWalk` | [Semantics/SyntaxWalk.cs](src/ProtoLang.Core/Semantics/SyntaxWalk.cs) |
 | Where a declaration is | `DeclarationSite` | [Symbols/DeclarationSite.cs](src/ProtoLang.Core/Symbols/DeclarationSite.cs) |
 | Which symbol a reference means | `SymbolId` | [Symbols/SymbolId.cs](src/ProtoLang.Core/Symbols/SymbolId.cs) |
+| Where a symbol is used | `SymbolReference`, `ReferenceKind` | [Symbols/SymbolReference.cs](src/ProtoLang.Core/Symbols/SymbolReference.cs) |
 | What kind of symbol it is | `SymbolKind` | [Symbols/SymbolKind.cs](src/ProtoLang.Core/Symbols/SymbolKind.cs) |
 | Emission behavior | `ArithmeticBehavior`, `ConversionBehavior` | [Ir/ArithmeticBehavior.cs](src/ProtoLang.Core/Ir/ArithmeticBehavior.cs) |
 | Policy → behavior | `NumericPolicy` | [Ir/NumericPolicy.cs](src/ProtoLang.Core/Ir/NumericPolicy.cs) |
@@ -131,7 +142,7 @@ reaches a backend only as prose for the generated file's header.
 One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized by layer:
 `LexerTests`, `ParserTests`, `ParserResilienceTests` and `BinderResilienceTests` (fuzz),
 `SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
-`SymbolIdentityTests`, `PositionQueryTests`, `TreeWalkTests`, `ImportResolutionTests`,
+`SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `TreeWalkTests`, `ImportResolutionTests`,
 `ProjectConfigTests`, `BackendTests`, `NameMappingTests`, and the scaffolding and smoke suites.
 
 - **Conformance corpus** — [tests/conformance/vectors](tests/conformance/vectors) holds `.protolang`
@@ -163,8 +174,11 @@ There is **no CI**. `dotnet test` locally is the gate.
 Epic [#47](https://github.com/IsaacSherman/ProtoLang/issues/47) makes the semantic model
 *addressable* ("what is at line 12, column 7?") and *durable* (the binder discarded everything it
 knew about a declaration as it went), then builds a language server on top. Both properties are in:
-#35, #36, #37 and #39 were the four sub-issues expected to touch existing compiler code, and #38
-touched two more things than it meant to — the IR gained an `IrNode` base so a path through it is
-expressible, and `BindInvocation` stopped discarding the arguments of a call it could not resolve.
-Everything from here should be additive: new types, new projects. Rewriting the binder is the signal
-to stop and re-scope.
+#35, #36, #37 and #39 were the four sub-issues expected to touch existing compiler code, and two
+since have had to as well. #38 gave the IR an `IrNode` base so a path through it is expressible, and
+stopped `BindInvocation` discarding the arguments of a call it could not resolve. #40 added a
+recording line at each of the fifteen points the binder resolves a name, and turned
+`IrAssignment.Target` into an `IrLocalReference` — the first change in this epic to reach a backend
+file, and the reason `EmitStatement` now asks the expression emitter for the target it used to spell
+itself. Everything from here should be additive: new types, new projects. Rewriting the binder is the
+signal to stop and re-scope.

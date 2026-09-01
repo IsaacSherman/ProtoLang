@@ -1,4 +1,5 @@
 using ProtoLang.Ir;
+using ProtoLang.Symbols;
 using ProtoLang.Syntax;
 
 namespace ProtoLang.Semantics;
@@ -34,10 +35,20 @@ public sealed class SemanticModel
     private readonly CompilationUnit? _syntaxTree;
     private readonly IrModule? _module;
 
+    /// <remarks>
+    /// Lazy because a model is built per request and most requests never ask. Position queries walk
+    /// what the binder produced and build nothing; a reference index is the first thing here that
+    /// does, and making <see cref="For"/> pay for it would charge hover and completion for something
+    /// only occurrence highlighting wants.
+    /// </remarks>
+    private readonly Lazy<ReferenceIndex?> _references;
+
     private SemanticModel(CompilationUnit? syntaxTree, IrModule? module)
     {
         _syntaxTree = syntaxTree;
         _module = module;
+        _references = new Lazy<ReferenceIndex?>(
+            () => module is null ? null : new ReferenceIndex(module));
     }
 
     /// <summary>Opens a compilation to position queries.</summary>
@@ -154,4 +165,63 @@ public sealed class SemanticModel
             ? null
             : PositionSearch.WithSpan(SyntaxWalk.DescendantsAndSelf(_syntaxTree), node.Span, syntax => syntax.Span);
     }
+
+    /// <summary>
+    /// Every place <paramref name="symbol"/> is written, its declaration included and marked as one,
+    /// in source order. Empty for a symbol this compilation never mentions.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The inverse of what #39 made possible, and what occurrence highlighting, find-all-references
+    /// and eventually rename are each made of. Each entry spans the name alone -- never the construct
+    /// around it, which is what an IR node spans; see <see cref="SymbolReference"/>.
+    /// </para>
+    /// <para>
+    /// The declaration is in the list rather than beside it, because LSP asks for one list and says
+    /// whether the declaration belongs in it. <see cref="ReferenceKind"/> is how a caller tells them
+    /// apart, and a symbol the schema declares simply has no entry of that kind.
+    /// </para>
+    /// <para>
+    /// <b>Identity is <see cref="SymbolId"/> and never a spelling.</b> Two locals named <c>total</c>
+    /// in sibling blocks are two symbols with disjoint answers here; one field reached bare and
+    /// through a receiver is one symbol with both.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<SymbolReference> ReferencesTo(SymbolId symbol)
+        => _references.Value?.ReferencesTo(symbol) ?? [];
+
+    /// <summary>
+    /// Where <paramref name="symbol"/> was declared, or null when this compilation does not declare
+    /// it.
+    /// </summary>
+    /// <remarks>
+    /// Null for anything the schema declares -- a field, an enum constant, a message or enum type --
+    /// because its declaration is in a <c>.proto</c> this compiler does not own. That is a boundary
+    /// rather than a shortfall: ProtoLang reports uses of a schema member and does not edit it. #41
+    /// is what will answer with a location in the <c>.proto</c> itself.
+    /// </remarks>
+    public DeclarationSite? DeclarationOf(SymbolId symbol)
+        => _references.Value?.DeclarationOf(symbol);
+
+    /// <summary>
+    /// The name written at <paramref name="offset"/> and what it means, or null when the offset is
+    /// not on a name.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// How a caret becomes a symbol, and therefore the first half of every reference question an
+    /// editor asks: this, then <see cref="ReferencesTo"/> to highlight, or
+    /// <see cref="DeclarationOf"/> to navigate. The whole reference is returned rather than the
+    /// identity alone because whether the caret is on the declaration is a question rename asks
+    /// before it starts, and the answer is already here.
+    /// </para>
+    /// <para>
+    /// Containment includes both ends, as it does for <see cref="SyntaxAt"/> and for the same reason:
+    /// the caret sits immediately after an identifier the moment the author finishes typing it. Null
+    /// means the offset is on an operator, on whitespace, inside a literal, or on a name that did not
+    /// resolve -- and the last of those is why this is not a way to ask what was written. Ask
+    /// <see cref="SyntaxAt"/> for that; it can answer anywhere in the file.
+    /// </para>
+    /// </remarks>
+    public SymbolReference? ReferenceAt(int offset) => _references.Value?.ReferenceAt(offset);
 }
