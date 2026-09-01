@@ -66,8 +66,14 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    goes: every name it resolves becomes a [`SymbolReference`](src/ProtoLang.Core/Symbols/SymbolReference.cs)
    in `IrModule.References`, spanning the name alone. That has to happen here rather than in a later
    pass, because a type reference resolves to a type and leaves no IR node behind, and because the
-   spans the IR does carry are extents — `IrMethodCall` covers its arguments — rather than names. The
-   binder's `Scope` chain itself is still discarded as it descends; #49 is what publishes it.
+   spans the IR does carry are extents — `IrMethodCall` covers its arguments — rather than names. Its
+   `Scope` chain is published the same way, as a flat list of
+   [`ScopeEntry`](src/ProtoLang.Core/Symbols/ScopeEntry.cs) in `IrModule.Scope`: one entry per name
+   that *entered* a scope, carrying the range it can be written over and the offset it starts
+   resolving from. Recorded where each name is declared, because whether a name won is decided there
+   and nowhere else — a parameter with no name, a second parameter of one name, and a `var` that
+   collides with an enclosing one are all still in the IR and all resolve nothing, and the tree does
+   not say so.
 8. **Result.** `CompilationResult` carries the IR *even when the file did not parse*, the syntax
    tree, the descriptors, the import outcomes, the diagnostics, the settled config, and the search
    paths that were used. `Module` is null only when the compilation stopped before the binder: an
@@ -89,6 +95,13 @@ constant or a type, whose declaration is in a `.proto` this compiler does not ow
 a keystroke produces a new compilation and a new model over it, and the index that merges the
 binder's references with the declarations is built on the first question that needs it.
 
+`ScopeAt` is the third question: what a bare identifier written at this offset could mean, as the
+names in scope there with their types and declarations, plus the receiver they are looked up against.
+It is narrower than "everything nameable" on purpose — a method resolves only in call position and a
+type only in type position, so neither is in the list, and where a local and a field of the receiver
+share a spelling only the one that binds is. That contract, *everything offered binds and nothing
+that binds is missing*, is what makes it safe for completion to accept an entry blind.
+
 ## Key types
 
 | Concern | Type | File |
@@ -106,6 +119,8 @@ binder's references with the declarations is built on the first question that ne
 | Where a declaration is | `DeclarationSite` | [Symbols/DeclarationSite.cs](src/ProtoLang.Core/Symbols/DeclarationSite.cs) |
 | Which symbol a reference means | `SymbolId` | [Symbols/SymbolId.cs](src/ProtoLang.Core/Symbols/SymbolId.cs) |
 | Where a symbol is used | `SymbolReference`, `ReferenceKind` | [Symbols/SymbolReference.cs](src/ProtoLang.Core/Symbols/SymbolReference.cs) |
+| What a name is in scope over | `ScopeEntry` | [Symbols/ScopeEntry.cs](src/ProtoLang.Core/Symbols/ScopeEntry.cs) |
+| What a bare name may mean here | `ScopeAtPosition`, `VisibleName` | [Semantics/ScopeAtPosition.cs](src/ProtoLang.Core/Semantics/ScopeAtPosition.cs) |
 | What kind of symbol it is | `SymbolKind` | [Symbols/SymbolKind.cs](src/ProtoLang.Core/Symbols/SymbolKind.cs) |
 | Emission behavior | `ArithmeticBehavior`, `ConversionBehavior` | [Ir/ArithmeticBehavior.cs](src/ProtoLang.Core/Ir/ArithmeticBehavior.cs) |
 | Policy → behavior | `NumericPolicy` | [Ir/NumericPolicy.cs](src/ProtoLang.Core/Ir/NumericPolicy.cs) |
@@ -142,8 +157,9 @@ reaches a backend only as prose for the generated file's header.
 One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized by layer:
 `LexerTests`, `ParserTests`, `ParserResilienceTests` and `BinderResilienceTests` (fuzz),
 `SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
-`SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `TreeWalkTests`, `ImportResolutionTests`,
-`ProjectConfigTests`, `BackendTests`, `NameMappingTests`, and the scaffolding and smoke suites.
+`SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `ScopeQueryTests`,
+`TreeWalkTests`, `ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`,
+and the scaffolding and smoke suites.
 
 - **Conformance corpus** — [tests/conformance/vectors](tests/conformance/vectors) holds `.protolang`
   files whose `test` blocks *are* the vectors, compiled and executed in both backends. This is the
@@ -174,11 +190,13 @@ There is **no CI**. `dotnet test` locally is the gate.
 Epic [#47](https://github.com/IsaacSherman/ProtoLang/issues/47) makes the semantic model
 *addressable* ("what is at line 12, column 7?") and *durable* (the binder discarded everything it
 knew about a declaration as it went), then builds a language server on top. Both properties are in:
-#35, #36, #37 and #39 were the four sub-issues expected to touch existing compiler code, and two
+#35, #36, #37 and #39 were the four sub-issues expected to touch existing compiler code, and three
 since have had to as well. #38 gave the IR an `IrNode` base so a path through it is expressible, and
 stopped `BindInvocation` discarding the arguments of a call it could not resolve. #40 added a
 recording line at each of the fifteen points the binder resolves a name, and turned
 `IrAssignment.Target` into an `IrLocalReference` — the first change in this epic to reach a backend
 file, and the reason `EmitStatement` now asks the expression emitter for the target it used to spell
-itself. Everything from here should be additive: new types, new projects. Rewriting the binder is the
-signal to stop and re-scope.
+itself. #49 gave `Scope` an extent and a recording line on each of the three branches where a
+declaration is accepted, so that what the binder knew about visibility outlives the descent that
+knew it. Everything from here should be additive: new types, new projects. Rewriting the binder is
+the signal to stop and re-scope.

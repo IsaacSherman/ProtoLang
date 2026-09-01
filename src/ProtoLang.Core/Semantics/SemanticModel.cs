@@ -224,4 +224,37 @@ public sealed class SemanticModel
     /// </para>
     /// </remarks>
     public SymbolReference? ReferenceAt(int offset) => _references.Value?.ReferenceAt(offset);
+
+    /// <summary>
+    /// What a bare identifier written at <paramref name="offset"/> could mean, or null when the
+    /// offset is not inside a method body or a test.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The binder knows what is in scope at every point of a method body and used to discard it as
+    /// it descended. This is that set handed back, at a position nobody knew about while binding,
+    /// and it is what completion on a bare identifier -- the most common completion in any language
+    /// -- is made of.
+    /// </para>
+    /// <para>
+    /// <b>Every name here binds, and nothing that binds is missing.</b> That is the whole contract,
+    /// and it is why the set is narrower than "everything nameable": a method resolves only in call
+    /// position and a type only in type position, so neither is here. A local hides a field of the
+    /// receiver with the same spelling, and only the winner is listed, because a list that offered
+    /// both would offer a word that means something other than what it says.
+    /// </para>
+    /// <para>
+    /// Null means the offset is between declarations, in an import, in an <c>extend</c> header, or
+    /// outside the file -- places where a bare identifier means nothing rather than nothing being in
+    /// scope. Inside a <c>test</c> the answer is an empty list with a receiver, which is a different
+    /// statement: there is a message being tested, and no unqualified name resolves against it.
+    /// </para>
+    /// <para>
+    /// A position in <em>type</em> position gets an answer too, and it is the wrong list -- the
+    /// names of values, where a type name belongs. Deciding which question a caret is asking is the
+    /// caller's, from <see cref="SyntaxAt"/>; this answers only the one it was asked.
+    /// </para>
+    /// </remarks>
+    public ScopeAtPosition? ScopeAt(int offset)
+        => _module is null ? null : ScopeSearch.At(_module, offset);
 }
