@@ -11,32 +11,63 @@ public sealed record CompilationUnit(
     SourceSpan Span) : SyntaxNode(Span);
 
 /// <summary>An <c>import proto "path.proto";</c> declaration (spec 5.2).</summary>
-public sealed record ImportDeclaration(string Path, SourceSpan Span) : SyntaxNode(Span);
+/// <param name="PathIsMissing">
+/// Whether the path was never written, which is not the same as an empty one. The distinction
+/// <see cref="SyntaxName"/> draws for names, for the same reason: a path that is absent has been
+/// reported as a syntax error already, and looking for a schema called the empty string reports the
+/// one mistake a second time.
+/// </param>
+public sealed record ImportDeclaration(
+    string Path,
+    SourceSpan Span,
+    bool PathIsMissing = false) : SyntaxNode(Span);
 
 /// <summary>An <c>extend MessageName { ... }</c> block (spec 16.1).</summary>
 public sealed record ExtendDeclaration(
-    string MessageName,
+    SyntaxName MessageName,
     IReadOnlyList<MethodDeclaration> Methods,
     SourceSpan Span) : SyntaxNode(Span);
 
 public sealed record MethodDeclaration(
-    string Name,
+    SyntaxName Name,
     bool IsVirtual,
     IReadOnlyList<ParameterDeclaration> Parameters,
     TypeReference? ReturnType,
     BlockStatement Body,
     SourceSpan Span) : SyntaxNode(Span);
 
-public sealed record ParameterDeclaration(string Name, TypeReference Type, SourceSpan Span) : SyntaxNode(Span);
+public sealed record ParameterDeclaration(SyntaxName Name, TypeReference Type, SourceSpan Span) : SyntaxNode(Span);
 
 /// <summary>
 /// A syntactic type reference. Names are resolved later against protobuf descriptors, since
 /// spec 8.1 defines the ProtoLang type universe as exactly the protobuf type universe.
 /// </summary>
-public sealed record TypeReference(string Name, SourceSpan Span) : SyntaxNode(Span);
+public sealed record TypeReference(SyntaxName Name, SourceSpan Span) : SyntaxNode(Span);
+
+/// <summary>
+/// The <c>Invoice.total_cents</c> of a test declaration: which message, and which of its methods.
+/// </summary>
+/// <remarks>
+/// <para>
+/// One name for both halves is what this was until a reference index had to say which of the two a
+/// position is on. Go-to-definition on <c>Invoice</c> should reach the message and on
+/// <c>total_cents</c> the method, and a single range covering both can only ever answer for one of
+/// them. The split is at the last dot, which is the rule the binder was applying to the joined
+/// string; doing it here is what gives each half a range of its own.
+/// </para>
+/// <para>
+/// <b>Which half is missing says what went wrong</b>, and the binder reads it that way rather than
+/// re-examining the text. A target with no dot has named a method and no receiver, so its receiver
+/// is the empty point before it and <c>PL0057</c> follows. A target the parser could not finish --
+/// <c>Invoice.</c> -- has a receiver and no method, and the identifier that is missing has already
+/// been reported where it is missing, so the binder says nothing further. A target that was never
+/// written at all is missing on both halves.
+/// </para>
+/// </remarks>
+public sealed record TestTarget(SyntaxName Receiver, SyntaxName Method, SourceSpan Span) : SyntaxNode(Span);
 
 public sealed record TestDeclaration(
-    string TargetName,
+    TestTarget Target,
     string Name,
     TestReceiverFixture Receiver,
     IReadOnlyList<TestArgumentDeclaration> Arguments,
@@ -47,19 +78,19 @@ public sealed record TestReceiverFixture(
     IReadOnlyList<TestFieldInitializer> Fields,
     SourceSpan Span) : SyntaxNode(Span);
 
-public abstract record TestFieldInitializer(string FieldName, SourceSpan Span) : SyntaxNode(Span);
+public abstract record TestFieldInitializer(SyntaxName FieldName, SourceSpan Span) : SyntaxNode(Span);
 
 public sealed record TestScalarFieldInitializer(
-    string Name,
+    SyntaxName Name,
     Expression Value,
     SourceSpan Span) : TestFieldInitializer(Name, Span);
 
 public sealed record TestMessageFieldInitializer(
-    string Name,
+    SyntaxName Name,
     IReadOnlyList<TestFieldInitializer> Fields,
     SourceSpan Span) : TestFieldInitializer(Name, Span);
 
-public sealed record TestArgumentDeclaration(string Name, Expression Value, SourceSpan Span) : SyntaxNode(Span);
+public sealed record TestArgumentDeclaration(SyntaxName Name, Expression Value, SourceSpan Span) : SyntaxNode(Span);
 
 public abstract record TestExpectation(SourceSpan Span) : SyntaxNode(Span);
 
@@ -69,10 +100,33 @@ public sealed record TestFailExpectation(SourceSpan Span) : TestExpectation(Span
 
 public abstract record Statement(SourceSpan Span) : SyntaxNode(Span);
 
-public sealed record BlockStatement(IReadOnlyList<Statement> Statements, SourceSpan Span) : Statement(Span);
+public sealed record BlockStatement(IReadOnlyList<Statement> Statements, SourceSpan Span) : Statement(Span)
+{
+    /// <summary>Whether the parser found the brace that closes this block.</summary>
+    /// <remarks>
+    /// <para>
+    /// Only the parser can answer it, and only it holds the token that says so, so it is recorded
+    /// here rather than inferred later. The inference that suggests itself -- a block whose span
+    /// ends where the file ends was never closed -- is wrong for the case that matters most: a file
+    /// being typed into ends mid-construct, and the last thing before the hole is very often a
+    /// block that <em>was</em> closed. Its brace is then the final character of the file and the
+    /// inference calls it open.
+    /// </para>
+    /// <para>
+    /// What turns on it is where a block's names stop. A span is half-open, so its end is one past
+    /// the closing brace and already outside; a block nothing closed ends at the point the author is
+    /// typing at, which is inside. See <see cref="Symbols.ScopeEntry.LastOffsetInside"/>.
+    /// </para>
+    /// <para>
+    /// Init-only and true by default, so every existing construction stays valid and a block built
+    /// by hand is a whole one. A parser is the only thing that can have found a brace missing.
+    /// </para>
+    /// </remarks>
+    public bool IsClosed { get; init; } = true;
+}
 
 public sealed record VariableDeclarationStatement(
-    string Name,
+    SyntaxName Name,
     TypeReference? DeclaredType,
     Expression Initializer,
     SourceSpan Span) : Statement(Span);
@@ -80,7 +134,7 @@ public sealed record VariableDeclarationStatement(
 public sealed record ReturnStatement(Expression? Value, SourceSpan Span) : Statement(Span);
 
 public sealed record ForInStatement(
-    string VariableName,
+    SyntaxName VariableName,
     Expression Collection,
     BlockStatement Body,
     SourceSpan Span) : Statement(Span);
@@ -113,9 +167,16 @@ public sealed record ExpressionStatement(Expression Expression, SourceSpan Span)
 public abstract record Expression(SourceSpan Span) : SyntaxNode(Span);
 
 /// <summary>A bare identifier: a local, a parameter, or an implicit field of the receiver.</summary>
-public sealed record NameExpression(string Name, SourceSpan Span) : Expression(Span);
+public sealed record NameExpression(SyntaxName Name, SourceSpan Span) : Expression(Span);
 
-public sealed record MemberAccessExpression(Expression Receiver, string Name, SourceSpan Span) : Expression(Span);
+/// <summary>A field or method reached through a value: <c>customer.email</c>.</summary>
+/// <remarks>
+/// <c>Name.IsMissing</c> is the shape of a caret waiting for a completion list -- the author typed
+/// the dot and stopped. It is a node rather than an absence precisely so that a consumer can ask
+/// what the receiver is and get an answer, and <c>Name.Span</c> is the empty range where the member
+/// name would go. See <see cref="SyntaxName"/>.
+/// </remarks>
+public sealed record MemberAccessExpression(Expression Receiver, SyntaxName Name, SourceSpan Span) : Expression(Span);
 
 public sealed record InvocationExpression(
     Expression Callee,

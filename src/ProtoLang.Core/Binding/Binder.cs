@@ -2,6 +2,7 @@ using Google.Protobuf.Reflection;
 using ProtoLang.Config;
 using ProtoLang.Diagnostics;
 using ProtoLang.Ir;
+using ProtoLang.Symbols;
 using ProtoLang.Syntax;
 using ProtoLang.Types;
 
@@ -19,19 +20,65 @@ public sealed class Binder
     private readonly Dictionary<string, List<MessageDescriptor>> _messagesBySimpleName = new(StringComparer.Ordinal);
     private readonly Dictionary<string, EnumDescriptor> _enumsByFullName = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<EnumDescriptor>> _enumsBySimpleName = new(StringComparer.Ordinal);
+    /// <summary>What a call can resolve to: one entry per name a receiver actually offers.</summary>
     private readonly Dictionary<(string Receiver, string Method), IrMethodSignature> _methods = new();
+
+    /// <summary>What each declaration declares, whether or not anything may call it.</summary>
+    /// <remarks>
+    /// <para>
+    /// Separate from <see cref="_methods"/> because the two answer different questions, and binding
+    /// a body against the answer to the wrong one is how a second <c>fn f</c> came to be bound
+    /// against the first one's parameter list -- and then to index past the end of it, which is an
+    /// unhandled exception on a file that parses perfectly well.
+    /// </para>
+    /// <para>
+    /// Keyed by node identity rather than by value: two declarations that differ in nothing but
+    /// their span are still two declarations, and hashing a record whose value includes an entire
+    /// method body is not something to do once per method.
+    /// </para>
+    /// </remarks>
+    private readonly Dictionary<MethodDeclaration, IrMethodSignature> _signatures =
+        new(ReferenceEqualityComparer.Instance);
+    /// <summary>Every name this binder resolved, in the order it happened to resolve them.</summary>
+    /// <remarks>
+    /// Published as <see cref="IrModule.References"/>, sorted, once binding is done. Collected here
+    /// rather than derived afterwards for the reason <see cref="SymbolReference"/> gives: resolving a
+    /// name is the one moment at which both the symbol and the range of the name alone are in hand.
+    /// Appending is all any recording site does, so nothing below can change what the compiler
+    /// reports by recording -- or by failing to.
+    /// </remarks>
+    private readonly List<SymbolReference> _references = [];
+
+    /// <summary>Every name this binder put in scope, in the order it declared them.</summary>
+    /// <remarks>
+    /// Published as <see cref="IrModule.Scope"/> once binding is done. Appended to only where a
+    /// <see cref="Scope"/> accepted a declaration, so a name that lost its own is absent -- which is
+    /// the fact this list exists to carry, and the one no later walk of the tree could recover.
+    /// </remarks>
+    private readonly List<ScopeEntry> _scope = [];
     private readonly NumericPolicy _policy;
     private readonly ProjectConfig _config;
+    private readonly SourceIdentity _document;
 
+    /// <param name="document">
+    /// What the source being bound is, which every declaration site records so that a reference can
+    /// say not just where its declaration is but which file that is in. Optional because a caller
+    /// that only wants diagnostics -- the resilience suite binds thousands of generated trees --
+    /// has nothing to say here and no one to say it to. Omitting it leaves every declaration keyed
+    /// under one anonymous buffer, which is sound for a single compilation and useless to index
+    /// across several, so anything building an index must supply it. The pipeline always does.
+    /// </param>
     public Binder(
         IReadOnlyList<FileDescriptor> files,
         DiagnosticBag diagnostics,
         NumericPolicy? policy = null,
-        ProjectConfig? config = null)
+        ProjectConfig? config = null,
+        SourceIdentity? document = null)
     {
         _diagnostics = diagnostics;
         _config = config ?? ProjectConfig.Default;
         _policy = policy ?? new NumericPolicy(_config);
+        _document = document ?? SourceIdentity.Unsaved();
 
         foreach (var file in files)
         {
@@ -85,6 +132,21 @@ public sealed class Binder
         list.Add(enumType);
     }
 
+    /// <summary>Binds a compilation unit to typed IR, whether or not it parsed cleanly.</summary>
+    /// <remarks>
+    /// <para>
+    /// There is no tolerant mode, because there is nothing for a strict one to do differently. A
+    /// tree that failed to parse differs from one that did not only in containing names the parser
+    /// has already reported as missing, and every declaration that cannot be resolved is dropped
+    /// here rather than half-built. What comes out is a module covering the parts that parsed --
+    /// which is what an editor needs, since a buffer is broken for most of the time anyone is
+    /// looking at it.
+    /// </para>
+    /// <para>
+    /// Nothing downstream can mistake that module for a complete one: <c>CompilationResult.Success</c>
+    /// requires no errors as well as a module, and the diagnostics are still there.
+    /// </para>
+    /// </remarks>
     public IrModule Bind(CompilationUnit unit)
     {
         // Pass 1: resolve extend targets and collect signatures.
@@ -92,12 +154,18 @@ public sealed class Binder
 
         foreach (var extend in unit.Extends)
         {
-            var receiver = ResolveMessage(extend.MessageName, extend.Span);
+            if (extend.MessageName.IsMissing)
+            {
+                continue;
+            }
+
+            var receiver = ResolveMessage(extend.MessageName.Text, extend.Span);
             if (receiver is null)
             {
                 continue;
             }
 
+            Use(SymbolId.ForType(receiver), extend.MessageName.Span);
             resolvedExtends.Add((extend, receiver));
             WarnIfWellKnown(receiver, extend);
 
@@ -132,7 +200,100 @@ public sealed class Binder
             }
         }
 
-        return new IrModule(methods, tests);
+        return new IrModule(methods, tests)
+        {
+            References = SymbolReference.InSourceOrder(_references),
+            Scope = [.. _scope],
+        };
+    }
+
+    /// <summary>Records that a name at <paramref name="span"/> resolved to <paramref name="symbol"/>.</summary>
+    /// <param name="span">
+    /// The range of the name itself, never of the construct around it. A caller that has only the
+    /// wider span is at the wrong place to record from; see <see cref="SymbolReference"/>.
+    /// </param>
+    /// <remarks>
+    /// Called only where a resolution succeeded. A name that did not resolve has been diagnosed and
+    /// refers to nothing, so recording it would put an entry in the index under a symbol that does
+    /// not exist.
+    /// </remarks>
+    private void Use(SymbolId symbol, SourceSpan span, ReferenceKind kind = ReferenceKind.Read)
+        => _references.Add(new SymbolReference(symbol, _document, span, kind));
+
+    /// <summary>
+    /// Records that <paramref name="scope"/> accepted <paramref name="declaration"/>, and that it
+    /// can be named from <paramref name="visibleFrom"/> onwards.
+    /// </summary>
+    /// <param name="visibleFrom">
+    /// Where the name starts resolving, which is not always where its scope starts. See
+    /// <see cref="ScopeEntry.VisibleFrom"/>; each caller below is the only place that knows its own
+    /// answer, which is why the point is passed rather than worked out here.
+    /// </param>
+    /// <remarks>
+    /// Called only on the branch where a declaration succeeded, which is the whole discipline of
+    /// this list: a refused name is one the binder went on resolving to something else, and putting
+    /// it here would mean offering an author a name that then binds elsewhere.
+    /// </remarks>
+    private void Declare(Scope scope, DeclarationSite declaration, PlType type, int visibleFrom)
+        => _scope.Add(new ScopeEntry(declaration, type, visibleFrom, scope.LastVisibleOffset));
+
+    /// <inheritdoc cref="ScopeEntry.LastOffsetInside"/>
+    private static int LastVisibleOffsetIn(BlockStatement block)
+        => ScopeEntry.LastOffsetInside(block.Span, block.IsClosed);
+
+    /// <summary>A scope holding nothing, for an expression with no locals or parameters to see.</summary>
+    /// <remarks>
+    /// Every expression inside a <c>test</c> binds against one of these -- a fixture value, an
+    /// argument, an expectation -- which together with
+    /// <see cref="MethodContext.AllowImplicitReceiverFields"/> being false there is why a bare name
+    /// in a test resolves to nothing at all. It reaches nowhere because nothing may be declared in
+    /// it: it can contribute nothing to <see cref="IrModule.Scope"/> and hide nothing from a query.
+    /// </remarks>
+    private static Scope NoNames() => new(null, -1);
+
+    /// <summary>The name an assignment writes to, or null when its target names nothing.</summary>
+    /// <remarks>
+    /// Only the last name in the target is written. <c>line.quantity = 2;</c> reads <c>line</c> and
+    /// writes <c>quantity</c>, and <c>1 = 2;</c> writes nothing at all -- which is a shape only a
+    /// refused assignment can have, since a legal one names a local and nothing else.
+    /// </remarks>
+    private static SyntaxName? AssignedNameOf(Expression target) => target switch
+    {
+        NameExpression name => name.Name,
+        MemberAccessExpression member => member.Name,
+        _ => null,
+    };
+
+    /// <summary>Re-files an already-recorded reference as a write.</summary>
+    /// <remarks>
+    /// <para>
+    /// Assignment is the only thing in the language that writes a name, and it is the statement --
+    /// never the expression -- that knows which of the names it just bound was the one assigned to.
+    /// The expression binder resolved <c>line</c> and <c>quantity</c> the same way and has nothing to
+    /// tell them apart with, so rather than thread a kind down through every name binding for the one
+    /// caller that needs it, the assignment amends the entry it is about.
+    /// </para>
+    /// <para>
+    /// Backwards from the end, because the target has just been bound and its entries are the last
+    /// ones added. A span nothing was recorded at -- a member name never written, a literal target --
+    /// leaves the list alone.
+    /// </para>
+    /// </remarks>
+    private void MarkWritten(SyntaxName? name)
+    {
+        if (name is not { } written)
+        {
+            return;
+        }
+
+        for (var index = _references.Count - 1; index >= 0; index--)
+        {
+            if (_references[index].Span == written.Span)
+            {
+                _references[index] = _references[index] with { Kind = ReferenceKind.Write };
+                return;
+            }
+        }
     }
 
     /// <summary>
@@ -209,9 +370,29 @@ public sealed class Binder
         return null;
     }
 
+    /// <summary>
+    /// Records what a method declares, and registers it as callable when its name is one a call
+    /// could use.
+    /// </summary>
+    /// <remarks>
+    /// Every declaration is described, including the ones refused below. A refused method still has
+    /// a body, the body is still bound, and a body has to be bound against the types its own
+    /// declaration states -- never against those of whichever other declaration happens to share its
+    /// name. Refusal governs what may be *called*, and nothing else.
+    /// </remarks>
     private void DeclareMethod(MessageDescriptor receiver, MethodDeclaration method)
     {
-        var key = (receiver.FullName, method.Name);
+        _signatures[method] = DescribeMethod(receiver, method);
+
+        if (method.Name.IsMissing)
+        {
+            // Nothing can name it, so nothing can call it. Registering it under the empty name would
+            // also make a second half-typed method collide with the first and report a duplicate the
+            // author never wrote.
+            return;
+        }
+
+        var key = (receiver.FullName, method.Name.Text);
 
         if (_methods.ContainsKey(key))
         {
@@ -224,7 +405,7 @@ public sealed class Binder
             return;
         }
 
-        if (receiver.FindFieldByName(method.Name) is not null)
+        if (receiver.FindFieldByName(method.Name.Text) is not null)
         {
             _diagnostics.Error(
                 "PL0023",
@@ -235,32 +416,72 @@ public sealed class Binder
             return;
         }
 
+        _methods[key] = _signatures[method];
+    }
+
+    /// <summary>Resolves what a method declares into the signature the IR carries.</summary>
+    private IrMethodSignature DescribeMethod(MessageDescriptor receiver, MethodDeclaration method)
+    {
         var returnType = method.ReturnType is null
             ? VoidType.Instance
             : ResolveTypeReference(method.ReturnType);
 
-        var parameterNames = new List<string>();
-        var parameterTypes = new List<PlType>();
+        var parameters = new List<IrParameter>();
+
         foreach (var parameter in method.Parameters)
         {
-            parameterNames.Add(parameter.Name);
             var type = ResolveTypeReference(parameter.Type);
             if (type is VoidType)
             {
                 _diagnostics.Error(
                     "PL0024",
                     "void is not a value type",
-                    $"Parameter '{parameter.Name}' cannot be declared void.",
+                    $"{Capitalized(Refer(parameter.Name, "parameter", "Parameter"))} cannot be "
+                    + "declared void.",
                     parameter.Span,
                     "void is a return marker only (spec 8.1).");
                 type = ErrorType.Instance;
             }
 
-            parameterTypes.Add(type);
+            parameters.Add(new IrParameter(
+                new DeclarationSite(SymbolKind.Parameter, _document, parameter.Name, parameter.Span),
+                type));
         }
 
-        _methods[key] = new IrMethodSignature(receiver, method.Name, returnType, parameterNames, parameterTypes);
+        return new IrMethodSignature(
+            receiver,
+            new DeclarationSite(SymbolKind.Method, _document, method.Name, method.Span),
+            returnType,
+            parameters);
     }
+
+
+    /// <summary>
+    /// How a message refers to something the author has not named yet: <c>this method</c> rather
+    /// than <c>''</c>.
+    /// </summary>
+    /// <param name="lead">
+    /// The word that introduces a name that is there, for the messages that use one. "Parameter
+    /// 'x'" is what that message has always said and is not worth moving to save a branch here.
+    /// </param>
+    /// <remarks>
+    /// A name that was never written has no spelling to quote, and quoting the empty string reads as
+    /// a defect in the compiler rather than as a fact about the program. The span already says where
+    /// the thing is; the message only has to stop pretending it can name it. Wording for names that
+    /// are there is untouched, because those messages are published output.
+    /// </remarks>
+    private static string Refer(SyntaxName name, string kind, string? lead = null)
+        => name.IsMissing ? $"this {kind}"
+            : lead is null ? $"'{name}'"
+            : $"{lead} '{name}'";
+
+    /// <summary>Upper-cases a leading letter, for a referent that opens a sentence.</summary>
+    /// <remarks>
+    /// A no-op on the quoted forms <see cref="Refer"/> produces for a name that exists, because a
+    /// quote is not a letter -- which is what lets one referent serve both ends of a sentence.
+    /// </remarks>
+    private static string Capitalized(string text)
+        => text.Length == 0 ? text : char.ToUpperInvariant(text[0]) + text[1..];
 
     private void ReportAmbiguousTypeName(string name, SourceSpan span, IEnumerable<string> fullNames)
     {
@@ -274,14 +495,26 @@ public sealed class Binder
             "Qualify the name with its protobuf package.");
     }
 
+    /// <remarks>
+    /// A name the parser never saw resolves to <see cref="ErrorType"/> in silence. It has already
+    /// been reported as a syntax error at the position it is missing from, and an unknown-type
+    /// diagnostic on top of that says the same thing twice.
+    /// </remarks>
     private PlType ResolveTypeReference(TypeReference reference)
     {
-        if (reference.Name == "void")
+        if (reference.Name.IsMissing)
+        {
+            return ErrorType.Instance;
+        }
+
+        var name = reference.Name.Text;
+
+        if (name == "void")
         {
             return VoidType.Instance;
         }
 
-        var scalar = TypeFactory.TryGetScalar(reference.Name);
+        var scalar = TypeFactory.TryGetScalar(name);
         if (scalar is not null)
         {
             return scalar;
@@ -289,18 +522,18 @@ public sealed class Binder
 
         // A fully qualified name is unambiguous by construction, so it is tried before any
         // simple-name lookup that could report a false ambiguity.
-        if (_messagesByFullName.TryGetValue(reference.Name, out var messageByFullName))
+        if (_messagesByFullName.TryGetValue(name, out var messageByFullName))
         {
-            return new MessageType(messageByFullName);
+            return NamedMessage(messageByFullName);
         }
 
-        if (_enumsByFullName.TryGetValue(reference.Name, out var enumByFullName))
+        if (_enumsByFullName.TryGetValue(name, out var enumByFullName))
         {
-            return new EnumPlType(enumByFullName);
+            return NamedEnum(enumByFullName);
         }
 
-        _messagesBySimpleName.TryGetValue(reference.Name, out var messages);
-        _enumsBySimpleName.TryGetValue(reference.Name, out var enums);
+        _messagesBySimpleName.TryGetValue(name, out var messages);
+        _enumsBySimpleName.TryGetValue(name, out var enums);
 
         var candidateCount = (messages?.Count ?? 0) + (enums?.Count ?? 0);
 
@@ -311,18 +544,18 @@ public sealed class Binder
             var fullNames = (messages ?? Enumerable.Empty<MessageDescriptor>()).Select(m => m.FullName)
                 .Concat((enums ?? Enumerable.Empty<EnumDescriptor>()).Select(e => e.FullName));
 
-            ReportAmbiguousTypeName(reference.Name, reference.Span, fullNames);
+            ReportAmbiguousTypeName(name, reference.Span, fullNames);
             return ErrorType.Instance;
         }
 
         if (messages is { Count: 1 })
         {
-            return new MessageType(messages[0]);
+            return NamedMessage(messages[0]);
         }
 
         if (enums is { Count: 1 })
         {
-            return new EnumPlType(enums[0]);
+            return NamedEnum(enums[0]);
         }
 
         _diagnostics.Error(
@@ -332,23 +565,46 @@ public sealed class Binder
             reference.Span,
             "ProtoLang types come only from the protobuf type universe (spec 8.1).");
         return ErrorType.Instance;
+
+        // The four ways this succeeds are the only mentions a message or an enum gets in a type
+        // position, and the type they produce says nothing about where it was named. A scalar and
+        // 'void' are left out on purpose: neither is declared anywhere a reader could be sent.
+        MessageType NamedMessage(MessageDescriptor message)
+        {
+            Use(SymbolId.ForType(message), reference.Name.Span);
+            return new MessageType(message);
+        }
+
+        EnumPlType NamedEnum(EnumDescriptor enumType)
+        {
+            Use(SymbolId.ForType(enumType), reference.Name.Span);
+            return new EnumPlType(enumType);
+        }
     }
 
     private IrMethod? BindMethod(MessageDescriptor receiver, MethodDeclaration method)
     {
-        if (!_methods.TryGetValue((receiver.FullName, method.Name), out var signature))
+        if (!_signatures.TryGetValue(method, out var signature))
         {
-            // Pass 1 already reported why this method was rejected.
+            // Only reachable for a method in an extend block whose target did not resolve, which
+            // pass 1 skips entirely -- there is no receiver to bind a body against.
             return null;
         }
 
-        var parameters = new List<IrParameter>();
-        var scope = new Scope(null);
+        // The body, not the whole declaration. A parameter is only ever written as a value, and the
+        // header holds no expression to write one in: a later parameter's type resolves to a message
+        // or an enum and could not name a parameter if it tried.
+        var scope = new Scope(null, LastVisibleOffsetIn(method.Body));
 
-        for (var i = 0; i < method.Parameters.Count; i++)
+        foreach (var parameter in signature.Parameters)
         {
-            var parameter = new IrParameter(method.Parameters[i].Name, signature.ParameterTypes[i]);
-            parameters.Add(parameter);
+            // A parameter still being typed stays in the signature, so the positions line up with
+            // the call sites, but is not put in scope: two of them would otherwise collide under the
+            // empty name and be reported as a duplicate the author never wrote.
+            if (parameter.Declaration.Name.IsMissing)
+            {
+                continue;
+            }
 
             if (!scope.TryDeclareParameter(parameter))
             {
@@ -356,11 +612,14 @@ public sealed class Binder
                     "PL0026",
                     "duplicate parameter",
                     $"A parameter named '{parameter.Name}' is already declared.",
-                    method.Parameters[i].Span);
+                    parameter.Declaration.Extent);
+                continue;
             }
+
+            Declare(scope, parameter.Declaration, parameter.Type, ScopeEntry.FirstOffsetInside(method.Body.Span));
         }
 
-        var context = new MethodContext(receiver, signature.ReturnType, parameters);
+        var context = new MethodContext(receiver, signature.ReturnType);
         var body = BindBlock(method.Body, scope, context);
 
         if (signature.ReturnType is not VoidType && !NeverFallsThrough(body))
@@ -368,17 +627,17 @@ public sealed class Binder
             _diagnostics.Error(
                 "PL0027",
                 "missing return statement",
-                $"'{method.Name}' declares a return type of "
+                $"{Capitalized(Refer(method.Name, "method"))} declares a return type of "
                 + $"'{signature.ReturnType.DisplayName}' but not all paths return a value.",
                 method.Span);
         }
 
-        return new IrMethod(signature, parameters, body, method.IsVirtual, method.Span);
+        return new IrMethod(signature, body, method.IsVirtual);
     }
 
     private IrTest? BindTest(TestDeclaration test)
     {
-        var signature = ResolveTestTarget(test.TargetName, test.Span);
+        var signature = ResolveTestTarget(test.Target, test.Span);
         if (signature is null)
         {
             return null;
@@ -387,7 +646,6 @@ public sealed class Binder
         var context = new MethodContext(
             signature.Receiver,
             signature.ReturnType,
-            [],
             AllowImplicitReceiverFields: false);
         var receiver = BindTestReceiver(test.Receiver, signature.Receiver, context);
         var arguments = BindTestArguments(test, signature, context);
@@ -396,37 +654,54 @@ public sealed class Binder
         return new IrTest(signature, test.Name, receiver, arguments, expectation, test.Span);
     }
 
-    private IrMethodSignature? ResolveTestTarget(string targetName, SourceSpan span)
+    /// <remarks>
+    /// A target the author has not finished typing yields null in silence; the parser reported it
+    /// as a syntax error where it is missing, and saying it again as an invalid test target adds
+    /// nothing.
+    /// </remarks>
+    private IrMethodSignature? ResolveTestTarget(TestTarget target, SourceSpan span)
     {
-        var dot = targetName.LastIndexOf('.');
-        if (dot <= 0 || dot == targetName.Length - 1)
+        // Which half is missing is the whole of what the parser is saying here; see TestTarget. No
+        // method means the name was never finished, and that has been reported where it stops.
+        if (target.Method.IsMissing)
+        {
+            return null;
+        }
+
+        if (target.Receiver.IsMissing)
         {
             _diagnostics.Error(
                 "PL0057",
                 "invalid test target",
-                $"'{targetName}' is not a method target.",
+                $"'{target.Method}' is not a method target.",
                 span,
                 "Write tests against a receiver method, for example 'test Invoice.total_cents'.");
             return null;
         }
 
-        var receiverName = targetName[..dot];
-        var methodName = targetName[(dot + 1)..];
-        var receiver = ResolveMessage(receiverName, span);
+        var receiver = ResolveMessage(target.Receiver.Text, span);
         if (receiver is null)
         {
             return null;
         }
 
-        if (_methods.TryGetValue((receiver.FullName, methodName), out var signature))
+        // Recorded as soon as the message is in hand, ahead of the method lookup that may fail. The
+        // receiver half is a use of the message the same way an extend header is, and `test
+        // InvoiceItem.nope` still named InvoiceItem correctly -- what is wrong there is the method.
+        // It is the day #41 can send a reader into the .proto that this matters most, and by then
+        // the file will still be one someone is in the middle of fixing.
+        Use(SymbolId.ForType(receiver), target.Receiver.Span);
+
+        if (_methods.TryGetValue((receiver.FullName, target.Method.Text), out var signature))
         {
+            Use(signature.Id, target.Method.Span);
             return signature;
         }
 
         _diagnostics.Error(
             "PL0058",
             "unknown test target",
-            $"'{receiver.FullName}' has no ProtoLang method named '{methodName}'.",
+            $"'{receiver.FullName}' has no ProtoLang method named '{target.Method}'.",
             span,
             "Tests can only target methods declared in an extend block.");
         return null;
@@ -449,7 +724,12 @@ public sealed class Binder
 
         foreach (var field in fields)
         {
-            var descriptorField = descriptor.FindFieldByName(field.FieldName);
+            if (field.FieldName.IsMissing)
+            {
+                continue;
+            }
+
+            var descriptorField = descriptor.FindFieldByName(field.FieldName.Text);
             if (descriptorField is null)
             {
                 _diagnostics.Error(
@@ -459,6 +739,12 @@ public sealed class Binder
                     field.Span);
                 continue;
             }
+
+            // Recorded before the refusals below rather than beside each arm that builds a value.
+            // The name resolved -- that is what the checks that follow are checks *on* -- and a
+            // fixture field the compiler goes on to reject is still a use of that field, which is
+            // exactly the one someone renaming it must be shown.
+            Use(SymbolId.ForField(descriptorField), field.FieldName.Span);
 
             if (descriptorField.IsMap)
             {
@@ -500,7 +786,7 @@ public sealed class Binder
                         continue;
                     }
 
-                    var value = BindExpression(scalar.Value, new Scope(null), context, expectedType);
+                    var value = BindExpression(scalar.Value, NoNames(), context, expectedType);
                     if (value.Type is not ErrorType && !TypesMatch(expectedType, value.Type))
                     {
                         _diagnostics.Error(
@@ -543,9 +829,21 @@ public sealed class Binder
         MethodContext context)
     {
         var declared = new Dictionary<string, TestArgumentDeclaration>(StringComparer.Ordinal);
+
+        // An argument whose name is still being typed could be for any parameter, so nothing can be
+        // said about which are missing until it is written. That silence is unavoidable and covers
+        // the whole signature; a parameter with no name is a narrower problem, handled below.
+        var argumentNamesAreComplete = true;
+
         foreach (var argument in test.Arguments)
         {
-            if (!declared.TryAdd(argument.Name, argument))
+            if (argument.Name.IsMissing)
+            {
+                argumentNamesAreComplete = false;
+                continue;
+            }
+
+            if (!declared.TryAdd(argument.Name.Text, argument))
             {
                 _diagnostics.Error(
                     "PL0065",
@@ -556,21 +854,57 @@ public sealed class Binder
         }
 
         var arguments = new List<IrTestArgument>();
-        for (var i = 0; i < signature.ParameterNames.Count; i++)
+
+        // Which names have already been credited to a parameter. A signature can hold two parameters
+        // of one name -- `fn f(a: int64, a: int64)` is PL0026 and is still bound -- and both would
+        // otherwise claim the same `arg a` range, so one written name would answer with two symbols
+        // and highlighting, go-to-definition and rename would each get a different one. The first
+        // wins, which is the parameter BindMethod put in scope and therefore the one the body means.
+        var credited = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var parameter in signature.Parameters)
         {
-            var name = signature.ParameterNames[i];
-            if (!declared.TryGetValue(name, out var declaration))
+            // A parameter nobody has named yet cannot be supplied and cannot be demanded: there is
+            // no name for the test to write. Only this parameter goes unmentioned, though -- the
+            // ones beside it that do have names are still checked.
+            if (parameter.Declaration.Name.IsMissing)
             {
-                _diagnostics.Error(
-                    "PL0066",
-                    "missing test argument",
-                    $"Test '{test.Name}' does not supply argument '{name}'.",
-                    test.Span);
                 continue;
             }
 
-            var expectedType = signature.ParameterTypes[i];
-            var value = BindExpression(declaration.Value, new Scope(null), context, expectedType);
+            var name = parameter.Name;
+            if (!declared.TryGetValue(name, out var declaration))
+            {
+                if (argumentNamesAreComplete)
+                {
+                    _diagnostics.Error(
+                        "PL0066",
+                        "missing test argument",
+                        $"Test '{test.Name}' does not supply argument '{name}'.",
+                        test.Span);
+                }
+
+                continue;
+            }
+
+            // An argument names a parameter of the method under test, which is the only place in the
+            // language where a parameter is named from outside the method that declares it. Every
+            // occurrence and not only `declared`'s, which holds the first of a name supplied twice:
+            // the duplicate has been reported, but it is still that parameter's name written in that
+            // place, and an index that skipped it would rename around it.
+            if (credited.Add(name))
+            {
+                foreach (var written in test.Arguments)
+                {
+                    if (!written.Name.IsMissing && written.Name.Text == name)
+                    {
+                        Use(parameter.Id, written.Name.Span);
+                    }
+                }
+            }
+
+            var expectedType = parameter.Type;
+            var value = BindExpression(declaration.Value, NoNames(), context, expectedType);
             if (value.Type is not ErrorType && !TypesMatch(expectedType, value.Type))
             {
                 _diagnostics.Error(
@@ -583,7 +917,7 @@ public sealed class Binder
             arguments.Add(new IrTestArgument(name, value, declaration.Span));
         }
 
-        foreach (var extra in declared.Keys.Except(signature.ParameterNames, StringComparer.Ordinal))
+        foreach (var extra in declared.Keys.Except(NamedParametersOf(signature), StringComparer.Ordinal))
         {
             _diagnostics.Error(
                 "PL0068",
@@ -594,6 +928,12 @@ public sealed class Binder
 
         return arguments;
     }
+
+    /// <summary>The parameters a test could name, which is the ones the author has named.</summary>
+    private static IEnumerable<string> NamedParametersOf(IrMethodSignature signature)
+        => signature.Parameters
+            .Where(parameter => !parameter.Declaration.Name.IsMissing)
+            .Select(parameter => parameter.Name);
 
     private IrTestExpectation BindTestExpectation(
         TestExpectation expectation,
@@ -616,7 +956,7 @@ public sealed class Binder
                         returns.Span);
                 }
 
-                var value = BindExpression(returns.Value, new Scope(null), context, signature.ReturnType);
+                var value = BindExpression(returns.Value, NoNames(), context, signature.ReturnType);
                 if (signature.ReturnType is not VoidType
                     && value.Type is not ErrorType
                     && !TypesMatch(signature.ReturnType, value.Type))
@@ -681,7 +1021,7 @@ public sealed class Binder
 
     private IrBlock BindBlock(BlockStatement block, Scope parent, MethodContext context)
     {
-        var scope = new Scope(parent);
+        var scope = new Scope(parent, LastVisibleOffsetIn(block));
         var statements = new List<IrStatement>();
 
         foreach (var statement in block.Statements)
@@ -694,7 +1034,7 @@ public sealed class Binder
             context = context with { Present = Advance(context.Present, bound) };
         }
 
-        return new IrBlock(statements, block.Span);
+        return new IrBlock(statements, block.Span) { IsClosed = block.IsClosed };
     }
 
     /// <summary>
@@ -851,7 +1191,8 @@ public sealed class Binder
             _diagnostics.Error(
                 "PL0024",
                 "void is not a value type",
-                $"Variable '{declaration.Name}' cannot be declared void.",
+                $"{Capitalized(Refer(declaration.Name, "variable", "Variable"))} cannot be "
+                + "declared void.",
                 declaration.Span,
                 "void is a return marker only (spec 8.1).");
             declaredType = ErrorType.Instance;
@@ -867,15 +1208,32 @@ public sealed class Binder
             _diagnostics.Error(
                 "PL0028",
                 "type mismatch in variable initializer",
-                $"Cannot initialize '{declaration.Name}' of type '{declaredType.DisplayName}' "
-                + $"with a value of type '{initializer.Type.DisplayName}'.",
+                $"Cannot initialize {Refer(declaration.Name, "variable")} of type "
+                + $"'{declaredType.DisplayName}' with a value of type "
+                + $"'{initializer.Type.DisplayName}'.",
                 declaration.Span,
                 "ProtoLang does not apply implicit numeric conversions.");
         }
 
-        var local = new IrLocal(declaration.Name, declaredType ?? initializer.Type);
+        var local = new IrLocal(
+            new DeclarationSite(SymbolKind.Local, _document, declaration.Name, declaration.Span),
+            declaredType ?? initializer.Type);
 
-        if (!scope.TryDeclareLocal(local))
+        // Same reasoning as an unnamed parameter: the declaration stays in the IR so the body can
+        // still be walked, but nothing goes into scope under a name that was never written.
+        if (declaration.Name.IsMissing)
+        {
+            return new IrVariableDeclaration(local, initializer, declaration.Span);
+        }
+
+        if (scope.TryDeclareLocal(local))
+        {
+            // From the end of its own declaration, because TryDeclareLocal runs after the
+            // initializer above has been bound: 'var x: int64 = x;' is an unknown name, and a query
+            // that offered x there would be offering a name that does not bind.
+            Declare(scope, local.Declaration, local.Type, declaration.Span.End.Offset);
+        }
+        else
         {
             _diagnostics.Error(
                 "PL0029",
@@ -951,16 +1309,36 @@ public sealed class Binder
             elementType = ErrorType.Instance;
         }
 
-        var loopScope = new Scope(scope);
-        var loop = new IrLocal(statement.VariableName, elementType);
+        // The for statement ends where its body does, so the body is what says whether anything
+        // closed it.
+        var loopScope = new Scope(
+            scope,
+            ScopeEntry.LastOffsetInside(statement.Span, statement.Body.IsClosed));
 
-        if (!loopScope.TryDeclareLocal(loop))
+        // The extent is the whole loop rather than its header: the parser records no span for the
+        // header alone, and a client showing a loop binding in context wants the loop it binds over.
+        var loop = new IrLocal(
+            new DeclarationSite(SymbolKind.LoopBinding, _document, statement.VariableName, statement.Span),
+            elementType);
+
+        if (!statement.VariableName.IsMissing)
         {
-            _diagnostics.Error(
-                "PL0029",
-                "duplicate variable",
-                $"A variable named '{statement.VariableName}' is already in scope.",
-                statement.Span);
+            if (loopScope.TryDeclareLocal(loop))
+            {
+                // From inside the body, not from the loop and not from its brace: the collection was
+                // bound above, against the enclosing scope, so 'for x in x { }' does not see its own
+                // binding -- and the brace is where the collection ends rather than where the body
+                // begins.
+                Declare(loopScope, loop.Declaration, loop.Type, ScopeEntry.FirstOffsetInside(statement.Body.Span));
+            }
+            else
+            {
+                _diagnostics.Error(
+                    "PL0029",
+                    "duplicate variable",
+                    $"A variable named '{statement.VariableName}' is already in scope.",
+                    statement.Span);
+            }
         }
 
         var body = BindBlock(statement.Body, loopScope, context with { LoopDepth = context.LoopDepth + 1 });
@@ -1049,7 +1427,7 @@ public sealed class Binder
 
     private IrStatement BindAssignment(AssignmentStatement statement, Scope scope, MethodContext context)
     {
-        if (statement.Target is not NameExpression name || scope.LookupLocal(name.Name) is not { } local)
+        if (statement.Target is not NameExpression name || scope.LookupLocal(name.Name.Text) is not { } local)
         {
             _diagnostics.Error(
                 "PL0034",
@@ -1058,9 +1436,34 @@ public sealed class Binder
                 statement.Target.Span,
                 "Whether methods may mutate the receiver is still an open question (spec 16.1).");
 
-            var boundValue = BindExpression(statement.Value, scope, context, null);
-            return new IrExpressionStatement(boundValue, statement.Span);
+            // The target is bound even though nothing may be assigned to it. What PL0034 refuses is
+            // the assignment, not the expression on its left: `quantity`, `factor` and `line.quantity`
+            // all name something that resolves, and leaving them unbound put those names in the index
+            // nowhere and left an editor with nothing at a position the author is looking straight at.
+            // It is the same rule the map field in a fixture and the presence test on a field without
+            // presence already follow, and it is why binding a call that cannot be made keeps its
+            // arguments.
+            //
+            // Both halves in a block, because a statement has one slot and the alternative is to bind
+            // an expression and throw it away. No backend sees this: PL0034 has been reported, so the
+            // compilation has errors and EmittableModule is null.
+            var refusedTarget = new IrExpressionStatement(
+                BindExpression(statement.Target, scope, context, null),
+                statement.Target.Span);
+
+            MarkWritten(AssignedNameOf(statement.Target));
+
+            return new IrBlock(
+                [
+                    refusedTarget,
+                    new IrExpressionStatement(
+                        BindExpression(statement.Value, scope, context, null),
+                        statement.Value.Span),
+                ],
+                statement.Span);
         }
+
+        Use(local.Id, name.Name.Span, ReferenceKind.Write);
 
         var value = BindExpression(statement.Value, scope, context, local.Type);
 
@@ -1075,7 +1478,7 @@ public sealed class Binder
                 "ProtoLang does not apply implicit numeric conversions.");
         }
 
-        return new IrAssignment(local, value, statement.Span);
+        return new IrAssignment(new IrLocalReference(local, name.Span), value, statement.Span);
     }
 
     private IrExpression BindExpression(
@@ -1204,22 +1607,27 @@ public sealed class Binder
 
     private IrExpression BindName(NameExpression name, Scope scope, MethodContext context)
     {
-        if (scope.LookupLocal(name.Name) is { } local)
+        if (scope.LookupLocal(name.Name.Text) is { } local)
         {
+            Use(local.Id, name.Name.Span);
             return new IrLocalReference(local, name.Span);
         }
 
-        if (scope.LookupParameter(name.Name) is { } parameter)
+        if (scope.LookupParameter(name.Name.Text) is { } parameter)
         {
+            Use(parameter.Id, name.Name.Span);
             return new IrParameterReference(parameter, name.Span);
         }
 
         if (context.AllowImplicitReceiverFields)
         {
             // A bare identifier may be a field of the implicit receiver, as in `quantity`.
-            var field = context.Receiver.FindFieldByName(name.Name);
+            var field = context.Receiver.FindFieldByName(name.Name.Text);
             if (field is not null)
             {
+                // The same symbol an explicit `this.quantity` would reach. That the author wrote no
+                // receiver is a fact about the text and not about what was named.
+                Use(SymbolId.ForField(field), name.Name.Span);
                 return BindFieldAccess(
                     new IrThis(new MessageType(context.Receiver), name.Span), field, name.Span, context);
             }
@@ -1309,36 +1717,17 @@ public sealed class Binder
     /// </remarks>
     private IrExpression? TryBindEnumValue(MemberAccessExpression member, Scope scope, MethodContext context)
     {
-        if (!TryFlattenName(member.Receiver, out var typeName, out var leadingName))
+        if (!TryResolveEnumReceiver(member.Receiver, scope, context, out var descriptor))
         {
             return null;
         }
 
-        if (IsValueName(leadingName, scope, context))
+        if (descriptor is null)
         {
-            return null;
+            return new IrLiteral(null, ErrorType.Instance, member.Span);
         }
 
-        // A fully qualified name is unambiguous by construction, so it is tried before the
-        // simple-name lookup that could report a false ambiguity.
-        if (!_enumsByFullName.TryGetValue(typeName, out var descriptor))
-        {
-            if (!_enumsBySimpleName.TryGetValue(typeName, out var candidates))
-            {
-                // Not an enum. Whatever this is, the ordinary path reports it.
-                return null;
-            }
-
-            if (candidates.Count > 1)
-            {
-                ReportAmbiguousTypeName(typeName, member.Receiver.Span, candidates.Select(e => e.FullName));
-                return new IrLiteral(null, ErrorType.Instance, member.Span);
-            }
-
-            descriptor = candidates[0];
-        }
-
-        var value = descriptor.FindValueByName(member.Name);
+        var value = descriptor.FindValueByName(member.Name.Text);
         if (value is null)
         {
             _diagnostics.Error(
@@ -1350,7 +1739,100 @@ public sealed class Binder
             return new IrLiteral(null, ErrorType.Instance, member.Span);
         }
 
+        Use(SymbolId.ForEnumValue(value), member.Name.Span);
         return new IrEnumValue(value, new EnumPlType(descriptor), member.Span);
+    }
+
+    /// <summary>
+    /// The enum a member access reaches into, when its receiver names one rather than holding a
+    /// value -- <c>Level</c> in <c>Level.LEVEL_HIGH</c>.
+    /// </summary>
+    /// <param name="descriptor">
+    /// The enum named, or null when the name was ambiguous -- which has been reported.
+    /// </param>
+    /// <returns>
+    /// False when the receiver does not name an enum at all, and the access should be bound the
+    /// ordinary way.
+    /// </returns>
+    /// <remarks>
+    /// Shared with the case where the member name has not been typed yet, so that <c>Level.</c> and
+    /// <c>Level.LEVEL_HIGH</c> agree about what <c>Level</c> is. They disagreed once: the unfinished
+    /// one bound the receiver as an expression and reported an unknown name for a type that
+    /// resolves perfectly well.
+    /// </remarks>
+    private bool TryResolveEnumReceiver(
+        Expression receiver,
+        Scope scope,
+        MethodContext context,
+        out EnumDescriptor? descriptor)
+    {
+        descriptor = null;
+
+        if (!TryFlattenName(receiver, out var typeName, out var leadingName))
+        {
+            return false;
+        }
+
+        if (IsValueName(leadingName, scope, context))
+        {
+            return false;
+        }
+
+        // A fully qualified name is unambiguous by construction, so it is tried before the
+        // simple-name lookup that could report a false ambiguity.
+        if (_enumsByFullName.TryGetValue(typeName, out var byFullName))
+        {
+            descriptor = byFullName;
+            Use(SymbolId.ForType(descriptor), receiver.Span);
+            return true;
+        }
+
+        if (!_enumsBySimpleName.TryGetValue(typeName, out var candidates))
+        {
+            // Not an enum. Whatever this is, the ordinary path reports it.
+            return false;
+        }
+
+        if (candidates.Count > 1)
+        {
+            ReportAmbiguousTypeName(typeName, receiver.Span, candidates.Select(e => e.FullName));
+            return true;
+        }
+
+        descriptor = candidates[0];
+
+        // The whole receiver, because the enum is what the whole of it names: `Level` is one token
+        // and `pkg.Level` is three, and neither has a narrower range that means the enum alone. This
+        // runs at every level of a member chain and records at none of them but the one that
+        // resolves, which is what keeps a chain from reporting its head over and over.
+        Use(SymbolId.ForType(descriptor), receiver.Span);
+        return true;
+    }
+
+    /// <summary>
+    /// Binds the receiver of a dot the author has not finished, for the type it has rather than for
+    /// a value it does not have.
+    /// </summary>
+    /// <remarks>
+    /// An enum is settled first, exactly as it is for a completed access. Binding <c>Level</c> as an
+    /// expression instead reports an unknown name -- a second diagnostic for a syntax error already
+    /// reported -- and then hands a completion list an error type in place of the enum whose values
+    /// it exists to offer. A placeholder carries the type, in the shape the binder already uses
+    /// wherever it has a type to publish and no value to go with it.
+    /// </remarks>
+    private IrExpression BindReceiverAwaitingAMember(
+        MemberAccessExpression member,
+        Scope scope,
+        MethodContext context)
+    {
+        if (!TryResolveEnumReceiver(member.Receiver, scope, context, out var descriptor))
+        {
+            return BindExpression(member.Receiver, scope, context, null);
+        }
+
+        return descriptor is null
+            ? new IrLiteral(null, ErrorType.Instance, member.Receiver.Span)
+            : new IrLiteral(null, new EnumPlType(descriptor), member.Receiver.Span);
     }
 
     /// <summary>
@@ -1365,7 +1847,16 @@ public sealed class Binder
 
         while (current is MemberAccessExpression member)
         {
-            parts.Insert(0, member.Name);
+            // A dotted name with a piece still unwritten does not name anything, so it must not be
+            // flattened into one that happens to have an empty segment.
+            if (member.Name.IsMissing)
+            {
+                name = string.Empty;
+                leadingName = string.Empty;
+                return false;
+            }
+
+            parts.Insert(0, member.Name.Text);
             current = member.Receiver;
         }
 
@@ -1376,9 +1867,9 @@ public sealed class Binder
             return false;
         }
 
-        parts.Insert(0, root.Name);
+        parts.Insert(0, root.Name.Text);
         name = string.Join('.', parts);
-        leadingName = root.Name;
+        leadingName = root.Name.Text;
         return true;
     }
 
@@ -1388,8 +1879,22 @@ public sealed class Binder
         || scope.LookupParameter(name) is not null
         || (context.AllowImplicitReceiverFields && context.Receiver.FindFieldByName(name) is not null);
 
+    /// <remarks>
+    /// The missing-name case comes first and does the most work of any failure path here, because it
+    /// is the one an editor asks about constantly: the author typed a dot and is waiting to be told
+    /// what may follow it. Answering means binding the receiver and keeping it, which is why the
+    /// result is an <see cref="IrMissingMemberAccess"/> rather than the error literal every other
+    /// failure below collapses to.
+    /// </remarks>
     private IrExpression BindMemberAccess(MemberAccessExpression member, Scope scope, MethodContext context)
     {
+        if (member.Name.IsMissing)
+        {
+            return new IrMissingMemberAccess(
+                BindReceiverAwaitingAMember(member, scope, context),
+                member.Name.Span);
+        }
+
         // A member access whose receiver is a plain dotted name may be naming an enum constant
         // rather than reaching into a value, as in `Level.LEVEL_HIGH`. That has to be settled before
         // the receiver is bound: `Level` is a type, so binding it as an expression reports PL0037
@@ -1416,13 +1921,14 @@ public sealed class Binder
             return new IrLiteral(null, ErrorType.Instance, member.Span);
         }
 
-        var field = messageType.Descriptor.FindFieldByName(member.Name);
+        var field = messageType.Descriptor.FindFieldByName(member.Name.Text);
         if (field is not null)
         {
+            Use(SymbolId.ForField(field), member.Name.Span);
             return BindFieldAccess(receiver, field, member.Span, context);
         }
 
-        if (_methods.ContainsKey((messageType.Descriptor.FullName, member.Name)))
+        if (_methods.ContainsKey((messageType.Descriptor.FullName, member.Name.Text)))
         {
             _diagnostics.Error(
                 "PL0040",
@@ -1441,20 +1947,50 @@ public sealed class Binder
         return new IrLiteral(null, ErrorType.Instance, member.Span);
     }
 
+    /// <summary>Binds a call, whether or not there turns out to be anything to call.</summary>
+    /// <remarks>
+    /// <para>
+    /// Six paths below decide there is no method here. Every one of them still keeps the arguments,
+    /// in an <see cref="IrUncallableInvocation"/>, because the arguments are source the author wrote
+    /// and a call that does not resolve is the ordinary state of one being typed. Collapsing to an
+    /// error-typed literal spanning the whole call -- which is what every path used to do -- leaves
+    /// nothing at the positions inside the parentheses, which is exactly the region completion and
+    /// signature help ask about.
+    /// </para>
+    /// <para>
+    /// Arguments are bound once and only once. The two paths that reach a failure with them already
+    /// bound hand over the list they built; the four that fail before binding anything go through
+    /// <c>Uncallable</c>, which binds with no expected type -- there is no signature to expect
+    /// anything from. Binding twice would report every mistake inside an argument twice.
+    /// </para>
+    /// </remarks>
     private IrExpression BindInvocation(InvocationExpression invocation, Scope scope, MethodContext context)
     {
         IrExpression receiver;
         string methodName;
+
+        // Carried out of the switch beside the name, because only the switch knows which of the two
+        // callee shapes wrote it, and the call's own span covers the arguments as well.
+        SourceSpan methodNameSpan;
         MessageDescriptor receiverDescriptor;
 
         switch (invocation.Callee)
         {
+            // A callee whose name is still being typed is bound for what it is -- a receiver
+            // awaiting a member -- rather than looked up as a method called the empty string.
+            case MemberAccessExpression { Name.IsMissing: true } member:
+                return Uncallable(BindMemberAccess(member, scope, context));
+
             case MemberAccessExpression member:
             {
                 var boundReceiver = BindExpression(member.Receiver, scope, context, null);
+
+                // Nothing is reported here: whatever went wrong with the receiver has been reported
+                // where it went wrong, and saying that a call on it also failed is that same mistake
+                // told a second time.
                 if (boundReceiver.Type is ErrorType)
                 {
-                    return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+                    return Uncallable(boundReceiver);
                 }
 
                 if (boundReceiver.Type is not MessageType messageType)
@@ -1464,18 +2000,20 @@ public sealed class Binder
                         "method call on a non-message value",
                         $"Type '{boundReceiver.Type.DisplayName}' has no methods.",
                         invocation.Span);
-                    return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+                    return Uncallable(boundReceiver);
                 }
 
                 receiver = boundReceiver;
-                methodName = member.Name;
+                methodName = member.Name.Text;
+                methodNameSpan = member.Name.Span;
                 receiverDescriptor = messageType.Descriptor;
                 break;
             }
 
             case NameExpression name:
                 receiver = new IrThis(new MessageType(context.Receiver), name.Span);
-                methodName = name.Name;
+                methodName = name.Name.Text;
+                methodNameSpan = name.Name.Span;
                 receiverDescriptor = context.Receiver;
                 break;
 
@@ -1486,7 +2024,14 @@ public sealed class Binder
                     "Only ProtoLang methods can be called.",
                     invocation.Span,
                     "Calling target-language functions is not permitted (spec 20).");
-                return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+
+                // The callee is deliberately not bound. It is the author's expression and a position
+                // query would like it, but descending it is not safe: the parser's nesting budget
+                // bounds its own recursion and not the chain its postfix loop builds, so a file of
+                // 5000 unbalanced parentheses recovers into 2436 nested invocations, and binding
+                // through them turns a 183ms bind into one that does not finish. The syntax tree
+                // answers about a callee that cannot be called; the IR stops at the call.
+                return Uncallable(null);
         }
 
         if (!_methods.TryGetValue((receiverDescriptor.FullName, methodName), out var signature))
@@ -1497,25 +2042,31 @@ public sealed class Binder
                 $"'{receiverDescriptor.FullName}' has no ProtoLang method named '{methodName}'.",
                 invocation.Span,
                 "Methods must be defined in an extend block for that message.");
-            return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+            return Uncallable(receiver);
         }
+
+        Use(signature.Id, methodNameSpan);
 
         var arguments = new List<IrExpression>();
         for (var i = 0; i < invocation.Arguments.Count; i++)
         {
-            var expected = i < signature.ParameterTypes.Count ? signature.ParameterTypes[i] : null;
+            var expected = i < signature.Parameters.Count ? signature.Parameters[i].Type : null;
             arguments.Add(BindExpression(invocation.Arguments[i], scope, context, expected));
         }
 
-        if (arguments.Count != signature.ParameterTypes.Count)
+        if (arguments.Count != signature.Parameters.Count)
         {
             _diagnostics.Error(
                 "PL0045",
                 "wrong number of arguments",
-                $"'{methodName}' takes {signature.ParameterTypes.Count} argument(s) "
+                $"'{methodName}' takes {signature.Parameters.Count} argument(s) "
                 + $"but {arguments.Count} were supplied.",
                 invocation.Span);
-            return new IrLiteral(null, ErrorType.Instance, invocation.Span);
+
+            // The list that was just built, not a second binding of the same expressions: the loop
+            // above runs before this check precisely so that a mistake inside an argument is
+            // reported whether or not the right number of them were supplied.
+            return new IrUncallableInvocation(receiver, arguments, invocation.Span);
         }
 
         for (var i = 0; i < arguments.Count; i++)
@@ -1525,19 +2076,28 @@ public sealed class Binder
                 continue;
             }
 
-            if (!TypesMatch(signature.ParameterTypes[i], arguments[i].Type))
+            if (!TypesMatch(signature.Parameters[i].Type, arguments[i].Type))
             {
                 _diagnostics.Error(
                     "PL0046",
                     "argument type mismatch",
                     $"Argument {i + 1} of '{methodName}' expects "
-                    + $"'{signature.ParameterTypes[i].DisplayName}' but got "
+                    + $"'{signature.Parameters[i].Type.DisplayName}' but got "
                     + $"'{arguments[i].Type.DisplayName}'.",
                     invocation.Arguments[i].Span);
             }
         }
 
         return new IrMethodCall(receiver, signature, arguments, invocation.Span);
+
+        // For the four paths that give up before any argument has been looked at. There is no
+        // signature to take an expected type from -- that is what they gave up on -- so each
+        // argument is bound for whatever it is on its own.
+        IrUncallableInvocation Uncallable(IrExpression? boundReceiver)
+            => new(
+                boundReceiver,
+                [.. invocation.Arguments.Select(argument => BindExpression(argument, scope, context, null))],
+                invocation.Span);
     }
 
     /// <summary>
@@ -1563,14 +2123,24 @@ public sealed class Binder
         FieldDescriptor? field;
         string name;
 
+        // Beside the name for the reason BindInvocation carries one: `has a.b` spans the keyword and
+        // the receiver too, and `b` is what an occurrence of the field means.
+        SourceSpan fieldNameSpan;
+
         switch (has.Operand)
         {
+            // 'has customer.' names no field yet, so it is bound as the member access it is rather
+            // than reported as a field called the empty string.
+            case MemberAccessExpression { Name.IsMissing: true } member:
+                return BindMemberAccess(member, scope, context);
+
             case NameExpression bare when context.AllowImplicitReceiverFields
-                    && scope.LookupLocal(bare.Name) is null
-                    && scope.LookupParameter(bare.Name) is null:
+                    && scope.LookupLocal(bare.Name.Text) is null
+                    && scope.LookupParameter(bare.Name.Text) is null:
                 receiver = new IrThis(new MessageType(context.Receiver), bare.Span);
-                field = context.Receiver.FindFieldByName(bare.Name);
-                name = bare.Name;
+                field = context.Receiver.FindFieldByName(bare.Name.Text);
+                name = bare.Name.Text;
+                fieldNameSpan = bare.Name.Span;
                 break;
 
             case MemberAccessExpression member:
@@ -1593,8 +2163,9 @@ public sealed class Binder
                 }
 
                 receiver = target;
-                field = message.Descriptor.FindFieldByName(member.Name);
-                name = member.Name;
+                field = message.Descriptor.FindFieldByName(member.Name.Text);
+                name = member.Name.Text;
+                fieldNameSpan = member.Name.Span;
                 break;
             }
 
@@ -1618,6 +2189,12 @@ public sealed class Binder
                 has.Span);
             return new IrLiteral(null, ErrorType.Instance, has.Span);
         }
+
+        // Before the three refusals below rather than after them, for the reason a fixture field is
+        // recorded before its own: what they refuse is the question, not the name. 'has' on a
+        // repeated field, on one with implicit presence, or on a map is still a use of that field,
+        // and it is the use a rename would otherwise leave behind.
+        Use(SymbolId.ForField(field), fieldNameSpan);
 
         if (field.IsMap)
         {
@@ -1949,10 +2526,16 @@ public sealed class Binder
     /// How many enclosing loops the statement being bound sits inside. Zero means 'break' and
     /// 'continue' have nothing to bind to.
     /// </param>
+    /// <remarks>
+    /// Carries no parameter list, deliberately. <see cref="Scope"/> is what answers a name, and it
+    /// holds a filtered view of what a signature declares: a parameter nobody has named is not in
+    /// it, and a duplicate is in it once rather than twice. A second list beside it would be the
+    /// complete positional one, which reads like the authoritative answer and is the wrong list to
+    /// resolve a name against.
+    /// </remarks>
     private sealed record MethodContext(
         MessageDescriptor Receiver,
         PlType ReturnType,
-        IReadOnlyList<IrParameter> Parameters,
         bool AllowImplicitReceiverFields = true,
         int LoopDepth = 0)
     {
@@ -1978,7 +2561,20 @@ public sealed class Binder
         private readonly Dictionary<string, IrLocal> _locals = new(StringComparer.Ordinal);
         private readonly Dictionary<string, IrParameter> _parameters = new(StringComparer.Ordinal);
 
-        public Scope(Scope? parent) => _parent = parent;
+        /// <param name="lastVisibleOffset">
+        /// The last offset at which what this scope holds can still be named. It exists so a scope
+        /// can be published rather than only used: a chain of parent pointers means nothing once the
+        /// descent that built it has returned, while an offset still answers the question a caret
+        /// asks. See <see cref="ScopeEntry.LastOffsetInside"/> for why it is not simply the end of a span.
+        /// </param>
+        public Scope(Scope? parent, int lastVisibleOffset)
+        {
+            _parent = parent;
+            LastVisibleOffset = lastVisibleOffset;
+        }
+
+        /// <inheritdoc cref="ScopeEntry.VisibleThrough"/>
+        public int LastVisibleOffset { get; }
 
         public bool TryDeclareLocal(IrLocal local)
         {

@@ -8,10 +8,30 @@ namespace ProtoLang.Syntax;
 /// </summary>
 public sealed class Parser
 {
+    /// <summary>
+    /// How deeply nested constructs may be before the parser gives up on them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Recursive descent costs stack per nesting level, and a <see cref="StackOverflowException"/>
+    /// cannot be caught: it terminates the process immediately, skipping every <c>finally</c> and
+    /// every handler. In the CLI that is an ugly crash. In a long-lived host it takes the whole
+    /// session down, which is why this is a budget rather than a matter of taste.
+    /// </para>
+    /// <para>
+    /// The limit is far above anything hand-written -- real code nests single digits deep -- and far
+    /// below where the stack runs out, with room to spare for the binder and the backends, which
+    /// walk the same tree with larger frames.
+    /// </para>
+    /// </remarks>
+    private const int MaxNestingDepth = 128;
+
     private readonly IReadOnlyList<Token> _tokens;
     private readonly DiagnosticBag _diagnostics;
     private readonly string _file;
     private int _position;
+    private int _nestingDepth;
+    private bool _reportedNesting;
 
     public Parser(IReadOnlyList<Token> tokens, string file, DiagnosticBag diagnostics)
     {
@@ -52,9 +72,28 @@ public sealed class Parser
 
     private Token Expect(TokenKind kind)
     {
+        TryExpect(kind, out var token);
+        return token;
+    }
+
+    /// <summary>
+    /// Consumes the expected token, or reports that it is missing and synthesizes one.
+    /// </summary>
+    /// <returns>
+    /// True when the token was really there. False when it was not, in which case
+    /// <paramref name="token"/> is a stand-in and the diagnostic has already been reported.
+    /// </returns>
+    /// <remarks>
+    /// The answer is published rather than inferred from the stand-in, because the stand-in is
+    /// indistinguishable from a real token of the same kind carrying no text. Callers that build a
+    /// name out of the result need to know which they got; see <see cref="SyntaxName"/>.
+    /// </remarks>
+    private bool TryExpect(TokenKind kind, out Token token)
+    {
         if (Current.Kind == kind)
         {
-            return Advance();
+            token = Advance();
+            return true;
         }
 
         _diagnostics.Error(
@@ -63,9 +102,75 @@ public sealed class Parser
             $"Expected {kind.Describe()} but found {Current.Kind.Describe()}.",
             Current.Span);
 
-        // Return a synthetic token so callers can continue building a tree.
-        return new Token(kind, string.Empty, Current.Span);
+        // A synthetic token so callers can continue building a tree.
+        token = new Token(kind, string.Empty, Current.Span);
+        return false;
     }
+
+    /// <summary>
+    /// Parses an identifier into a <see cref="SyntaxName"/>, modelling its absence rather than
+    /// standing in for it.
+    /// </summary>
+    private SyntaxName ExpectName()
+    {
+        // Taken before the attempt, because a failed Expect does not consume and the token it
+        // failed on is the wrong anchor -- for a trailing dot at the end of a line, that token is
+        // on the next line.
+        var insertionPoint = InsertionPointAfterPreviousToken();
+
+        return TryExpect(TokenKind.Identifier, out var token)
+            ? new SyntaxName(token.Text, token.Span)
+            : SyntaxName.Missing(insertionPoint);
+    }
+
+    /// <summary>The empty range immediately after the last token consumed.</summary>
+    /// <remarks>
+    /// Where a name would be typed next, which is where an editor opens a completion list. Before
+    /// anything has been consumed this degenerates to the end of the current token; no name is
+    /// expected at the start of a file, so nothing reaches that case.
+    /// </remarks>
+    private SourceSpan InsertionPointAfterPreviousToken() => InsertionPointAfter(Peek(-1));
+
+    /// <inheritdoc cref="InsertionPointAfterPreviousToken"/>
+    private SourceSpan InsertionPointAfter(Token token) => new(_file, token.Span.End, token.Span.End);
+
+    /// <summary>
+    /// Takes one level of nesting budget, or reports that the budget is exhausted.
+    /// </summary>
+    /// <returns>
+    /// True when the caller may recurse, in which case it must call <see cref="ExitNesting"/>.
+    /// False when it must not, in which case the diagnostic has already been reported.
+    /// </returns>
+    /// <remarks>
+    /// Reported once per file. A construct deep enough to exhaust the budget produces one
+    /// diagnostic per enclosing level otherwise, and the hundredth copy tells the reader nothing
+    /// the first did not.
+    /// </remarks>
+    private bool TryEnterNesting()
+    {
+        if (_nestingDepth < MaxNestingDepth)
+        {
+            _nestingDepth++;
+            return true;
+        }
+
+        if (!_reportedNesting)
+        {
+            _reportedNesting = true;
+            _diagnostics.Error(
+                "PL0081",
+                "nesting is too deep",
+                $"This construct nests more than {MaxNestingDepth} levels deep, which the compiler "
+                + "does not parse.",
+                Current.Span,
+                "This is nearly always a malformed or generated file. Reduce the nesting, or split "
+                + "the expression across intermediate variables.");
+        }
+
+        return false;
+    }
+
+    private void ExitNesting() => _nestingDepth--;
 
     public CompilationUnit ParseCompilationUnit()
     {
@@ -117,10 +222,13 @@ public sealed class Parser
     {
         var start = Expect(TokenKind.Import).Span;
         Expect(TokenKind.Proto);
-        var path = Expect(TokenKind.StringLiteral);
+        var written = TryExpect(TokenKind.StringLiteral, out var path);
         var end = Expect(TokenKind.Semicolon).Span;
 
-        return new ImportDeclaration((string?)path.Value ?? string.Empty, Spanning(start, end));
+        return new ImportDeclaration(
+            (string?)path.Value ?? string.Empty,
+            Spanning(start, end),
+            !written);
     }
 
     private ExtendDeclaration ParseExtendDeclaration()
@@ -158,9 +266,13 @@ public sealed class Parser
     private TestDeclaration ParseTestDeclaration()
     {
         var start = Expect(TokenKind.Test).Span;
-        var targetName = ParseQualifiedName();
+        var target = ParseTestTarget();
         var name = Expect(TokenKind.StringLiteral);
         Expect(TokenKind.OpenBrace);
+
+        // Where a part nobody wrote would be written: just inside the brace. Taken before the body
+        // is parsed, because that is the only moment the position is at hand.
+        var insertionPoint = InsertionPointAfterPreviousToken();
 
         TestReceiverFixture? receiver = null;
         var arguments = new List<TestArgumentDeclaration>();
@@ -210,7 +322,13 @@ public sealed class Parser
                 "A ProtoLang unit test must declare the protobuf receiver fixture.",
                 Spanning(start, end),
                 "Add a 'receiver { ... }' block.");
-            receiver = new TestReceiverFixture([], Spanning(start, end));
+
+            // The diagnostic is about the whole test; the node stands for a block that is not there,
+            // and spans the empty point one would be typed at -- the rule SyntaxName.Missing and
+            // IrMissingMemberAccess already follow. Spanning the test instead made a fixture nobody
+            // wrote the innermost thing at every offset of the declaration, its header included, so a
+            // position query on 'test Outer.f' answered with a receiver fixture.
+            receiver = new TestReceiverFixture([], insertionPoint);
         }
 
         if (expectation is null)
@@ -220,11 +338,14 @@ public sealed class Parser
                 "test is missing an expectation",
                 "A ProtoLang unit test must declare 'expect return <value>;' or 'expect fail;'.",
                 Spanning(start, end));
-            expectation = new TestFailExpectation(Spanning(start, end));
+
+            // Same rule, same point. Both stand-ins share it when both are absent, which is what a
+            // caret between the braces of an empty test should find: two things that are not there.
+            expectation = new TestFailExpectation(insertionPoint);
         }
 
         return new TestDeclaration(
-            targetName,
+            target,
             (string?)name.Value ?? string.Empty,
             receiver,
             arguments,
@@ -247,21 +368,53 @@ public sealed class Parser
 
         while (Current.Kind is not (TokenKind.CloseBrace or TokenKind.EndOfFile))
         {
+            var before = _position;
             var start = Current.Span;
-            var fieldName = Expect(TokenKind.Identifier).Text;
+            var fieldName = ExpectName();
 
             if (Match(TokenKind.Equals))
             {
                 var value = ParseExpression();
                 var end = Expect(TokenKind.Semicolon).Span;
                 fields.Add(new TestScalarFieldInitializer(fieldName, value, Spanning(start, end)));
-                continue;
+            }
+            else if (!TryEnterNesting())
+            {
+                // Message fixtures nest, so they carry the same budget as blocks and expressions.
+                // Whether the closer was found does not change a fixture: it declares no name, so
+                // nothing's visibility ends at its brace.
+                var abandonedEnd = Current.Span;
+                if (Match(TokenKind.OpenBrace))
+                {
+                    TrySkipBalancedBlock(out abandonedEnd);
+                }
+
+                fields.Add(new TestMessageFieldInitializer(fieldName, [], Spanning(start, abandonedEnd)));
+            }
+            else
+            {
+                try
+                {
+                    Expect(TokenKind.OpenBrace);
+                    var nested = ParseTestFieldInitializers();
+                    var nestedEnd = Expect(TokenKind.CloseBrace).Span;
+                    fields.Add(
+                        new TestMessageFieldInitializer(fieldName, nested, Spanning(start, nestedEnd)));
+                }
+                finally
+                {
+                    ExitNesting();
+                }
             }
 
-            Expect(TokenKind.OpenBrace);
-            var nested = ParseTestFieldInitializers();
-            var nestedEnd = Expect(TokenKind.CloseBrace).Span;
-            fields.Add(new TestMessageFieldInitializer(fieldName, nested, Spanning(start, nestedEnd)));
+            // Guarantee forward progress, as ParseBlock does. Nothing above is obliged to consume a
+            // token: on a stray token every Expect fails without advancing, and the recursive call
+            // then re-enters on an unchanged position. That recursion has no base case, and the
+            // resulting StackOverflowException cannot be caught -- it takes the process with it.
+            if (_position == before)
+            {
+                Advance();
+            }
         }
 
         return fields;
@@ -270,7 +423,7 @@ public sealed class Parser
     private TestArgumentDeclaration ParseTestArgument()
     {
         var start = Expect(TokenKind.Arg).Span;
-        var name = Expect(TokenKind.Identifier).Text;
+        var name = ExpectName();
         Expect(TokenKind.Equals);
         var value = ParseExpression();
         var end = Expect(TokenKind.Semicolon).Span;
@@ -305,17 +458,88 @@ public sealed class Parser
         return new TestFailExpectation(Spanning(start, recoveredEnd));
     }
 
-    /// <summary>Parses <c>Foo</c> or <c>pkg.Foo</c> into a single dotted name.</summary>
-    private string ParseQualifiedName()
+    /// <summary>Parses <c>Invoice.total_cents</c> into the message and the method it names.</summary>
+    /// <remarks>
+    /// The last dot separates them, which is the rule the binder used to apply to the joined string.
+    /// Applied here instead, because only the parser holds the tokens and therefore the range of each
+    /// half; see <see cref="TestTarget"/> for what a missing half means and why the binder reads the
+    /// shape rather than the text.
+    /// </remarks>
+    private TestTarget ParseTestTarget()
     {
-        var parts = new List<string> { Expect(TokenKind.Identifier).Text };
-        while (Current.Kind == TokenKind.Dot && Peek(1).Kind == TokenKind.Identifier)
+        // Taken before the attempt, for the reason ExpectName gives.
+        var insertionPoint = InsertionPointAfterPreviousToken();
+
+        if (!TryExpect(TokenKind.Identifier, out var first))
         {
-            Advance();
-            parts.Add(Advance().Text);
+            return new TestTarget(
+                SyntaxName.Missing(insertionPoint),
+                SyntaxName.Missing(insertionPoint),
+                insertionPoint);
         }
 
-        return string.Join('.', parts);
+        var parts = new List<Token> { first };
+
+        while (Current.Kind == TokenKind.Dot)
+        {
+            var dot = Advance();
+            if (!TryExpect(TokenKind.Identifier, out var part))
+            {
+                // The name stops here. What has been written names a receiver; the method is the
+                // hole after the dot, which TryExpect has already reported.
+                var hole = InsertionPointAfter(dot);
+                return new TestTarget(Joined(parts), SyntaxName.Missing(hole), Spanning(first.Span, hole));
+            }
+
+            parts.Add(part);
+        }
+
+        var method = new SyntaxName(parts[^1].Text, parts[^1].Span);
+
+        return parts.Count == 1
+            ? new TestTarget(SyntaxName.Missing(insertionPoint), method, method.Span)
+            : new TestTarget(
+                Joined(parts.GetRange(0, parts.Count - 1)),
+                method,
+                Spanning(first.Span, method.Span));
+
+        SyntaxName Joined(IReadOnlyList<Token> tokens) => new(
+            string.Join('.', tokens.Select(token => token.Text)),
+            Spanning(tokens[0].Span, tokens[^1].Span));
+    }
+
+    /// <summary>Parses <c>Foo</c> or <c>pkg.Foo</c> into a single dotted name.</summary>
+    /// <remarks>
+    /// A dot with no identifier after it is consumed and modelled as a missing name rather than
+    /// left in the stream. Leaving it made the caller's next <c>Expect</c> report the dot as the
+    /// unexpected token, which blamed the wrong thing and left nothing in the tree to anchor a
+    /// completion list to. It is still an error, reported here against the token that should have
+    /// been the name.
+    /// </remarks>
+    private SyntaxName ParseQualifiedName()
+    {
+        var insertionPoint = InsertionPointAfterPreviousToken();
+        if (!TryExpect(TokenKind.Identifier, out var first))
+        {
+            return SyntaxName.Missing(insertionPoint);
+        }
+
+        var parts = new List<string> { first.Text };
+        var span = first.Span;
+
+        while (Current.Kind == TokenKind.Dot)
+        {
+            var dot = Advance();
+            if (!TryExpect(TokenKind.Identifier, out var part))
+            {
+                return SyntaxName.Missing(InsertionPointAfter(dot));
+            }
+
+            parts.Add(part.Text);
+            span = Spanning(span, part.Span);
+        }
+
+        return new SyntaxName(string.Join('.', parts), span);
     }
 
     private MethodDeclaration ParseMethodDeclaration()
@@ -324,7 +548,7 @@ public sealed class Parser
         var isVirtual = Match(TokenKind.Virtual);
 
         Expect(TokenKind.Fn);
-        var name = Expect(TokenKind.Identifier).Text;
+        var name = ExpectName();
 
         Expect(TokenKind.OpenParen);
         var parameters = new List<ParameterDeclaration>();
@@ -333,7 +557,7 @@ public sealed class Parser
             do
             {
                 var parameterStart = Current.Span;
-                var parameterName = Expect(TokenKind.Identifier).Text;
+                var parameterName = ExpectName();
                 Expect(TokenKind.Colon);
                 var parameterType = ParseTypeReference();
                 parameters.Add(new ParameterDeclaration(
@@ -367,14 +591,16 @@ public sealed class Parser
             or TokenKind.Bytes or TokenKind.Void)
         {
             Advance();
-            return new TypeReference(token.Text, token.Span);
+            return new TypeReference(new SyntaxName(token.Text, token.Span), token.Span);
         }
 
         if (token.Kind == TokenKind.Identifier)
         {
             var name = ParseQualifiedName();
-            return new TypeReference(name, Spanning(token.Span, Peek(-1).Span));
+            return new TypeReference(name, Spanning(token.Span, name.Span));
         }
+
+        var insertionPoint = InsertionPointAfterPreviousToken();
 
         _diagnostics.Error(
             "PL0013",
@@ -382,28 +608,89 @@ public sealed class Parser
             $"Expected a type name but found {token.Kind.Describe()}.",
             token.Span);
         Advance();
-        return new TypeReference("<error>", token.Span);
+
+        // A missing name rather than a sentinel spelled like one. The old placeholder was the
+        // string "<error>", which the binder then looked up and failed to find, reporting an
+        // unknown type on top of the syntax error already reported here.
+        return new TypeReference(SyntaxName.Missing(insertionPoint), token.Span);
     }
 
     private BlockStatement ParseBlock()
     {
         var start = Expect(TokenKind.OpenBrace).Span;
-        var statements = new List<Statement>();
 
-        while (Current.Kind is not (TokenKind.CloseBrace or TokenKind.EndOfFile))
+        // Blocks nest through if/while/for bodies, so they need the same budget expressions do.
+        if (!TryEnterNesting())
         {
-            var before = _position;
-            statements.Add(ParseStatement());
-
-            // Guarantee forward progress even if a statement parser bailed without consuming.
-            if (_position == before)
-            {
-                Advance();
-            }
+            var skipped = TrySkipBalancedBlock(out var closer);
+            return new BlockStatement([], Spanning(start, closer)) { IsClosed = skipped };
         }
 
-        var end = Expect(TokenKind.CloseBrace).Span;
-        return new BlockStatement(statements, Spanning(start, end));
+        try
+        {
+            var statements = new List<Statement>();
+
+            while (Current.Kind is not (TokenKind.CloseBrace or TokenKind.EndOfFile))
+            {
+                var before = _position;
+                statements.Add(ParseStatement());
+
+                // Guarantee forward progress even if a statement parser bailed without consuming.
+                if (_position == before)
+                {
+                    Advance();
+                }
+            }
+
+            var closed = TryExpect(TokenKind.CloseBrace, out var end);
+            return new BlockStatement(statements, Spanning(start, end.Span)) { IsClosed = closed };
+        }
+        finally
+        {
+            ExitNesting();
+        }
+    }
+
+    /// <summary>
+    /// Consumes tokens through the closer matching an already-consumed <c>{</c>. Used to step over a
+    /// construct too deeply nested to descend into.
+    /// </summary>
+    /// <param name="closer">
+    /// The closing brace's range, or the empty range at the end of the file when the tokens ran out
+    /// before it did.
+    /// </param>
+    /// <returns>True when a matching closer was really there.</returns>
+    /// <remarks>
+    /// The answer is published rather than inferred from <paramref name="closer"/>, for the reason
+    /// <see cref="TryExpect"/> gives: a stand-in is indistinguishable from a real token, and here
+    /// what turns on the difference is where the block's names stop. See
+    /// <see cref="BlockStatement.IsClosed"/>.
+    /// </remarks>
+    private bool TrySkipBalancedBlock(out SourceSpan closer)
+    {
+        var depth = 1;
+
+        while (Current.Kind != TokenKind.EndOfFile)
+        {
+            if (Current.Kind == TokenKind.OpenBrace)
+            {
+                depth++;
+            }
+            else if (Current.Kind == TokenKind.CloseBrace)
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    closer = Advance().Span;
+                    return true;
+                }
+            }
+
+            Advance();
+        }
+
+        closer = Current.Span;
+        return false;
     }
 
     private Statement ParseStatement()
@@ -425,7 +712,7 @@ public sealed class Parser
     private Statement ParseVariableDeclaration()
     {
         var start = Expect(TokenKind.Var).Span;
-        var name = Expect(TokenKind.Identifier).Text;
+        var name = ExpectName();
 
         TypeReference? declaredType = null;
         if (Match(TokenKind.Colon))
@@ -457,7 +744,7 @@ public sealed class Parser
     private Statement ParseForInStatement()
     {
         var start = Expect(TokenKind.For).Span;
-        var variable = Expect(TokenKind.Identifier).Text;
+        var variable = ExpectName();
         Expect(TokenKind.In);
         var collection = ParseExpression();
         var body = ParseBlock();
@@ -529,7 +816,38 @@ public sealed class Parser
         return new ExpressionStatement(expression, Spanning(start, end));
     }
 
-    private Expression ParseExpression() => ParseBinaryExpression(0);
+    private Expression ParseExpression()
+    {
+        if (!TryEnterNesting())
+        {
+            return AbandonExpression();
+        }
+
+        try
+        {
+            return ParseBinaryExpression(0);
+        }
+        finally
+        {
+            ExitNesting();
+        }
+    }
+
+    /// <summary>
+    /// Gives up on an expression that is nested too deeply, consuming a token so the enclosing loop
+    /// still makes progress.
+    /// </summary>
+    private Expression AbandonExpression()
+    {
+        var span = Current.Span;
+
+        if (Current.Kind != TokenKind.EndOfFile)
+        {
+            Advance();
+        }
+
+        return new ErrorExpression(span);
+    }
 
     /// <summary>Binding power for infix operators; higher binds tighter.</summary>
     private static int GetBinaryPrecedence(TokenKind kind) => kind switch
@@ -672,7 +990,24 @@ public sealed class Parser
         if (token.Kind is TokenKind.Minus or TokenKind.Bang or TokenKind.Not)
         {
             Advance();
-            var operand = ParsePrefixExpression();
+
+            // A chain of prefix operators recurses without passing through ParseExpression, so it
+            // needs its own budget rather than inheriting that one.
+            if (!TryEnterNesting())
+            {
+                return AbandonExpression();
+            }
+
+            Expression operand;
+            try
+            {
+                operand = ParsePrefixExpression();
+            }
+            finally
+            {
+                ExitNesting();
+            }
+
             var op = token.Kind == TokenKind.Minus ? UnaryOperatorKind.Negate : UnaryOperatorKind.LogicalNot;
             return new UnaryExpression(op, operand, Spanning(token.Span, operand.Span));
         }
@@ -689,8 +1024,13 @@ public sealed class Parser
             if (Current.Kind == TokenKind.Dot)
             {
                 Advance();
-                var name = Expect(TokenKind.Identifier);
-                expression = new MemberAccessExpression(expression, name.Text, Spanning(expression.Span, name.Span));
+                var name = ExpectName();
+
+                // The access ends where the name is, and a missing name is the empty range just
+                // after the dot. Taking the end from the token Expect happened to fail on instead
+                // stretched the access to wherever recovery landed -- for a dot at the end of a
+                // line, the brace on the next one.
+                expression = new MemberAccessExpression(expression, name, Spanning(expression.Span, name.Span));
                 continue;
             }
 
@@ -744,7 +1084,7 @@ public sealed class Parser
 
             case TokenKind.Identifier:
                 Advance();
-                return new NameExpression(token.Text, token.Span);
+                return new NameExpression(new SyntaxName(token.Text, token.Span), token.Span);
 
             case TokenKind.OpenParen:
             {
@@ -765,14 +1105,13 @@ public sealed class Parser
         }
     }
 
+    /// <summary>The span covering both operands and everything between them.</summary>
+    /// <remarks>
+    /// Order-insensitive, because error recovery reaches here with an <c>end</c> that precedes its
+    /// <c>start</c>. Stamped with the file being parsed rather than with whichever file an
+    /// operand carries, because the parser is the authority on that and some of what it
+    /// combines is synthesized.
+    /// </remarks>
     private SourceSpan Spanning(SourceSpan start, SourceSpan end)
-    {
-        var length = Math.Max(end.Length, 1);
-        if (start.Line == end.Line && end.Column >= start.Column)
-        {
-            length = end.Column - start.Column + end.Length;
-        }
-
-        return new SourceSpan(_file, start.Line, start.Column, length);
-    }
+        => SourceSpan.Union(_file, start, end);
 }

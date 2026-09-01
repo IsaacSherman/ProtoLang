@@ -439,4 +439,29 @@ public class ProjectConfigTests
         Assert.Empty(diagnostics);
         Assert.Equal(expected, config!.Overflow);
     }
+    // ---------------------------------------------------------------- where it went wrong
+
+    /// <summary>
+    /// XML line info carries a line and a column and no offset, so the loader resolves one against
+    /// the text it parsed. The two halves of the position have to agree, or every consumer that
+    /// trusts the offset is pointing somewhere else than the one that trusts the line.
+    /// </summary>
+    [Fact]
+    public void AConfigDiagnosticCarriesAnOffsetThatAgreesWithItsLineAndColumn()
+    {
+        const string Xml =
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<ProtoLang>\n  <Arithmetic>\n"
+            + "    <Nonsense>x</Nonsense>\n  </Arithmetic>\n</ProtoLang>\n";
+
+        var diagnostics = new DiagnosticBag();
+        ProjectConfig.Load(WriteConfig(Xml), diagnostics);
+
+        var span = Assert.Single(diagnostics, d => d.Code == "PL2001").Span;
+        var lines = new LineMap(Xml);
+
+        Assert.Equal(span.Start.Offset, lines.OffsetOf(span.Line, span.Column));
+        Assert.Equal(span.Start, lines.PositionOf(span.Start.Offset));
+        Assert.Equal("Nonsense", Xml.Substring(span.Start.Offset, "Nonsense".Length));
+        Assert.True(span.IsEmpty, "a configuration diagnostic names a place, not a range");
+    }
 }

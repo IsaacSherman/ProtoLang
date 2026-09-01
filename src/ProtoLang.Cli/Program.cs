@@ -38,7 +38,9 @@ if (config is null)
 var result = Compilation.Compile(options.SourcePath, options.IncludePaths, config: config);
 PrintDiagnostics(result.Diagnostics);
 
-if (!result.Success)
+// The one module a compiler may write from. A partial one comes out of a buffer that did not
+// parse, which is what an editor asks for and what nothing here may emit.
+if (result.EmittableModule is not { } module)
 {
     Console.Error.WriteLine($"compilation failed: {result.Diagnostics.Count(d => d.Severity == DiagnosticSeverity.Error)} error(s)");
     return 1;
@@ -68,7 +70,7 @@ var written = new List<string>();
 foreach (var backend in backends)
 {
     var files = backend.Emit(
-        result.Module!,
+        module,
         backendOptions,
         backendDiagnostics);
 
@@ -85,7 +87,7 @@ foreach (var backend in backends)
     if (options.TestOutputDirectory is not null && backend is ITestBackend testBackend)
     {
         var testFiles = testBackend.EmitTests(
-            result.Module!,
+            module,
             backendOptions,
             backendDiagnostics);
 
@@ -102,8 +104,7 @@ foreach (var backend in backends)
         if (options.Scaffold && backend is ITestProjectScaffold scaffold)
         {
             var scaffoldOptions = ScaffoldOptions.Create(
-                options.SourcePath,
-                options.IncludePaths,
+                result.SearchPaths,
                 result.Descriptors,
                 outputDirectory,
                 testOutputDirectory,
@@ -170,23 +171,18 @@ static ProjectConfig? ResolveConfig(CommandLineOptions options, DiagnosticBag di
     }
     else
     {
-        var directory = Path.GetDirectoryName(Path.GetFullPath(options.SourcePath));
-        var discovered = directory is null ? null : ProjectConfig.Discover(directory);
+        // The same discovery the compiler would have done, asked for by name rather than repeated
+        // here, so the CLI and the library can never disagree about which file settles the policy.
+        var discovered = Compilation.ResolveConfig(
+            SourceIdentity.FromPath(options.SourcePath).Directory,
+            diagnostics);
 
         if (discovered is null)
         {
-            config = ProjectConfig.Default;
+            return null;
         }
-        else
-        {
-            var loaded = ProjectConfig.Load(discovered, diagnostics);
-            if (loaded is null)
-            {
-                return null;
-            }
 
-            config = loaded;
-        }
+        config = discovered;
     }
 
     if (options.Overflow is not { } overflow)

@@ -184,20 +184,42 @@ public sealed record ProjectConfig(
     /// </summary>
     public static ProjectConfig? Load(string path, DiagnosticBag diagnostics)
     {
-        var file = System.IO.Path.GetFileName(path);
+        var name = System.IO.Path.GetFileName(path);
 
-        XDocument document;
+        string xml;
         try
         {
-            document = XDocument.Load(path, LoadOptions.SetLineInfo);
+            xml = File.ReadAllText(path);
         }
-        catch (Exception ex) when (ex is XmlException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             diagnostics.Error(
                 "PL2003",
                 "configuration file could not be read",
                 ex.Message,
-                new SourceSpan(file, LineOf(ex), ColumnOf(ex), 0));
+                new SourceSpan(name, SourcePosition.None, SourcePosition.None));
+            return null;
+        }
+
+        // Parsed from text this method also keeps a copy of, rather than straight from the path,
+        // because a span carries an absolute offset and XML line info does not. The cost is that an
+        // encoding named in the XML declaration no longer overrides what the bytes say:
+        // File.ReadAllText follows a byte-order mark and otherwise reads UTF-8, which is what every
+        // protolang.config.xml is written in.
+        var file = new ConfigFile(name, new LineMap(xml));
+
+        XDocument document;
+        try
+        {
+            document = XDocument.Parse(xml, LoadOptions.SetLineInfo);
+        }
+        catch (XmlException ex)
+        {
+            diagnostics.Error(
+                "PL2003",
+                "configuration file could not be read",
+                ex.Message,
+                Span(file, ex.LineNumber, ex.LinePosition));
             return null;
         }
 
@@ -320,7 +342,7 @@ public sealed record ProjectConfig(
 
     private static bool TryParse<T>(
         DiagnosticBag diagnostics,
-        string file,
+        ConfigFile file,
         XElement element,
         string key,
         string text,
@@ -352,7 +374,7 @@ public sealed record ProjectConfig(
 
     private static void UnknownElement(
         DiagnosticBag diagnostics,
-        string file,
+        ConfigFile file,
         XElement element,
         string name,
         string parent,
@@ -368,17 +390,30 @@ public sealed record ProjectConfig(
                 : $"Known elements inside <{parent}>: {string.Join(", ", known)}.");
     }
 
-    private static SourceSpan Span(string file, XObject? node)
+    private static SourceSpan Span(ConfigFile file, XObject? node)
+        => node is IXmlLineInfo info && info.HasLineInfo()
+            ? Span(file, info.LineNumber, info.LinePosition)
+            : Span(file, 0, 0);
+
+    /// <remarks>
+    /// Zero-width, because it says where the problem is rather than how much of the file is wrong.
+    /// Half-open ranges make that a legitimate empty range rather than a length nobody should read.
+    /// A line of 0 is the XML parser saying it does not know, and stays out of band.
+    /// </remarks>
+    private static SourceSpan Span(ConfigFile file, int line, int column)
     {
-        if (node is IXmlLineInfo info && info.HasLineInfo())
+        if (line <= 0)
         {
-            return new SourceSpan(file, info.LineNumber, info.LinePosition, 0);
+            return new SourceSpan(file.Name, SourcePosition.None, SourcePosition.None);
         }
 
-        return new SourceSpan(file, 0, 0, 0);
+        var position = new SourcePosition(file.Lines.OffsetOf(line, column), line, column);
+        return new SourceSpan(file.Name, position, position);
     }
 
-    private static int LineOf(Exception ex) => ex is XmlException xml ? xml.LineNumber : 0;
-
-    private static int ColumnOf(Exception ex) => ex is XmlException xml ? xml.LinePosition : 0;
+    /// <summary>
+    /// The configuration file being read: the name its diagnostics print, and where its lines begin
+    /// so that a line and column from the XML parser can be given the absolute offset a span wants.
+    /// </summary>
+    private sealed record ConfigFile(string Name, LineMap Lines);
 }

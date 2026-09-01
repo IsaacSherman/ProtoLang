@@ -535,7 +535,7 @@ public sealed class CppBackend : ITestProjectScaffold
                 break;
 
             case IrAssignment assignment:
-                writer.WriteLine($"{Escape(assignment.Target.Name)} = {Expression(assignment.Value)};");
+                writer.WriteLine($"{Expression(assignment.Target)} = {Expression(assignment.Value)};");
                 break;
 
             case IrReturn { Value: null }:
