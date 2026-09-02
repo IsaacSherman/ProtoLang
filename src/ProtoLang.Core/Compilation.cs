@@ -586,9 +586,12 @@ public sealed class Compilation
 
         return searchPaths;
 
+        // The first spelling of a directory is the one kept, so what a caller passed is what gets
+        // printed and handed to protoc. Only the question of whether it is already here is asked
+        // through PathIdentity.
         void Add(string path)
         {
-            if (!searchPaths.Contains(path, StringComparer.OrdinalIgnoreCase))
+            if (!searchPaths.Contains(path, PathIdentity.Comparer))
             {
                 searchPaths.Add(path);
             }

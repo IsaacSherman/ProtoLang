@@ -21,7 +21,34 @@ namespace ProtoLang.Binding;
 /// A closure is a handful of small files; reading them costs a fraction of the protoc run being
 /// avoided.
 /// </param>
-public sealed record SchemaFile(string Name, string? Path, string? ContentHash);
+public sealed record SchemaFile(string Name, string? Path, string? ContentHash)
+{
+    /// <summary>Whether two descriptions are of the same file, in the same state.</summary>
+    /// <remarks>
+    /// <para>
+    /// Written out rather than left to the record, for one member: the path compares as a path. The
+    /// name and the hash are strings protoc and a hash function produced, and differ by a character
+    /// only when they mean different things. The path is a location this compiler assembled from a
+    /// root and a name, and the root came from wherever the caller got it -- so one file can be
+    /// described as <c>C:\schemas\leaf.proto</c> on one lookup and <c>c:/schemas/leaf.proto</c> on the
+    /// next.
+    /// </para>
+    /// <para>
+    /// Comparing those two as text would make a cached bundle look stale to a request that spells its
+    /// roots differently, which is worse than the duplicate entry that spelling used to cause: the two
+    /// requests now share an entry, so each lookup would invalidate what the other had just loaded and
+    /// protoc would run on every keystroke.
+    /// </para>
+    /// </remarks>
+    public bool Equals(SchemaFile? other)
+        => other is not null
+            && string.Equals(Name, other.Name, StringComparison.Ordinal)
+            && PathIdentity.AreSame(Path, other.Path)
+            && string.Equals(ContentHash, other.ContentHash, StringComparison.Ordinal);
+
+    public override int GetHashCode()
+        => HashCode.Combine(Name, Path is null ? string.Empty : PathIdentity.KeyFor(Path), ContentHash);
+}
 
 /// <summary>
 /// Describes the set of files a descriptor set was built from, and answers whether that description
