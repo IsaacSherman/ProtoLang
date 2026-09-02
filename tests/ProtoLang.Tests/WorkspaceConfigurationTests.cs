@@ -94,6 +94,15 @@ public class WorkspaceConfigurationTests
     }
 
     [Fact]
+    public void APercentEncodedSpaceDoesNotMakeASecondDocument()
+    {
+        var directory = Directory.CreateDirectory(Path.Combine(TempDirectory(), "has space")).FullName;
+        var path = Path.Combine(directory, "source.protolang");
+
+        Assert.Equal(DocumentUri.FromPath(path), DocumentUri.Parse(new Uri(path).AbsoluteUri));
+    }
+
+    [Fact]
     public void ARedundantSegmentDoesNotMakeASecondDocument()
     {
         var directory = TempDirectory();
@@ -144,6 +153,16 @@ public class WorkspaceConfigurationTests
         Assert.Equal(
             DocumentUri.FromPath(@"C:\src\app\source.protolang"),
             DocumentUri.FromPath("C:/src/app/source.protolang"));
+    }
+
+    [Fact]
+    public void AUncFileUriAndAUncPathAreOneDocument()
+    {
+        RequireWindows();
+
+        Assert.Equal(
+            DocumentUri.FromPath(@"\\server\share\source.protolang"),
+            DocumentUri.Parse("file://server/share/source.protolang"));
     }
 
     [Fact]
@@ -243,6 +262,33 @@ public class WorkspaceConfigurationTests
         Assert.Null(workspace.FolderFor(DocumentUri.Parse("untitled:Untitled-1")));
     }
 
+    [Fact]
+    public void TwoDocumentsInDifferentFoldersResolveDifferentFolderSettings()
+    {
+        var first = TempDirectory("first-folder");
+        var second = TempDirectory("second-folder");
+        var firstProtoc = TempFile(first, "protoc-one");
+        var secondProtoc = TempFile(second, "protoc-two");
+        var firstInclude = Directory.CreateDirectory(Path.Combine(first, "schemas")).FullName;
+        var secondInclude = Directory.CreateDirectory(Path.Combine(second, "schemas")).FullName;
+
+        var workspace = Workspace(
+            WorkspaceFolder.FromPath(
+                first,
+                settings: new ProtoLangSettings { ProtocPath = firstProtoc, IncludePaths = ["schemas"] }),
+            WorkspaceFolder.FromPath(
+                second,
+                settings: new ProtoLangSettings { ProtocPath = secondProtoc, IncludePaths = ["schemas"] }));
+
+        var resolvedFirst = workspace.Resolve(Document(first));
+        var resolvedSecond = workspace.Resolve(Document(second));
+
+        Assert.Equal(firstProtoc, resolvedFirst.ProtocPath);
+        Assert.Equal([firstInclude], resolvedFirst.IncludePaths.Select(include => include.Path));
+        Assert.Equal(secondProtoc, resolvedSecond.ProtocPath);
+        Assert.Equal([secondInclude], resolvedSecond.IncludePaths.Select(include => include.Path));
+    }
+
     // ---------------------------------------------------------------- precedence
 
     [Fact]
@@ -335,6 +381,68 @@ public class WorkspaceConfigurationTests
         Assert.Equal(real, resolved.ProtocPath);
         Assert.Equal(ConfigurationSource.Environment, resolved.ProtocPathSource);
         Assert.Contains(resolved.Diagnostics, diagnostic => diagnostic.Code == "PL2105");
+    }
+
+    [Fact]
+    public void TheWholePrecedenceStackResolvesConsistently()
+    {
+        var directory = TempDirectory();
+        var folderProtoc = TempFile(directory, "folder-protoc");
+        var workspaceProtoc = TempFile(directory, "workspace-protoc");
+        var userProtoc = TempFile(directory, "user-protoc");
+        var environmentProtoc = TempFile(directory, "environment-protoc");
+        var folderInclude = Directory.CreateDirectory(Path.Combine(directory, "folder-schemas")).FullName;
+        var workspaceInclude = Directory.CreateDirectory(Path.Combine(directory, "workspace-schemas")).FullName;
+        var userInclude = Directory.CreateDirectory(Path.Combine(directory, "user-schemas")).FullName;
+        var folderConfig = TempFile(directory, "folder-policy.xml", CheckedOverflow);
+        var workspaceConfig = TempFile(directory, "workspace-policy.xml", "<ProtoLang></ProtoLang>");
+        var userConfig = TempFile(directory, "user-policy.xml", "<ProtoLang></ProtoLang>");
+
+        var folder = WorkspaceFolder.FromPath(
+            directory,
+            settings: new ProtoLangSettings
+            {
+                ProtocPath = folderProtoc,
+                IncludePaths = [folderInclude],
+                ConfigPath = folderConfig,
+            });
+
+        var resolved = (Workspace(folder) with
+        {
+            ReadEnvironmentVariable = name =>
+                name == ProtocLocator.OverrideEnvironmentVariable ? environmentProtoc : null,
+        })
+            .WithWorkspaceSettings(
+                new ProtoLangSettings
+                {
+                    ProtocPath = workspaceProtoc,
+                    IncludePaths = [workspaceInclude],
+                    ConfigPath = workspaceConfig,
+                })
+            .WithUserSettings(
+                new ProtoLangSettings
+                {
+                    ProtocPath = userProtoc,
+                    IncludePaths = [userInclude],
+                    ConfigPath = userConfig,
+                })
+            .Resolve(Document(directory));
+
+        Assert.Equal(folderProtoc, resolved.ProtocPath);
+        Assert.Equal(ConfigurationSource.FolderSetting, resolved.ProtocPathSource);
+        Assert.Equal(
+            [folderInclude, workspaceInclude, userInclude],
+            resolved.IncludePaths.Select(include => include.Path));
+        Assert.Equal(
+            [
+                ConfigurationSource.FolderSetting,
+                ConfigurationSource.WorkspaceSetting,
+                ConfigurationSource.UserSetting,
+            ],
+            resolved.IncludePaths.Select(include => include.Source));
+        Assert.Equal(folderConfig, resolved.Config?.Path);
+        Assert.Equal(OverflowPolicy.Checked, resolved.Config?.Overflow);
+        Assert.Empty(resolved.Diagnostics);
     }
 
     [Fact]
@@ -440,6 +548,21 @@ public class WorkspaceConfigurationTests
     }
 
     [Fact]
+    public void ARelativeWorkspaceSettingResolvesAgainstTheWorkspaceFileDirectory()
+    {
+        var workspaceDirectory = TempDirectory("workspace-file");
+        var first = TempDirectory("first-root");
+        var second = TempDirectory("second-root");
+        var expected = Directory.CreateDirectory(Path.Combine(workspaceDirectory, "schemas")).FullName;
+
+        var resolved = Workspace(WorkspaceFolder.FromPath(first), WorkspaceFolder.FromPath(second))
+            .WithWorkspaceSettings(new ProtoLangSettings { IncludePaths = ["schemas"] }, workspaceDirectory)
+            .Resolve(Document(first));
+
+        Assert.Equal([expected], resolved.IncludePaths.Select(include => include.Path));
+    }
+
+    [Fact]
     public void ARelativeWorkspaceSettingIsRefusedWhenSeveralFoldersAreOpenAndNoWorkspaceFileSaysWhere()
     {
         var resolved = Workspace(
@@ -450,6 +573,21 @@ public class WorkspaceConfigurationTests
 
         Assert.Empty(resolved.IncludePaths);
         Assert.Contains(resolved.Diagnostics, diagnostic => diagnostic.Code == "PL2103");
+    }
+
+    [Fact]
+    public void AnEmptyIncludePathListDoesNotHideLowerPriorityIncludePaths()
+    {
+        var directory = TempDirectory();
+        var userRoot = TempDirectory("user-schemas");
+        var folder = WorkspaceFolder.FromPath(directory, settings: new ProtoLangSettings { IncludePaths = [] });
+
+        var resolved = Workspace(folder)
+            .WithUserSettings(new ProtoLangSettings { IncludePaths = [userRoot] })
+            .Resolve(Document(directory));
+
+        Assert.Equal([userRoot], resolved.IncludePaths.Select(include => include.Path));
+        Assert.Equal(ConfigurationSource.UserSetting, Assert.Single(resolved.IncludePaths).Source);
     }
 
     // ---------------------------------------------------------------- settings that are not used
@@ -510,6 +648,26 @@ public class WorkspaceConfigurationTests
         Assert.True(cleared.StatesNothing);
     }
 
+    /// <summary>
+    /// Blank has to mean unset in the type and not merely in the reader, because a host is free to
+    /// build settings by hand from what a client sent. A blank that survived reached ProtocLocator,
+    /// which refuses a blank tool name, and took the resolution down with it.
+    /// </summary>
+    [Fact]
+    public void ASettingClearedToBlankFallsThroughInsteadOfFailingTheResolution()
+    {
+        var settings = new ProtoLangSettings { ProtocPath = "", ConfigPath = "  ", IncludePaths = ["", " "] };
+
+        Assert.True(settings.StatesNothing);
+
+        var resolved = Workspace().WithUserSettings(settings).Resolve(DocumentUri.Parse("untitled:Untitled-1"));
+
+        Assert.Null(resolved.ProtocPath);
+        Assert.Equal(ConfigurationSource.Discovery, resolved.ProtocPathSource);
+        Assert.Empty(resolved.IncludePaths);
+        Assert.Empty(resolved.Diagnostics);
+    }
+
     [Fact]
     public void ARefusalNamesTheScopeItWasWrittenAt()
     {
@@ -553,6 +711,35 @@ public class WorkspaceConfigurationTests
     }
 
     [Fact]
+    public void ARelativeConfigPathResolvesAgainstTheFolderThatSuppliedIt()
+    {
+        var directory = TempDirectory();
+        var path = TempFile(directory, "policy.xml", CheckedOverflow);
+        var folder = WorkspaceFolder.FromPath(directory, settings: new ProtoLangSettings { ConfigPath = "policy.xml" });
+
+        var resolved = Workspace(folder).Resolve(Document(directory));
+
+        Assert.Equal(path, resolved.Config?.Path);
+        Assert.Equal(OverflowPolicy.Checked, resolved.Config?.Overflow);
+    }
+
+    [Fact]
+    public void ARelativeConfigPathAtWorkspaceScopeResolvesAgainstTheWorkspaceFileDirectory()
+    {
+        var workspaceDirectory = TempDirectory("workspace-file");
+        var first = TempDirectory("first-root");
+        var second = TempDirectory("second-root");
+        var path = TempFile(workspaceDirectory, "policy.xml", CheckedOverflow);
+
+        var resolved = Workspace(WorkspaceFolder.FromPath(first), WorkspaceFolder.FromPath(second))
+            .WithWorkspaceSettings(new ProtoLangSettings { ConfigPath = "policy.xml" }, workspaceDirectory)
+            .Resolve(Document(first));
+
+        Assert.Equal(path, resolved.Config?.Path);
+        Assert.Equal(OverflowPolicy.Checked, resolved.Config?.Overflow);
+    }
+
+    [Fact]
     public void AConfigPathThatNamesNothingIsReportedAndTheSearchHappensAnyway()
     {
         var directory = TempDirectory();
@@ -579,6 +766,71 @@ public class WorkspaceConfigurationTests
         Assert.Contains(resolved.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
         Assert.False(resolved.TryCreateCompilationOptions(null, out var options));
         Assert.Null(options);
+    }
+
+    [Fact]
+    public void ARefusedConfigFileIsNamedAndSaysWhatItCosts()
+    {
+        var directory = TempDirectory();
+        var path = TempFile(directory, ProjectConfig.FileName, UnreadableConfig);
+
+        var resolved = Workspace(WorkspaceFolder.FromPath(directory)).Resolve(Document(directory));
+
+        Assert.True(resolved.ConfigRefused);
+        Assert.Equal(path, resolved.ConfigPath);
+
+        var refusal = Assert.Single(resolved.Diagnostics, diagnostic => diagnostic.Code == "PL2106");
+        Assert.Equal(DiagnosticSeverity.Error, refusal.Severity);
+        Assert.Contains(path, refusal.Message);
+        Assert.Contains("searching upward", refusal.Message);
+        Assert.Contains("PL2002", refusal.Message);
+        Assert.Contains("line 4", refusal.Message);
+        Assert.NotNull(refusal.Help);
+    }
+
+    /// <summary>
+    /// The provenance report is the thing a user consults when they cannot work out what is
+    /// happening, so it must not answer "the defaults, from your configuration file" -- which is two
+    /// facts that were never true together.
+    /// </summary>
+    [Fact]
+    public void ARefusedConfigFileIsReportedAsRefusedRatherThanAsTheDefaults()
+    {
+        var directory = TempDirectory();
+        var path = TempFile(directory, ProjectConfig.FileName, UnreadableConfig);
+
+        var policy = Fact(Workspace(WorkspaceFolder.FromPath(directory)).Resolve(Document(directory)).Describe(), "language policy");
+
+        Assert.Contains("refused", policy.Value);
+        Assert.Contains(path, policy.Value);
+        Assert.DoesNotContain("defaults", policy.Value);
+    }
+
+    [Fact]
+    public void ARefusedConfigFileNamedByASettingSaysWhichSettingChoseIt()
+    {
+        var directory = TempDirectory();
+        var path = TempFile(directory, "policy.xml", UnreadableConfig);
+
+        var resolved = Workspace(WorkspaceFolder.FromPath(directory))
+            .WithWorkspaceSettings(new ProtoLangSettings { ConfigPath = path })
+            .Resolve(Document(directory));
+
+        Assert.True(resolved.ConfigRefused);
+
+        var refusal = Assert.Single(resolved.Diagnostics, diagnostic => diagnostic.Code == "PL2106");
+        Assert.Contains(ProtoLangSettings.ConfigPathKey, refusal.Message);
+        Assert.Contains(ConfigurationSource.WorkspaceSetting.Describe(), refusal.Message);
+    }
+
+    [Fact]
+    public void AMissingConfigFileIsNotARefusal()
+    {
+        var resolved = Workspace(WorkspaceFolder.FromPath(TempDirectory())).Resolve(Document(TempDirectory()));
+
+        Assert.False(resolved.ConfigRefused);
+        Assert.Null(resolved.ConfigPath);
+        Assert.DoesNotContain(resolved.Diagnostics, diagnostic => diagnostic.Code == "PL2106");
     }
 
     [Fact]
@@ -630,6 +882,27 @@ public class WorkspaceConfigurationTests
         Assert.True(resolved.TryCreateCompilationOptions(null, out var options));
         Assert.Equal([schemas], options!.IncludePaths);
         Assert.Equal(OverflowPolicy.Checked, options.Config?.Overflow);
+    }
+
+    /// <summary>
+    /// CompilationOptions has no protoc of its own, so a caller that resolves one and then passes no
+    /// loader compiles against whichever protoc the compiler found for itself -- while this object
+    /// goes on reporting the user's setting as in force. The wrong answer is invisible; the exception
+    /// is not.
+    /// </summary>
+    [Fact]
+    public void ACompilationCannotBeBuiltWithoutTheProtocThatWasResolved()
+    {
+        var directory = TempDirectory();
+        var protoc = TempFile(directory, "protoc-here");
+        var folder = WorkspaceFolder.FromPath(directory, settings: new ProtoLangSettings { ProtocPath = protoc });
+
+        var resolved = Workspace(folder).Resolve(Document(directory));
+
+        var refusal = Assert.Throws<ArgumentNullException>(
+            () => resolved.TryCreateCompilationOptions(null, out _));
+
+        Assert.Contains(protoc, refusal.Message);
     }
 
     [Fact]
@@ -689,6 +962,25 @@ public class WorkspaceConfigurationTests
         Assert.Equal([second], after.Resolve(Document(directory)).IncludePaths.Select(include => include.Path));
     }
 
+    [Fact]
+    public void AResolvedConfigurationIsASnapshotAfterSettingsChange()
+    {
+        var directory = TempDirectory();
+        var first = Directory.CreateDirectory(Path.Combine(directory, "first")).FullName;
+        var second = Directory.CreateDirectory(Path.Combine(directory, "second")).FullName;
+
+        var before = Workspace(WorkspaceFolder.FromPath(directory))
+            .WithWorkspaceSettings(new ProtoLangSettings { IncludePaths = [first] });
+        var resolvedBefore = before.Resolve(Document(directory));
+        var after = before.WithWorkspaceSettings(new ProtoLangSettings { IncludePaths = [second] });
+        var resolvedAfter = after.Resolve(Document(directory));
+
+        Assert.Equal(before.Generation, resolvedBefore.Generation);
+        Assert.Equal([first], resolvedBefore.IncludePaths.Select(include => include.Path));
+        Assert.Equal(after.Generation, resolvedAfter.Generation);
+        Assert.Equal([second], resolvedAfter.IncludePaths.Select(include => include.Path));
+    }
+
     // ---------------------------------------------------------------- one path, one cache entry
 
     private static DescriptorRequest Request(string root)
@@ -721,6 +1013,19 @@ public class WorkspaceConfigurationTests
         Assert.Equal(1, loads);
         Assert.Equal(1, cache.Count);
         Assert.Equal(1, cache.Statistics.Hits);
+    }
+
+    [Fact]
+    public void ResolvedIncludePathsUseTheSameIdentityTheDescriptorCacheUses()
+    {
+        var directory = TempDirectory();
+        var schemas = Directory.CreateDirectory(Path.Combine(directory, "schemas")).FullName;
+        var sameSchemas = Path.Combine(directory, ".", "schemas") + Path.DirectorySeparatorChar;
+        var folder = WorkspaceFolder.FromPath(directory, settings: new ProtoLangSettings { IncludePaths = [sameSchemas] });
+        var resolved = Workspace(folder).Resolve(Document(directory));
+
+        Assert.Equal([schemas], resolved.IncludePaths.Select(include => include.Path));
+        Assert.Equal(Request(schemas), Request(Assert.Single(resolved.IncludePaths).Path));
     }
 
     [Fact]

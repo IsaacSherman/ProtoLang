@@ -105,6 +105,26 @@ public sealed record DocumentConfiguration
     public ConfigurationSource ConfigSource { get; init; } = ConfigurationSource.Default;
 
     /// <summary>
+    /// The configuration file this document was settled against, whether or not it could be read, and
+    /// null when there was none to read.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Config"/> carries the path of a file that <em>loaded</em>, and null tells a reader
+    /// nothing about which file it was. That is the case where naming it matters most: the whole
+    /// report a user gets is "your document is not being compiled", and the first question is which
+    /// file to go and fix. See <see cref="ConfigRefused"/>.
+    /// </remarks>
+    public string? ConfigPath { get; init; }
+
+    /// <summary>Whether a configuration file was found and then refused.</summary>
+    /// <remarks>
+    /// Distinct from having no policy file at all, which is not a problem and produces the defaults.
+    /// A refusal is a project stating a policy and being ignored, which spec 10.4 stops the
+    /// compilation over, so it is an error and not a warning.
+    /// </remarks>
+    public bool ConfigRefused => Config is null && ConfigPath is not null;
+
+    /// <summary>
     /// What went wrong while settling this: settings being ignored, and any configuration file that
     /// could not be read.
     /// </summary>
@@ -124,11 +144,34 @@ public sealed record DocumentConfiguration
     /// </summary>
     /// <param name="loader">
     /// The loader to compile with, holding the shared descriptor cache and built for
-    /// <see cref="ProtocPath"/>. Null lets the compilation locate protoc for itself, which is what a
-    /// <see cref="ProtocPathSource"/> of <see cref="ConfigurationSource.Discovery"/> asks for.
+    /// <see cref="ProtocPath"/>. Null lets the compilation locate protoc for itself, which is only
+    /// legitimate when nothing named one -- a <see cref="ProtocPathSource"/> of
+    /// <see cref="ConfigurationSource.Discovery"/>.
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// A protoc was resolved and no loader was built for it. Which protoc runs can only reach a
+    /// compilation through its loader, so a null one here would discard the setting in silence.
+    /// </exception>
+    /// <remarks>
+    /// The refusal is deliberate and is the only thing in this type that throws.
+    /// <see cref="CompilationOptions"/> has no protoc of its own, so a caller that resolves a
+    /// <c>protolang.protocPath</c> and then passes no loader compiles against whichever protoc the
+    /// compiler located for itself -- while this object goes on reporting, through
+    /// <see cref="Describe"/>, that the user's setting is in force. A wrong answer nobody can see is
+    /// worse than an exception during development, and this one is programmer error: the value was
+    /// resolved and then dropped on the floor.
+    /// </remarks>
     public bool TryCreateCompilationOptions(DescriptorLoader? loader, out CompilationOptions? options)
     {
+        if (loader is null && ProtocPath is not null)
+        {
+            throw new ArgumentNullException(
+                nameof(loader),
+                $"This document resolved protoc to '{ProtocPath}', from {ProtocPathSource.Describe()}, and "
+                    + "a compilation can only be told which protoc to run through its loader. Build one "
+                    + "for that path rather than passing null.");
+        }
+
         if (Config is null)
         {
             options = null;
@@ -156,12 +199,26 @@ public sealed record DocumentConfiguration
         var facts = new List<ConfigurationFact>
         {
             new("protoc", ProtocPath ?? "(located when needed)", ProtocPathSource),
-            new("language policy", Config?.Path ?? "(defaults)", ConfigSource),
+
+            // A refused file is named, not summarized as "(defaults)". Reporting the defaults beside
+            // the file that was rejected would say the file supplied them, when in truth no policy is
+            // in force at all and the document is not being compiled.
+            new("language policy", DescribePolicy(), ConfigSource),
         };
 
         facts.AddRange(
             IncludePaths.Select(include => new ConfigurationFact("include path", include.Path, include.Source)));
 
         return facts;
+    }
+
+    private string DescribePolicy()
+    {
+        if (ConfigRefused)
+        {
+            return $"(refused: {ConfigPath})";
+        }
+
+        return Config?.Path ?? "(defaults)";
     }
 }

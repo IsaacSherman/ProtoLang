@@ -352,14 +352,30 @@ public sealed class Compilation
     /// that states nothing.
     /// </returns>
     public static ProjectConfig? ResolveConfig(string? startDirectory, DiagnosticBag diagnostics)
+        => ResolveConfig(startDirectory, diagnostics, out _);
+
+    /// <inheritdoc cref="ResolveConfig(string?, DiagnosticBag)"/>
+    /// <param name="consulted">
+    /// The configuration file that was found, whether or not it could be read, and null when the
+    /// search found none.
+    /// </param>
+    /// <remarks>
+    /// Published because a null return says only that policy could not be settled, and a caller that
+    /// has to explain that to somebody needs to name the file. Rediscovering it outside this method
+    /// would be a second statement of the search rule, and the two would eventually disagree about
+    /// which file the compilation actually read.
+    /// </remarks>
+    public static ProjectConfig? ResolveConfig(string? startDirectory, DiagnosticBag diagnostics, out string? consulted)
     {
+        consulted = null;
+
         if (string.IsNullOrEmpty(startDirectory))
         {
             return ProjectConfig.Default;
         }
 
-        var discovered = ProjectConfig.Discover(startDirectory);
-        return discovered is null ? ProjectConfig.Default : ProjectConfig.Load(discovered, diagnostics);
+        consulted = ProjectConfig.Discover(startDirectory);
+        return consulted is null ? ProjectConfig.Default : ProjectConfig.Load(consulted, diagnostics);
     }
 
     /// <inheritdoc cref="SearchPaths"/>

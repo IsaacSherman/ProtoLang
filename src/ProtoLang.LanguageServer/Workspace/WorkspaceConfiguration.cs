@@ -176,7 +176,7 @@ public sealed record WorkspaceConfiguration
         // sorting them would drop diagnostics with nothing to say so.
         var (protoc, protocSource) = ResolveProtoc(scopes, diagnostics);
         var includePaths = ResolveIncludePaths(scopes, diagnostics);
-        var (config, configSource) = ResolveConfig(document, folder, scopes, diagnostics);
+        var (config, configSource, configPath) = ResolveConfig(document, folder, scopes, diagnostics);
 
         return new DocumentConfiguration(document, Generation)
         {
@@ -186,6 +186,7 @@ public sealed record WorkspaceConfiguration
             IncludePaths = includePaths,
             Config = config,
             ConfigSource = configSource,
+            ConfigPath = configPath,
             Diagnostics = [.. diagnostics],
         };
     }
@@ -331,7 +332,7 @@ public sealed record WorkspaceConfiguration
     /// stops everything, exactly as it does on the command line -- that one is a project stating a
     /// policy and being ignored.
     /// </remarks>
-    private (ProjectConfig? Config, ConfigurationSource Source) ResolveConfig(
+    private (ProjectConfig? Config, ConfigurationSource Source, string? Path) ResolveConfig(
         DocumentUri document,
         WorkspaceFolder? folder,
         List<Scope> scopes,
@@ -362,15 +363,102 @@ public sealed record WorkspaceConfiguration
                 continue;
             }
 
-            return (ProjectConfig.Load(path, diagnostics), ConfigurationSource.ConfigFile);
+            var reported = diagnostics.Count;
+            var named = ProjectConfig.Load(path, diagnostics);
+
+            if (named is null)
+            {
+                Refuse(
+                    path,
+                    $"named by {ProtoLangSettings.ConfigPathKey}, {scope.Source.Describe()}",
+                    $"Fix the problems reported against the file, or point "
+                        + $"{ProtoLangSettings.ConfigPathKey} at a different one. Removing that setting "
+                        + $"makes the server search for {ProjectConfig.FileName} from the document's "
+                        + "directory upward instead.",
+                    reported,
+                    diagnostics);
+            }
+
+            return (named, ConfigurationSource.ConfigFile, path);
         }
 
         // The document's own directory, falling back to its folder's, which is what an untitled buffer
         // inside an open project has instead. Compilation.ResolveConfig is the same walk the command
-        // line does, called rather than reproduced.
-        var discovered = Compilation.ResolveConfig(document.Directory ?? folder?.Path, diagnostics);
+        // line does, called rather than reproduced -- and it reports which file it read, because a
+        // refusal has to be able to name one.
+        var searchedFrom = document.Directory ?? folder?.Path;
+        var before = diagnostics.Count;
+        var discovered = Compilation.ResolveConfig(searchedFrom, diagnostics, out var consulted);
 
-        return (discovered, discovered?.Path is null ? ConfigurationSource.Default : ConfigurationSource.ConfigFile);
+        if (discovered is null && consulted is not null)
+        {
+            Refuse(
+                consulted,
+                $"found by searching upward from '{searchedFrom}'",
+                "Fix the problems reported against the file. It is the nearest one to this document, so "
+                    + $"every document at or below its directory is affected. Naming a different file "
+                    + $"with {ProtoLangSettings.ConfigPathKey} is a way past it in the meantime.",
+                before,
+                diagnostics);
+        }
+
+        return (
+            discovered,
+            consulted is null ? ConfigurationSource.Default : ConfigurationSource.ConfigFile,
+            consulted);
+    }
+
+    /// <summary>
+    /// Says that a configuration file was read and rejected, and what that costs the document.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A summary over the diagnostics <see cref="ProjectConfig.Load"/> has just added, not a
+    /// replacement for them: those name a line and a column inside the file and are what a reader
+    /// needs in order to fix it. What they do not say is that the file was consulted at all, how it
+    /// came to be consulted, or that the document is now not being compiled -- and a user looking at
+    /// an editor with no diagnostics in it and no idea why is reading the absence of an answer.
+    /// </para>
+    /// <para>
+    /// An error rather than a warning, matching what spec 10.4 already requires of the command line: a
+    /// project that states a policy and is then silently ignored is worse off than one that states
+    /// nothing, so nothing compiles until this is resolved.
+    /// </para>
+    /// </remarks>
+    /// <param name="reported">
+    /// How many diagnostics the bag held before the file was read, so the summary can quote the ones
+    /// that came from reading it and no others.
+    /// </param>
+    private static void Refuse(
+        string path,
+        string howItWasChosen,
+        string help,
+        int reported,
+        DiagnosticBag diagnostics)
+    {
+        var reasons = diagnostics
+            .Skip(reported)
+            .Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
+            .ToList();
+
+        var detail = reasons.Count == 0
+            ? "It was rejected without a reason being recorded, which is itself a defect worth reporting."
+            : $"{Count(reasons.Count, "problem")} in it: {string.Join("; ", reasons.Select(Quote))}.";
+
+        diagnostics.Error(
+            "PL2106",
+            "configuration file refused",
+            $"'{path}', {howItWasChosen}, could not be read, so this document has no language policy. "
+                + $"{detail} Nothing is compiled for this document until the file is fixed -- falling "
+                + "back to the defaults would silently generate code the project did not ask for.",
+            new SourceSpan(Path.GetFileName(path), SourcePosition.None, SourcePosition.None),
+            help);
+
+        static string Count(int count, string noun) => count == 1 ? $"1 {noun} was reported" : $"{count} {noun}s were reported";
+
+        static string Quote(Diagnostic reason) => reason.Span.IsNone
+            ? $"{reason.Code} ({reason.Title}) {reason.Message}"
+            : $"{reason.Code} ({reason.Title}) at line {reason.Span.Start.Line}, column {reason.Span.Start.Column}: {reason.Message}";
     }
 
     /// <summary>

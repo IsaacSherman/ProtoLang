@@ -829,6 +829,15 @@ Normative Requirements:
   path at all (`PL2103`), a named configuration file that does not exist (`PL2104`), and a named
   `protoc` that does not exist (`PL2105`). A setting ignored in silence leaves a user unable to tell
   a typo from a refusal from a defect.
+- **A setting that is present and blank states nothing.** An editor writes an unset string setting as
+  the empty string rather than leaving it out, so blank is the ordinary shape of "no answer" and
+  falls through to the next source without comment.
+- **A configuration file that is found and cannot be read stops the document, and says so.**
+  `PL2106` is an error, not a warning, and names the file, how it came to be consulted, every problem
+  reported inside it with its position, and the fact that nothing is compiled for the document until
+  it is fixed. This is 10.4's rule applied to a host: a project that states a policy and is then
+  silently ignored is worse off than one that states nothing. The resolved configuration reports such
+  a file as *refused*, rather than reporting the defaults beside the file that in fact supplied none.
 - A relative path resolves against **the scope that supplied it**: a folder-scope setting against
   that folder, a workspace-scope setting against the workspace -- or against the only open folder,
   when the workspace has no file of its own -- and a user-scope setting against nothing, which is

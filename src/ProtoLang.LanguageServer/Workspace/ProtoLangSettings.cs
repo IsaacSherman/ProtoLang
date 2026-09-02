@@ -68,7 +68,11 @@ public sealed record ProtoLangSettings
     public static IReadOnlyList<string> Keys { get; } = [ProtocPathKey, IncludePathsKey, ConfigPathKey];
 
     /// <inheritdoc cref="ProtocPathKey"/>
-    public string? ProtocPath { get; init; }
+    public string? ProtocPath
+    {
+        get => _protocPath;
+        init => _protocPath = Stated(value);
+    }
 
     /// <inheritdoc cref="IncludePathsKey"/>
     /// <remarks>
@@ -76,10 +80,41 @@ public sealed record ProtoLangSettings
     /// stated them and not of the list, so resolving happens in
     /// <see cref="WorkspaceConfiguration.Resolve"/> where the scope is known.
     /// </remarks>
-    public IReadOnlyList<string> IncludePaths { get; init; } = [];
+    public IReadOnlyList<string> IncludePaths
+    {
+        get => _includePaths;
+        init => _includePaths = value is null ? [] : [.. value.Where(path => Stated(path) is not null)];
+    }
 
     /// <inheritdoc cref="ConfigPathKey"/>
-    public string? ConfigPath { get; init; }
+    public string? ConfigPath
+    {
+        get => _configPath;
+        init => _configPath = Stated(value);
+    }
+
+    private readonly string? _protocPath;
+    private readonly IReadOnlyList<string> _includePaths = [];
+    private readonly string? _configPath;
+
+    /// <summary>The value a setting states, or null when it states nothing.</summary>
+    /// <remarks>
+    /// <para>
+    /// Blank means unset, and it is settled here rather than in <see cref="Read"/> so that it is a
+    /// property of the type instead of a habit of one method. An editor writes an unset string setting
+    /// as the empty string rather than leaving it out, so blank is the ordinary shape of "no answer",
+    /// not a malformed one -- and a host is free to build these by hand, deserializing a client's
+    /// settings straight into the record, which is exactly the route that would otherwise skip the
+    /// normalization.
+    /// </para>
+    /// <para>
+    /// It is not cosmetic. A blank that survived to <see cref="WorkspaceConfiguration.Resolve"/> reached
+    /// <see cref="Binding.ProtocLocator.Resolve"/>, which refuses a blank tool name outright -- so a
+    /// user clearing a setting in the settings editor took the resolution down with an exception,
+    /// rather than falling back to the next source as it should.
+    /// </para>
+    /// </remarks>
+    private static string? Stated(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
 
     /// <summary>Whether this scope states anything at all.</summary>
     public bool StatesNothing => ProtocPath is null && ConfigPath is null && IncludePaths.Count == 0;
@@ -109,10 +144,7 @@ public sealed record ProtoLangSettings
                     break;
 
                 case "includepaths":
-                    settings = settings with
-                    {
-                        IncludePaths = [.. value.Values.Where(path => !string.IsNullOrWhiteSpace(path))],
-                    };
+                    settings = settings with { IncludePaths = value.Values };
                     break;
 
                 case "configpath":

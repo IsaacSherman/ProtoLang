@@ -175,7 +175,9 @@ and `WorkspaceConfiguration.Resolve` is the only place it is applied. Configurat
 **per document**, in the order folder → workspace → user setting → `PROTOLANG_PROTOC` → discovery.
 Language policy stays out of settings entirely — a host may name a different `protolang.config.xml`
 and may not restate what is in one — and **every setting that is not being used is reported**
-(`PL2101`–`PL2105`), because a user who cannot tell a typo from a refusal has nothing to go on.
+(`PL2101`–`PL2105`), because a user who cannot tell a typo from a refusal has nothing to go on. A
+`protolang.config.xml` that is found and cannot be read stops the document and is named as *refused*
+(`PL2106`), rather than being reported as having supplied the defaults it did not supply.
 `DocumentUri` and `PathIdentity` are between them the only places a URI becomes a path and two paths
 are compared, which is what makes one file one document and one cache entry however it is spelled.
 
