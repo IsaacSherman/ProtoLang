@@ -76,12 +76,25 @@ Naming: `issue-<number>-<short-slug>`.
 Follow [CLAUDE.md](../CLAUDE.md). Finish the whole issue, including its requirements list read as a
 checklist — the issues state requirements sentence by sentence and each one is meant literally.
 
-### 4. Commit
+### 4. Update the spec, if the change reached the language
+
+[Protolang_Spec.md](../Protolang_Spec.md) is the language rather than a description of it, so a change
+to what an author can write, what it means, what the compiler reports, or what the IR promises to
+preserve is a change to the spec as much as to the code. Settle it here, before the commit, because
+[CLAUDE.md](../CLAUDE.md) asks for it in the **same commit as the code**: an edit deferred to the end
+of the loop is one the review has already read past.
+
+Sections 30 and 31 are the two that go stale in silence. An open question stays on the list long after
+a PR settled it, and a decision recorded only in a PR body is one the next reader argues out again
+from nothing. CLAUDE.md has the rest of what counts and what does not — an internal with no
+observable surface does not.
+
+### 5. Commit
 
 The implementation, as one commit, in the house style: imperative subject, prose body on the defect
 and the fix, `Closes #N. Part of #47.`
 
-### 5. Test
+### 6. Test
 
 ```bash
 dotnet build ProtoLang.slnx
@@ -101,7 +114,7 @@ git worktree add /tmp/base epics/language-server-2
 
 Run the CLI on the same input from both trees and `diff` the results. Remove the worktree afterwards.
 
-### 6. Review
+### 7. Review
 
 ```bash
 /code-review high
@@ -111,22 +124,25 @@ Run it on every issue. On the ones that modify existing compiler code (#36, #37,
 reviews by hand — so the session must hand over an explicit short list of what deserves a human eye:
 behavior that moved, assumptions taken, anything that was hard to test. Bury nothing in a summary.
 
-### 7. Fix, then review again
+### 8. Fix, then review again
 
-Repeat 5–6 until a review comes back clean. Re-run the full suite after each round of fixes.
+Repeat 6–7 until a review comes back clean. Re-run the full suite after each round of fixes.
 
-### 8. Update ARCHITECTURE.md if the shape changed
+### 9. Update ARCHITECTURE.md if the shape changed
+
+Not the same errand as step 4. The spec is the language and moves with the commit that changes it;
+this is the map, and it is worth drawing once the shape has stopped moving.
 
 Most of this epic adds surface: a server project, a queryable semantic model, new public types on the
 pipeline. [ARCHITECTURE.md](../ARCHITECTURE.md) is a living document — if the issue added a project,
 a pipeline stage, or a type a cold reader would need to know about, update it now. A stale map is
 worse than none, because it is trusted.
 
-### 9. Commit the fixes
+### 10. Commit the fixes
 
 Separate commit or commits. No squashing before the PR; the review history is worth keeping.
 
-### 10. Open the PR
+### 11. Open the PR
 
 ```bash
 gh pr create --base epics/language-server-2 --title "..." --body-file pr-body.md
@@ -134,9 +150,10 @@ gh pr create --base epics/language-server-2 --title "..." --body-file pr-body.md
 
 Base is always the current epic branch, `epics/language-server-2`. The body carries `## Why`,
 `## What`, `## Compatibility`, and `## Tests`, and states plainly what did not move and how that was
-verified.
+verified. `## What` says which spec sections moved — or, if the change reached the language and the 
+spec deliberately stayed put, says that and why, so the omission reads as a decision.
 
-### 11. Clear context and repeat
+### 12. Clear context and repeat
 
 ## Non-negotiables carried from #47
 
