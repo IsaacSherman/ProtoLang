@@ -90,8 +90,11 @@ public sealed class DocumentUri : IEquatable<DocumentUri>
 
         if (System.IO.Path.IsPathFullyQualified(text))
         {
-            uri = FromPath(text);
-            return true;
+            // Not FromPath directly. That one throws on a path the platform will not accept -- an
+            // embedded NUL from a mangled decode, a length past what a URI can hold -- and a Try
+            // method that throws is one every caller has to guard anyway. The server may not fail a
+            // request over a string a client made up.
+            return TryFromPath(text, out uri);
         }
 
         if (!Uri.TryCreate(text, UriKind.Absolute, out var parsed))
@@ -104,20 +107,41 @@ public sealed class DocumentUri : IEquatable<DocumentUri>
     }
 
     /// <inheritdoc cref="TryParse"/>
-    /// <exception cref="ArgumentException">The text is neither a URI nor a fully qualified path.</exception>
+    /// <exception cref="ArgumentException">The text is neither a usable URI nor a usable path.</exception>
     public static DocumentUri Parse(string text)
         => TryParse(text, out var uri)
             ? uri
-            : throw new ArgumentException($"'{text}' is neither a URI nor a fully qualified path.", nameof(text));
+            : throw new ArgumentException($"'{text}' is neither a usable URI nor a usable path.", nameof(text));
 
     /// <summary>Names the file at <paramref name="path"/>.</summary>
+    /// <exception cref="ArgumentException">The platform will not accept the path.</exception>
     public static DocumentUri FromPath(string path)
+        => TryFromPath(path, out var uri)
+            ? uri
+            : throw new ArgumentException($"'{path}' is not a path this platform accepts.", nameof(path));
+
+    /// <inheritdoc cref="FromPath"/>
+    private static bool TryFromPath(string? path, out DocumentUri uri)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        uri = null!;
 
-        var full = System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(path));
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
 
-        return new DocumentUri(new Uri(full).AbsoluteUri, FileScheme, full);
+        try
+        {
+            var full = System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(path));
+            uri = new DocumentUri(new Uri(full).AbsoluteUri, FileScheme, full);
+            return true;
+        }
+        catch (Exception ex)
+            when (ex is ArgumentException or PathTooLongException or NotSupportedException or IOException
+                or UriFormatException)
+        {
+            return false;
+        }
     }
 
     public bool Equals(DocumentUri? other) => other is not null && string.Equals(Key, other.Key, StringComparison.Ordinal);

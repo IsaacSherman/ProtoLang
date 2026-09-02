@@ -170,7 +170,12 @@ public sealed record WorkspaceConfiguration
         var folder = FolderFor(document);
         var scopes = ScopesFor(folder);
 
+        // Every resolution runs before the bag is copied, and each is a statement rather than a
+        // member of the initializer below: an initializer that reported into a bag it was also
+        // copying would depend on the order its members happen to be written in, and a later hand
+        // sorting them would drop diagnostics with nothing to say so.
         var (protoc, protocSource) = ResolveProtoc(scopes, diagnostics);
+        var includePaths = ResolveIncludePaths(scopes, diagnostics);
         var (config, configSource) = ResolveConfig(document, folder, scopes, diagnostics);
 
         return new DocumentConfiguration(document, Generation)
@@ -178,7 +183,7 @@ public sealed record WorkspaceConfiguration
             Folder = folder,
             ProtocPath = protoc,
             ProtocPathSource = protocSource,
-            IncludePaths = ResolveIncludePaths(scopes, diagnostics),
+            IncludePaths = includePaths,
             Config = config,
             ConfigSource = configSource,
             Diagnostics = [.. diagnostics],

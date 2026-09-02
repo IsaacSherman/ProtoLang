@@ -177,6 +177,20 @@ public class WorkspaceConfigurationTests
         Assert.False(DocumentUri.TryParse(null, out _));
     }
 
+    /// <summary>
+    /// A client can send anything, and reading a document name is not a request the server may fail:
+    /// a Try method that throws is one every caller has to wrap, and the one that forgets takes the
+    /// session down over a string somebody typed.
+    /// </summary>
+    [Fact]
+    public void APathThisPlatformWillNotAcceptIsRefusedRatherThanThrown()
+    {
+        RequireWindows();
+
+        Assert.False(DocumentUri.TryParse(@"C:\holds" + '\u0000' + "a nul", out _));
+        Assert.False(DocumentUri.TryParse("C:\\" + new string('x', 70_000), out _));
+    }
+
     // ---------------------------------------------------------------- which folder a document is in
 
     [Fact]
