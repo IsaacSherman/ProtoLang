@@ -1255,6 +1255,18 @@ Implementation Note:
 - `CompilationResult.Imports` records every import declaration and whether it resolved, was not
   found, or was syntactically unwritten. Descriptor-load failures preserve this resolved-import list
   rather than replacing it with an empty one.
+- A descriptor load produces the whole of what `protoc` emitted, not only the descriptors built from
+  it: the `FileDescriptorSet` with the source info `--include_source_info` requests, and the file
+  each schema in the transitive closure was read from. `CompilationResult.Schema` carries it. Source
+  info is where a schema's declaration sites and doc comments live, so discarding it meant paying
+  `protoc` to produce the one thing the compiler then threw away.
+- A descriptor-load failure preserves `protoc`'s own report line by line, with the file and position
+  each line names kept separate from its message, rather than only as prose inside a `PL0003`
+  message. Publishing a schema error against the schema is only possible if that structure survives.
+- Loading may be cached. Correctness is defined against the located `protoc`, the ordered include
+  paths, and the content of every file in the transitive closure -- not against the files the
+  compilation named, which do not determine the result. Caching is never observable: a cached load
+  produces what a cold load would have produced, and a load that failed is not cached at all.
 
 Open Questions:
 
@@ -1919,3 +1931,4 @@ Use this table to record decisions as the language stabilizes.
 | 2026-08-30 | Partial compilation | Parse errors no longer stop binding when descriptors are available; callers use `Module` for partial semantic data and `EmittableModule` for generated artifacts (22.1) | Editors need symbol/type answers in broken buffers, while code generation must not accidentally consume a partial model. Expressing the distinction in the result type is safer than asking every caller to remember a diagnostic-bag convention | Draft |
 | 2026-08-30 | Import results | Import resolution is returned as per-import outcomes, and descriptor-load failures preserve the resolved import list (21.1, 22.1) | A count or empty list cannot distinguish an unwritten import, a not-found import, and a schema that was found but rejected by protoc. Tooling needs the declaration-to-file mapping even when descriptor loading fails | Draft |
 | 2026-08-30 | Symbols | The IR carries declaration sites and stable symbol IDs for ProtoLang declarations, and descriptor-based IDs for schema symbols (22.2) | Editor features, occurrence highlighting, and caching need identities that survive a rebind of unchanged text and do not collapse same-named locals or fields from different scopes/messages | Draft |
+| 2026-09-01 | Descriptor input | A load returns the whole descriptor set with its source info and the file each schema came from, and may be cached against the located protoc, the ordered include paths, and the content of the transitive closure (21.1) | Building descriptors and dropping the set paid protoc for source info on every run and then discarded it, which is exactly what resolving a schema declaration or its doc comment needs. Keying a cache on the files a compilation named would be wrong in five ways at once -- a transitively imported schema, a reordered include list, a file appearing in a root that was empty, a deletion, and protoc itself changing -- so correctness is defined over the closure protoc reports rather than over the request | Draft |
