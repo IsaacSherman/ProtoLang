@@ -94,6 +94,30 @@ public sealed record CompilationResult(
     /// </para>
     /// </remarks>
     public DescriptorBundle? Schema { get; init; }
+
+    /// <summary>
+    /// What protoc said when the schemas could not be loaded, or null when that is not what stopped
+    /// this compilation.
+    /// </summary>
+    /// <remarks>
+    /// The structured half of the <c>PL0003</c> in <see cref="Diagnostics"/>. Never both null and
+    /// PL0003-free: one accompanies the other, and each answers a different reader. See
+    /// <see cref="SchemaLoadFailure"/>.
+    /// </remarks>
+    public SchemaLoadFailure? SchemaFailure { get; init; }
+
+    /// <summary>
+    /// What protoc reported about the schemas, one entry per line it wrote, empty when it reported
+    /// nothing or was never reached.
+    /// </summary>
+    /// <remarks>
+    /// The same list as <c>SchemaFailure.Output</c>, one hop nearer, because publishing protoc's
+    /// errors against the <c>.proto</c> is the thing this data exists for and a client should not
+    /// have to null-check its way to it. Ask <see cref="SchemaFailure"/> instead when the question is
+    /// whether a schema load failed at all -- protoc that was never found reports nothing here, and
+    /// an empty list is not the same answer as no failure.
+    /// </remarks>
+    public IReadOnlyList<ProtocDiagnostic> ProtocOutput => SchemaFailure?.Output ?? [];
 }
 
 /// <summary>Everything a compilation needs that is not source text.</summary>
@@ -418,7 +442,10 @@ public sealed class Compilation
                 "protobuf schema could not be loaded",
                 ex.Message,
                 unit.Imports[0].Span);
-            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, []);
+            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, [])
+            {
+                SchemaFailure = SchemaLoadFailure.From(ex),
+            };
         }
 
         Loader = loader;
@@ -475,7 +502,15 @@ public sealed class Compilation
             // compilation had already found. An empty list here would say the imports were never
             // looked at, and would throw away the file-to-declaration mapping that is exactly what
             // an editor wants to report against and what a cache wants to key on.
-            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, imports);
+            //
+            // And what protoc itself said, kept as the lines it wrote. This is the failure an editor
+            // most wants to be specific about -- the schema is right there in the workspace, and the
+            // error names a line of it -- so flattening it into the PL0003 message and nothing else
+            // would leave the client with a sentence to re-parse.
+            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, imports)
+            {
+                SchemaFailure = SchemaLoadFailure.From(ex),
+            };
         }
 
         var module = new Binder(schema.Descriptors, diagnostics, new NumericPolicy(config), config, source.Identity)

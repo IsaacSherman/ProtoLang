@@ -30,9 +30,15 @@ namespace ProtoLang.Binding;
 /// <see cref="CompilationResult"/> carries a bundle, so its generated equality would inherit that
 /// cost.
 /// </para>
+/// <para>
+/// Everything reachable from here is either immutable or a copy. Protobuf's generated messages are
+/// mutable and this object is shared by design, so the descriptor set is held privately and handed
+/// out only through <see cref="ProtoFor"/> and <see cref="CloneSet"/>; see those for what that buys.
+/// </para>
 /// </remarks>
 public sealed class DescriptorBundle
 {
+    private readonly FileDescriptorSet _set;
     private readonly Dictionary<string, FileDescriptorProto> _protos;
     private readonly Dictionary<string, SchemaFile> _files;
 
@@ -46,8 +52,8 @@ public sealed class DescriptorBundle
         ArgumentNullException.ThrowIfNull(closure);
 
         Descriptors = descriptors;
-        Set = set;
         Closure = closure;
+        _set = set;
 
         // Last spelling wins in both, matching protoc: a descriptor set names each file once, and a
         // duplicate could only come from a caller assembling one by hand.
@@ -79,22 +85,41 @@ public sealed class DescriptorBundle
     /// </summary>
     public IReadOnlyList<FileDescriptor> Descriptors { get; }
 
-    /// <summary>
-    /// The descriptor set protoc produced, source info included.
-    /// </summary>
-    /// <remarks>
-    /// Kept whole rather than reduced to the parts a caller is known to want. It is what protoc
-    /// wrote, it is already paid for, and the next question asked of it -- a doc comment, a
-    /// declaration's line, a field's original ordering -- should not require another protoc run to
-    /// answer.
-    /// </remarks>
-    public FileDescriptorSet Set { get; }
-
     /// <summary>Every file in the transitive closure, and where each one came from.</summary>
     public IReadOnlyList<SchemaFile> Closure { get; }
 
-    /// <summary>The unbuilt descriptor for one file of the closure, or null when it holds no such file.</summary>
-    public FileDescriptorProto? ProtoFor(string name) => _protos.GetValueOrDefault(name);
+    /// <summary>
+    /// The unbuilt descriptor for one file of the closure -- source info and all -- or null when it
+    /// holds no such file.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A copy, and this is the whole reason the set is not simply a property. Protobuf's generated
+    /// messages are mutable, and a bundle is shared: a cache hit hands the same instance to every
+    /// caller, deliberately. Handing out the live <c>FileDescriptorProto</c> would mean one consumer
+    /// clearing a field, or sorting a list in place, silently rewrites what every later hit returns
+    /// -- a poisoned cache with no bad write anywhere near the cache, and no way to tell from the
+    /// outside that it happened.
+    /// </para>
+    /// <para>
+    /// The copy is of one file rather than of the closure, which is what makes it affordable: the
+    /// questions this answers -- what comment sits above this message, which line is this field
+    /// declared on -- are asked about the schema under the cursor, not about every schema at once.
+    /// The built <see cref="Descriptors"/> need no such care, being immutable.
+    /// </para>
+    /// </remarks>
+    public FileDescriptorProto? ProtoFor(string name) => _protos.GetValueOrDefault(name)?.Clone();
+
+    /// <summary>
+    /// The whole descriptor set protoc produced, source info included, as a copy the caller owns.
+    /// </summary>
+    /// <remarks>
+    /// A method rather than a property, because it is neither free nor idempotent-looking: it deep
+    /// copies every file in the closure. Prefer <see cref="ProtoFor"/>, which copies one. This exists
+    /// for the caller that genuinely wants the set -- writing it back out, or handing it to a
+    /// protoc plugin (#8) -- rather than one file of it.
+    /// </remarks>
+    public FileDescriptorSet CloneSet() => _set.Clone();
 
     /// <summary>
     /// The file on disk one schema name came from, or null when nothing on disk backs it -- either

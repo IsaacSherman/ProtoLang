@@ -59,9 +59,12 @@ public sealed class DescriptorLoader
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        _protocPath = protocPath;
+        // Resolved once, so that the executable this loader reports, measures, looks for bundled
+        // schemas beside, and finally runs are all the same file. A caller naming a bare 'protoc'
+        // otherwise leaves each of those asking a different question of a different thing.
+        _protocPath = ProtocLocator.Resolve(protocPath);
         Options = options;
-        ImplicitIncludePaths = ProtocLocator.FindWellKnownTypeIncludePaths(protocPath);
+        ImplicitIncludePaths = ProtocLocator.FindWellKnownTypeIncludePaths(_protocPath);
     }
 
     /// <summary>The protoc this loader runs.</summary>
@@ -159,7 +162,11 @@ public sealed class DescriptorLoader
 
         var request = Describe(protoFiles, includePaths);
 
-        return Options.Cache is { } cache
+        // A request that could not identify its own protoc does not go in the cache. Its key would
+        // claim to account for which executable ran while knowing nothing about it, so two loads
+        // under two different protocs of the same name would share an entry -- and a cache that is
+        // wrong is worth less than one that is absent.
+        return Options.Cache is { } cache && request.IdentifiesItsProtoc
             ? cache.GetOrLoad(request, () => Invoke(request))
             : Invoke(request);
     }

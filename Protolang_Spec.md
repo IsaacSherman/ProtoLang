@@ -1263,6 +1263,9 @@ Implementation Note:
 - A descriptor-load failure preserves `protoc`'s own report line by line, with the file and position
   each line names kept separate from its message, rather than only as prose inside a `PL0003`
   message. Publishing a schema error against the schema is only possible if that structure survives.
+  It survives as far as the compilation: `CompilationResult.SchemaFailure` accompanies the `PL0003`
+  whenever a schema load failed, and is present even when `protoc` was never reached, because
+  reporting nothing and having nothing to report are different answers.
 - Loading may be cached. Correctness is defined against the located `protoc`, the ordered include
   paths, and the content of every file in the transitive closure -- not against the files the
   compilation named, which do not determine the result. Caching is never observable: a cached load

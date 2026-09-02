@@ -45,6 +45,37 @@ public sealed class DescriptorRequest : IEquatable<DescriptorRequest>
     /// </remarks>
     private const char Separator = (char)0;
 
+    /// <summary>
+    /// The invariant the separator rests on, checked rather than assumed.
+    /// </summary>
+    /// <remarks>
+    /// "No real path contains a NUL" is a fact about file systems, not about this constructor, which
+    /// is public and takes whatever it is handed. A caller that passes one -- from a corrupted
+    /// setting, a mangled decode, or a deliberate attempt -- could otherwise manufacture two
+    /// different requests that render to one key and share one entry, which is the collision the
+    /// separator exists to make impossible. Rejecting is right where reporting is not: this is a
+    /// caller handing the compiler something no file system could have produced, which is programmer
+    /// error, not user input.
+    /// </remarks>
+    private static void RejectSeparator(IReadOnlyList<string> values, string parameterName)
+    {
+        foreach (var value in values)
+        {
+            if (value is null)
+            {
+                throw new ArgumentException("A path or file name must not be null.", parameterName);
+            }
+
+            if (value.Contains(Separator))
+            {
+                throw new ArgumentException(
+                    $"'{value.Replace(Separator, '?')}' contains a NUL character, which no path can. "
+                    + "Two such values could render to one cache key.",
+                    parameterName);
+            }
+        }
+    }
+
     private readonly string _canonical;
 
     public DescriptorRequest(
@@ -59,6 +90,11 @@ public sealed class DescriptorRequest : IEquatable<DescriptorRequest>
         ArgumentNullException.ThrowIfNull(includePaths);
         ArgumentNullException.ThrowIfNull(implicitIncludePaths);
         ArgumentNullException.ThrowIfNull(protoFiles);
+
+        RejectSeparator([protocPath], nameof(protocPath));
+        RejectSeparator(includePaths, nameof(includePaths));
+        RejectSeparator(implicitIncludePaths, nameof(implicitIncludePaths));
+        RejectSeparator(protoFiles, nameof(protoFiles));
 
         ProtocPath = protocPath;
         ProtocLength = protocLength;
@@ -99,6 +135,19 @@ public sealed class DescriptorRequest : IEquatable<DescriptorRequest>
     /// starts validating against a search order the compiler no longer uses.
     /// </remarks>
     public IReadOnlyList<string> SearchRoots { get; }
+
+    /// <summary>
+    /// Whether the executable this request names could actually be measured, and so whether the
+    /// request really does account for which protoc would run.
+    /// </summary>
+    /// <remarks>
+    /// False when nothing was found at <see cref="ProtocPath"/> -- a name the process launcher may
+    /// still resolve some way of its own. The claim that "which protoc" is part of the key is only
+    /// true of a protoc this compiler could identify, and a request that cannot make that claim says
+    /// so rather than being keyed on as though it could. A zero-length executable cannot run, so
+    /// length is the whole test.
+    /// </remarks>
+    public bool IdentifiesItsProtoc => ProtocLength > 0;
 
     public bool Equals(DescriptorRequest? other)
         => other is not null && Comparer.Equals(_canonical, other._canonical);

@@ -1,3 +1,4 @@
+using Google.Protobuf.Reflection;
 using ProtoLang.Binding;
 using Xunit;
 
@@ -293,6 +294,54 @@ public class DescriptorCacheTests
         Assert.NotEqual(caller, implicitly);
     }
 
+    /// <summary>
+    /// The key renderer uses NUL as its separator, because a real path cannot contain it. The request
+    /// constructor is public, though, so the invariant has to be enforced rather than only described:
+    /// otherwise a caller can manufacture two different requests with the same rendered key.
+    /// </summary>
+    [Fact]
+    public void ARequestRefusesTheSeparatorInsideItsComponents()
+    {
+        Assert.Throws<ArgumentException>(
+            () => Request(protoFiles: ["root.proto\0shadow.proto"]));
+    }
+
+    // --------------------------------------------------------- what a hit hands out
+
+    /// <summary>
+    /// A hit hands every caller the same bundle on purpose, so anything mutable reachable from it is
+    /// shared state. Protobuf's generated messages are mutable, and a consumer that cleared a field
+    /// on one would be rewriting what every later hit returns -- a poisoned cache with no bad write
+    /// anywhere near the cache.
+    /// </summary>
+    [Fact]
+    public void MutatingWhatAHitHandedOutCannotReachTheNextHit()
+    {
+        var directory = WriteSchemas();
+        var loader = Loader(new DescriptorCache());
+
+        var first = loader.LoadBundle(["root.proto"], [directory]);
+        first.ProtoFor("leaf.proto")!.MessageType.Clear();
+
+        var second = loader.LoadBundle(["root.proto"], [directory]);
+
+        Assert.Same(first, second);
+        Assert.NotEmpty(second.ProtoFor("leaf.proto")!.MessageType);
+        Assert.Equal(1, loader.ProtocInvocations);
+    }
+
+    [Fact]
+    public void TheWholeSetIsHandedOutAsACopyToo()
+    {
+        var directory = WriteSchemas();
+        var bundle = Loader().LoadBundle(["root.proto"], [directory]);
+
+        var copy = bundle.CloneSet();
+        copy.File.Clear();
+
+        Assert.NotEmpty(bundle.CloneSet().File);
+    }
+
     // ---------------------------------------------------------------- mechanics
 
     /// <summary>
@@ -324,6 +373,59 @@ public class DescriptorCacheTests
 
         Assert.Equal(1, loader.ProtocInvocations);
         Assert.All(bundles, bundle => Assert.Same(bundles[0], bundle));
+    }
+
+    /// <summary>
+    /// Eviction must not make single-flight conditional on an unrelated request arriving at the wrong
+    /// time. If an in-flight entry can be evicted, the next identical request starts a second load
+    /// even though the first one is still doing the same work.
+    /// </summary>
+    [Fact]
+    public async Task AnInFlightLoadIsNotEvictedAndStartedAgainForTheSameRequest()
+    {
+        var cache = new DescriptorCache(capacity: 1);
+        var firstRequest = Request(protoFiles: ["first.proto"]);
+        var secondRequest = Request(protoFiles: ["second.proto"]);
+        var firstLoadStarted = new ManualResetEventSlim();
+        var firstLoadMayFinish = new ManualResetEventSlim();
+        var firstLoadCount = 0;
+
+        var first = Task.Run(
+            () => cache.GetOrLoad(
+                firstRequest,
+                () =>
+                {
+                    Interlocked.Increment(ref firstLoadCount);
+                    firstLoadStarted.Set();
+                    Assert.True(
+                        firstLoadMayFinish.Wait(
+                            TimeSpan.FromSeconds(5),
+                            TestContext.Current.CancellationToken));
+                    return EmptyBundle();
+                }),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(
+            firstLoadStarted.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+
+        cache.GetOrLoad(secondRequest, EmptyBundle);
+
+        var sameAsFirst = Task.Run(
+            () => cache.GetOrLoad(
+                firstRequest,
+                () =>
+                {
+                    Interlocked.Increment(ref firstLoadCount);
+                    return EmptyBundle();
+                }),
+            TestContext.Current.CancellationToken);
+
+        firstLoadMayFinish.Set();
+
+        var bundles = await Task.WhenAll(first, sameAsFirst);
+
+        Assert.Equal(1, Volatile.Read(ref firstLoadCount));
+        Assert.Same(bundles[0], bundles[1]);
     }
 
     /// <summary>
@@ -383,6 +485,64 @@ public class DescriptorCacheTests
             () => loader.LoadBundle(["root.proto"], [directory]));
 
         Assert.Contains("did not finish within", failure.Message);
+    }
+
+    // ----------------------------------------------------------- which protoc runs
+
+    /// <summary>
+    /// The loader has to measure the file the process launcher will actually run. A path it never
+    /// resolved would be measured against the working directory instead, and the bundled schemas
+    /// looked for beside that.
+    /// </summary>
+    [Fact]
+    public void AProtocNamedByARelativePathIsResolvedToTheFileItIs()
+    {
+        var protoc = CopyProtoc();
+        var relative = Path.GetRelativePath(Environment.CurrentDirectory, protoc);
+
+        var loader = new DescriptorLoader(relative);
+
+        Assert.False(Path.IsPathRooted(relative), "the fixture must actually exercise a relative path");
+        Assert.Equal(protoc, loader.ProtocPath);
+    }
+
+    /// <summary>
+    /// A path naming a location that holds nothing is left alone: the caller pointed at one protoc,
+    /// and running another that happens to share its file name answers a question nobody asked.
+    /// </summary>
+    [Fact]
+    public void APathThatNamesAMissingFileIsNotSearchedForOnThePath()
+    {
+        var missing = Path.Combine(TestPaths.CreateTempDirectory(), "protoc.exe");
+
+        Assert.Equal(missing, ProtocLocator.Resolve(missing));
+    }
+
+    /// <summary>
+    /// The key claims to account for which protoc ran. A request that could not identify the
+    /// executable cannot make that claim, and keying on it anyway would let two protocs of one name
+    /// share an entry.
+    /// </summary>
+    [Fact]
+    public void ARequestThatCouldNotMeasureItsProtocSaysSo()
+    {
+        Assert.True(Request().IdentifiesItsProtoc);
+        Assert.False(Request(protocLength: 0).IdentifiesItsProtoc);
+    }
+
+    [Fact]
+    public void ALoadWhoseProtocCouldNotBeMeasuredIsNotCachedAtAll()
+    {
+        var directory = WriteSchemas();
+        var cache = new DescriptorCache();
+        var loader = new DescriptorLoader(
+            "protolang-no-such-protoc-anywhere",
+            new DescriptorLoaderOptions { Cache = cache });
+
+        Assert.Throws<DescriptorLoadException>(() => loader.LoadBundle(["root.proto"], [directory]));
+
+        Assert.Equal(0, cache.Count);
+        Assert.Equal(0, cache.Statistics.Misses);
     }
 
     // -------------------------------------------------------------- protoc output
@@ -499,6 +659,62 @@ public class DescriptorCacheTests
     }
 
     /// <summary>
+    /// The failure an editor most wants to be specific about: the schema is in the workspace and
+    /// protoc named a line of it. A caller that had only the PL0003 sentence would have to parse the
+    /// numbers back out of English to put a squiggle anywhere.
+    /// </summary>
+    [Fact]
+    public void ACompilationPublishesWhereProtocSaidTheSchemaWasWrong()
+    {
+        var script = WriteScript();
+        File.WriteAllText(
+            Path.Combine(Path.GetDirectoryName(script)!, "leaf.proto"),
+            "syntax = \"proto3\";\nmessage {");
+
+        var result = Compilation.Compile(script, [], Loader());
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Diagnostics, d => d.Code == "PL0003");
+        Assert.NotNull(result.SchemaFailure);
+
+        var located = Assert.Single(
+            result.SchemaFailure.Output,
+            entry => entry.File is not null && entry.File.Contains("leaf.proto") && entry.HasPosition);
+
+        Assert.True(located.Line > 0, "the line protoc blamed must survive as a number");
+        Assert.NotEmpty(result.SchemaFailure.RawOutput);
+
+        // The same list, one hop nearer, because putting a squiggle on the .proto is what it is for.
+        Assert.Same(result.SchemaFailure.Output, result.ProtocOutput);
+    }
+
+    /// <summary>
+    /// An empty report and no report are different answers, and the flat list cannot tell them apart.
+    /// A compilation that got its schemas has nothing to say either way.
+    /// </summary>
+    [Fact]
+    public void ACompilationThatLoadedItsSchemasReportsNothingFromProtoc()
+    {
+        var result = Compilation.Compile(WriteScript(), [], Loader());
+
+        Assert.True(result.Success, Describe(result));
+        Assert.Empty(result.ProtocOutput);
+    }
+
+    /// <summary>
+    /// A compilation that got its schemas has nothing to report about failing to, and one that never
+    /// reached protoc still says a schema load is what stopped it.
+    /// </summary>
+    [Fact]
+    public void ACompilationThatLoadedItsSchemasReportsNoSchemaFailure()
+    {
+        var result = Compilation.Compile(WriteScript(), [], Loader());
+
+        Assert.True(result.Success, Describe(result));
+        Assert.Null(result.SchemaFailure);
+    }
+
+    /// <summary>
     /// The cache lives on the loader, so a caller holding a compilation has to be able to reach the
     /// loader that compilation used -- including the one it built for itself, which
     /// <see cref="CompilationOptions.Loader"/> never held.
@@ -530,7 +746,60 @@ public class DescriptorCacheTests
         Assert.Equal(1, loader.ProtocInvocations);
     }
 
+    // --------------------------------------------------------------- immutability
+
+    /// <summary>
+    /// A cache hit returns shared state by design, so the state that leaves the cache must not be the
+    /// mutable protobuf object the cache itself depends on for future hits.
+    /// </summary>
+    [Fact]
+    public void MutatingAReturnedDescriptorSetDoesNotPoisonTheCachedBundle()
+    {
+        var directory = WriteSchemas();
+        var loader = Loader(new DescriptorCache());
+
+        var first = loader.LoadBundle(["root.proto"], [directory]);
+        var firstSet = first.CloneSet();
+        Assert.NotEmpty(firstSet.File);
+
+        firstSet.File.Clear();
+
+        var second = loader.LoadBundle(["root.proto"], [directory]);
+
+        Assert.Equal(1, loader.ProtocInvocations);
+        Assert.NotEmpty(second.CloneSet().File);
+        Assert.NotNull(second.ProtoFor("leaf.proto"));
+    }
+
+    /// <summary>
+    /// Source info is exactly what future definition/hover work reads. Clearing it through one bundle
+    /// view must not alter what the next cache hit sees.
+    /// </summary>
+    [Fact]
+    public void MutatingAReturnedFileDescriptorProtoDoesNotPoisonTheCachedBundle()
+    {
+        var directory = WriteSchemas();
+        var loader = Loader(new DescriptorCache());
+
+        var first = loader.LoadBundle(["root.proto"], [directory]);
+        var firstLeaf = first.ProtoFor("leaf.proto");
+
+        Assert.NotNull(firstLeaf);
+        Assert.NotEmpty(firstLeaf.SourceCodeInfo.Location);
+
+        firstLeaf.SourceCodeInfo.Location.Clear();
+
+        var second = loader.LoadBundle(["root.proto"], [directory]);
+        var secondLeaf = second.ProtoFor("leaf.proto");
+
+        Assert.Equal(1, loader.ProtocInvocations);
+        Assert.NotNull(secondLeaf);
+        Assert.NotEmpty(secondLeaf.SourceCodeInfo.Location);
+    }
+
     // ------------------------------------------------------------------ fixtures
+
+    private static DescriptorBundle EmptyBundle() => new([], new FileDescriptorSet(), []);
 
     private static DescriptorLoader Loader(DescriptorCache? cache = null)
         => new(RequireProtoc(), new DescriptorLoaderOptions { Cache = cache });

@@ -196,13 +196,40 @@ public sealed class DescriptorCache
         }
     }
 
+    /// <summary>Trims to <see cref="Capacity"/>, oldest first, skipping loads still in flight.</summary>
+    /// <remarks>
+    /// <para>
+    /// An entry whose load has not finished is not a candidate. Evicting one would undo the
+    /// single-flight guarantee at exactly the moment it matters: the next caller for that same
+    /// request finds nothing, and starts a second protoc over the schemas the first is still
+    /// compiling. That would make "two compilations racing populate one entry once" conditional on
+    /// no unrelated load arriving in between -- which, in an editor holding a small cache and several
+    /// open files, is not a rare accident but the normal traffic.
+    /// </para>
+    /// <para>
+    /// The consequence is that a cache with every entry in flight sits briefly over capacity rather
+    /// than evicting work it is waiting on. That is the right way round: the bound exists to stop a
+    /// day-long session growing without limit, and it is restored by the next insertion after those
+    /// loads land. Nothing stays in flight indefinitely, because protoc runs under a budget and a
+    /// load that throws is dropped.
+    /// </para>
+    /// </remarks>
     private void Evict()
     {
-        while (_entries.Count > Capacity && _order.First is { } oldest)
+        var node = _order.First;
+
+        while (_entries.Count > Capacity && node is not null)
         {
-            _entries.Remove(oldest.Value.Request);
-            _order.Remove(oldest);
-            Interlocked.Increment(ref _evictions);
+            var next = node.Next;
+
+            if (node.Value.Bundle.IsValueCreated)
+            {
+                _entries.Remove(node.Value.Request);
+                _order.Remove(node);
+                Interlocked.Increment(ref _evictions);
+            }
+
+            node = next;
         }
     }
 

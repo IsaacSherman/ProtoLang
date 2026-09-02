@@ -86,7 +86,9 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    not say so.
 8. **Result.** `CompilationResult` carries the IR *even when the file did not parse*, the syntax
    tree, the descriptors, the whole `Schema` bundle they came from, the import outcomes, the
-   diagnostics, the settled config, and the search paths that were used. `Module` is null only when the compilation stopped before the binder: an
+   diagnostics, the settled config, and the search paths that were used. When the schemas could not
+   be loaded it carries `SchemaFailure` instead — `protoc`'s own report, line by line with positions,
+   beside the `PL0003` that renders it as prose. `Module` is null only when the compilation stopped before the binder: an
    unreadable config, an unusable include path, or a schema that could not be found or loaded.
    **`Module` is the partial one. Emit from `EmittableModule`**, which is null unless the
    compilation produced a whole program.
@@ -122,7 +124,7 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | What a descriptor load produced | `DescriptorBundle`, `SchemaFile` | [Binding/DescriptorBundle.cs](src/ProtoLang.Core/Binding/DescriptorBundle.cs) |
 | What decides a load, and keys it | `DescriptorRequest` | [Binding/DescriptorRequest.cs](src/ProtoLang.Core/Binding/DescriptorRequest.cs) |
 | Whether a load can be reused | `DescriptorCache`, `SchemaClosure` | [Binding/DescriptorCache.cs](src/ProtoLang.Core/Binding/DescriptorCache.cs) |
-| What `protoc` said, and about where | `ProtocDiagnostic` | [Binding/ProtocDiagnostic.cs](src/ProtoLang.Core/Binding/ProtocDiagnostic.cs) |
+| What `protoc` said, and about where | `ProtocDiagnostic`, `SchemaLoadFailure` | [Binding/ProtocDiagnostic.cs](src/ProtoLang.Core/Binding/ProtocDiagnostic.cs), [SchemaLoadFailure.cs](src/ProtoLang.Core/SchemaLoadFailure.cs) |
 | Offset ↔ line/column | `LineMap` | [Diagnostics/LineMap.cs](src/ProtoLang.Core/Diagnostics/LineMap.cs) |
 | Messages | `Diagnostic`, `DiagnosticBag` | [Diagnostics/Diagnostic.cs](src/ProtoLang.Core/Diagnostics/Diagnostic.cs) |
 | Type system | `PlType` and friends | [Types/PlType.cs](src/ProtoLang.Core/Types/PlType.cs) |
