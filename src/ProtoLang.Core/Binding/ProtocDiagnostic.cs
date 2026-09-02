@@ -107,10 +107,21 @@ public sealed record ProtocDiagnostic(string? File, int Line, int Column, string
                 continue;
             }
 
+            // Parsed rather than assumed to fit. Nothing bounds how many digits a line of text can
+            // hold, and this text arrives from another process -- so a run of twenty digits is a
+            // number this parser declines to read, not an exception thrown out of a compiler that
+            // may not throw on input. Declining leaves the line to be kept whole, which is the right
+            // answer for something that was never a position to begin with.
+            if (!int.TryParse(rest[..lineDigits], out var lineNumber)
+                || !int.TryParse(afterLine[..columnDigits], out var column))
+            {
+                continue;
+            }
+
             diagnostic = new ProtocDiagnostic(
                 file,
-                int.Parse(rest[..lineDigits]),
-                int.Parse(afterLine[..columnDigits]),
+                lineNumber,
+                column,
                 afterLine[(columnDigits + 1)..].Trim().ToString(),
                 line);
             return true;

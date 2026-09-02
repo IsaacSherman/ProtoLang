@@ -108,13 +108,23 @@ public sealed class DescriptorRequest : IEquatable<DescriptorRequest>
     public override int GetHashCode() => Comparer.GetHashCode(_canonical);
 
     /// <remarks>
-    /// Case-insensitive, matching what <c>Compilation</c> already does when it dedupes search paths.
-    /// That is right on Windows and wrong on a case-sensitive file system, and it is one spelling of
-    /// a question -- what makes two paths the same path -- that #53 settles once for the whole
-    /// server. Following the existing rule keeps the two answers together, so there is one thing to
-    /// change rather than two.
+    /// <para>
+    /// Ordinal, deliberately, even though <c>Compilation</c> dedupes its search paths
+    /// case-insensitively. The two are not the same question asked twice. There, folding case merges
+    /// two spellings of one directory, and being wrong about it on a case-sensitive file system costs
+    /// a redundant search path. Here, folding case merges two <em>requests</em>, and being wrong about
+    /// it means <c>Leaf.proto</c> is answered with the descriptors built for <c>leaf.proto</c> -- and
+    /// the closure check cannot catch it, because the stored closure names the file it really loaded
+    /// and that file really is unchanged.
+    /// </para>
+    /// <para>
+    /// The cost of ordinal comparison is the mirror case: on Windows, two spellings of one path make
+    /// two entries and one extra protoc run. A duplicate entry is a waste; a wrong entry is a wrong
+    /// answer, so the trade only goes one way. Collapsing the Windows duplicates wants real path
+    /// normalization, which is #53's to define for the whole server rather than this type's to guess.
+    /// </para>
     /// </remarks>
-    private static StringComparer Comparer => StringComparer.OrdinalIgnoreCase;
+    private static StringComparer Comparer => StringComparer.Ordinal;
 
     private string Render()
     {

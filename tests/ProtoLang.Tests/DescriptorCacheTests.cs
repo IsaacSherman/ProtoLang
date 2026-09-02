@@ -259,6 +259,19 @@ public class DescriptorCacheTests
         Assert.NotEqual(before, after);
     }
 
+    /// <summary>
+    /// Folding case here would answer a request for one schema with another schema's descriptors on
+    /// any file system that tells them apart, and the closure check could not catch it: the entry
+    /// names the file it really loaded, and that file really is unchanged. Two entries on Windows for
+    /// two spellings of one path is the price, and a duplicate entry is only a wasted protoc run.
+    /// </summary>
+    [Fact]
+    public void TwoSpellingsOfOneSchemaNameAreDifferentRequests()
+    {
+        Assert.NotEqual(Request(protoFiles: ["leaf.proto"]), Request(protoFiles: ["Leaf.proto"]));
+        Assert.NotEqual(Request(includePaths: ["/schemas"]), Request(includePaths: ["/Schemas"]));
+    }
+
     [Fact]
     public void TheSameLoadDescribedTwiceIsOneRequest()
     {
@@ -436,6 +449,22 @@ public class DescriptorCacheTests
         Assert.Null(parsed.File);
         Assert.Equal(Line, parsed.Text);
         Assert.Equal(Line, parsed.Raw);
+    }
+
+    /// <summary>
+    /// The text comes from another process, so nothing bounds how many digits it can put where a line
+    /// number goes. A compiler an editor calls on every keystroke may not throw at its caller over it.
+    /// </summary>
+    [Fact]
+    public void ALineNumberTooLargeToBeOneLeavesTheLineWhole()
+    {
+        const string Line = "x.proto:99999999999:1: a line number no file has";
+
+        var parsed = Assert.Single(ProtocDiagnostic.Parse(Line));
+
+        Assert.Null(parsed.File);
+        Assert.False(parsed.HasPosition);
+        Assert.Equal(Line, parsed.Text);
     }
 
     /// <summary>

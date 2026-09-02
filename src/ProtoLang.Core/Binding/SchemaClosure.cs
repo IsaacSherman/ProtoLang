@@ -28,10 +28,21 @@ public sealed record SchemaFile(string Name, string? Path, string? ContentHash);
 /// still holds.
 /// </summary>
 /// <remarks>
+/// <para>
 /// The description and the check are the same function run twice: <see cref="IsCurrent"/> re-describes
 /// the names it was given and compares. Anything else would be two statements of one rule, and the
 /// way they would eventually disagree is a cache that reports itself valid against files it would no
 /// longer resolve the same way.
+/// </para>
+/// <para>
+/// The one change a description cannot see is a write that lands after protoc read the file and
+/// before this hashes it. The bundle then holds descriptors built from the old bytes beside a hash of
+/// the new ones, and because that hash keeps matching, the entry stays valid until the file changes
+/// again. Closing the window would mean hashing before the run, which is not possible: until protoc
+/// reports the closure, nobody knows which files are in it. It is bounded by the length of a single
+/// protoc invocation and it resolves on the next edit to that file, which is why it is written down
+/// here rather than designed around.
+/// </para>
 /// </remarks>
 public static class SchemaClosure
 {
