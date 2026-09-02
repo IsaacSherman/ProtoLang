@@ -23,7 +23,7 @@ public static class ProtocLocator
             return overridePath;
         }
 
-        var onPath = FindOnSystemPath();
+        var onPath = FindOnSystemPath(ExecutableName);
         if (onPath is not null)
         {
             return onPath;
@@ -32,10 +32,76 @@ public static class ProtocLocator
         return FindBundledProtoc();
     }
 
-    private static string ExecutableName =>
-        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "protoc.exe" : "protoc";
+    /// <summary>
+    /// The concrete executable a caller-supplied protoc path will actually run, as a full path where
+    /// one can be established.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A caller may name protoc any way the operating system would accept it, including a bare
+    /// <c>protoc</c> that the process launcher resolves through <c>PATH</c>. That leaves the compiler
+    /// holding a string it cannot ask questions about: <see cref="FindWellKnownTypeIncludePaths"/>
+    /// would look for the bundled schemas beside the working directory rather than beside the
+    /// executable, and a descriptor cache measuring the file would find nothing there and key on an
+    /// executable it never identified. Resolving once, here, means every later question is asked
+    /// about the file that is going to run.
+    /// </para>
+    /// <para>
+    /// A path that names a location and holds no file is returned unchanged rather than searched for
+    /// on <c>PATH</c>. The caller pointed at a particular protoc; running a different one that happens
+    /// to share its file name would be answering a question nobody asked, and the failure to start is
+    /// the honest outcome.
+    /// </para>
+    /// </remarks>
+    public static string Resolve(string protocPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(protocPath);
 
-    private static string? FindOnSystemPath()
+        if (File.Exists(protocPath))
+        {
+            return FullPathOrAsGiven(protocPath);
+        }
+
+        if (NamesALocation(protocPath))
+        {
+            return protocPath;
+        }
+
+        return FindOnSystemPath(ExecutableFileName(protocPath)) ?? protocPath;
+    }
+
+    private static string ExecutableName => ExecutableFileName("protoc");
+
+    /// <summary>What a bare tool name is called as a file on this platform.</summary>
+    private static string ExecutableFileName(string name)
+        => RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !Path.HasExtension(name)
+            ? name + ".exe"
+            : name;
+
+    private static bool NamesALocation(string path)
+        => Path.IsPathRooted(path)
+            || path.Contains(Path.DirectorySeparatorChar)
+            || path.Contains(Path.AltDirectorySeparatorChar);
+
+    /// <remarks>
+    /// Normalizing a path is not something this may fail at. The file is known to exist, so the guard
+    /// is against the shapes <see cref="Path.GetFullPath(string)"/> refuses rather than against a
+    /// likely case, and the path as written still runs.
+    /// </remarks>
+    private static string FullPathOrAsGiven(string path)
+    {
+        try
+        {
+            return Path.GetFullPath(path);
+        }
+        catch (Exception ex)
+            when (ex is ArgumentException or PathTooLongException or NotSupportedException or IOException)
+        {
+            return path;
+        }
+    }
+
+    private static string? FindOnSystemPath(string fileName)
     {
         var path = Environment.GetEnvironmentVariable("PATH");
         if (string.IsNullOrEmpty(path))
@@ -47,7 +113,7 @@ public static class ProtocLocator
         {
             try
             {
-                var candidate = Path.Combine(directory.Trim(), ExecutableName);
+                var candidate = Path.Combine(directory.Trim(), fileName);
                 if (File.Exists(candidate))
                 {
                     return candidate;

@@ -53,8 +53,18 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    [`ImportResolution`](src/ProtoLang.Core/ImportResolution.cs) — resolved, not found, or never
    written — and the whole list is published on the result. Then
    [`DescriptorLoader`](src/ProtoLang.Core/Binding/DescriptorLoader.cs) shells out to `protoc`
-   (located by [`ProtocLocator`](src/ProtoLang.Core/Binding/ProtocLocator.cs)) and returns
-   `FileDescriptor`s. The `FileDescriptorSet` is currently discarded — #48 must stop doing that.
+   (located by [`ProtocLocator`](src/ProtoLang.Core/Binding/ProtocLocator.cs)) and returns a
+   [`DescriptorBundle`](src/ProtoLang.Core/Binding/DescriptorBundle.cs): the built `FileDescriptor`s,
+   the `FileDescriptorSet` they came from with its `--include_source_info` source info, and the file
+   each schema in the transitive closure was read from. `Load` still returns the descriptor list
+   alone, so no existing caller moved. A [`DescriptorCache`](src/ProtoLang.Core/Binding/DescriptorCache.cs)
+   on the loader's options keeps bundles, keyed by a
+   [`DescriptorRequest`](src/ProtoLang.Core/Binding/DescriptorRequest.cs) — which `protoc`, which
+   roots in which order, which files — and re-checked against a content hash of every file in the
+   closure, because the request cannot name a schema that is only reached through an import. The
+   loader is uncached unless a caller supplies one, `protoc` runs under a timeout, and a failure keeps
+   its report line by line as [`ProtocDiagnostic`](src/ProtoLang.Core/Binding/ProtocDiagnostic.cs)
+   rather than only as prose.
 7. **Bind.** [`Binder.Bind`](src/ProtoLang.Core/Binding/Binder.cs) resolves names against the
    descriptors and produces typed IR. It does **not** throw on bad input: an unresolved name becomes
    `ErrorType` (`PL0037`) and binding continues, a name the parser never saw resolves to `ErrorType`
@@ -75,8 +85,10 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    collides with an enclosing one are all still in the IR and all resolve nothing, and the tree does
    not say so.
 8. **Result.** `CompilationResult` carries the IR *even when the file did not parse*, the syntax
-   tree, the descriptors, the import outcomes, the diagnostics, the settled config, and the search
-   paths that were used. `Module` is null only when the compilation stopped before the binder: an
+   tree, the descriptors, the whole `Schema` bundle they came from, the import outcomes, the
+   diagnostics, the settled config, and the search paths that were used. When the schemas could not
+   be loaded it carries `SchemaFailure` instead — `protoc`'s own report, line by line with positions,
+   beside the `PL0003` that renders it as prose. `Module` is null only when the compilation stopped before the binder: an
    unreadable config, an unusable include path, or a schema that could not be found or loaded.
    **`Module` is the partial one. Emit from `EmittableModule`**, which is null unless the
    compilation produced a whole program.
@@ -109,6 +121,10 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | Location | `SourceSpan`, `SourcePosition` | [Diagnostics/SourceSpan.cs](src/ProtoLang.Core/Diagnostics/SourceSpan.cs) |
 | Written or not-yet-written names | `SyntaxName` | [Syntax/SyntaxName.cs](src/ProtoLang.Core/Syntax/SyntaxName.cs) |
 | What became of an import | `ImportResolution` | [ImportResolution.cs](src/ProtoLang.Core/ImportResolution.cs) |
+| What a descriptor load produced | `DescriptorBundle`, `SchemaFile` | [Binding/DescriptorBundle.cs](src/ProtoLang.Core/Binding/DescriptorBundle.cs) |
+| What decides a load, and keys it | `DescriptorRequest` | [Binding/DescriptorRequest.cs](src/ProtoLang.Core/Binding/DescriptorRequest.cs) |
+| Whether a load can be reused | `DescriptorCache`, `SchemaClosure` | [Binding/DescriptorCache.cs](src/ProtoLang.Core/Binding/DescriptorCache.cs) |
+| What `protoc` said, and about where | `ProtocDiagnostic`, `SchemaLoadFailure` | [Binding/ProtocDiagnostic.cs](src/ProtoLang.Core/Binding/ProtocDiagnostic.cs), [SchemaLoadFailure.cs](src/ProtoLang.Core/SchemaLoadFailure.cs) |
 | Offset ↔ line/column | `LineMap` | [Diagnostics/LineMap.cs](src/ProtoLang.Core/Diagnostics/LineMap.cs) |
 | Messages | `Diagnostic`, `DiagnosticBag` | [Diagnostics/Diagnostic.cs](src/ProtoLang.Core/Diagnostics/Diagnostic.cs) |
 | Type system | `PlType` and friends | [Types/PlType.cs](src/ProtoLang.Core/Types/PlType.cs) |
@@ -158,6 +174,7 @@ One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized b
 `LexerTests`, `ParserTests`, `ParserResilienceTests` and `BinderResilienceTests` (fuzz),
 `SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
 `SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `ScopeQueryTests`,
+`DescriptorCacheTests`,
 `TreeWalkTests`, `ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`,
 and the scaffolding and smoke suites.
 
@@ -198,5 +215,7 @@ recording line at each of the fifteen points the binder resolves a name, and tur
 file, and the reason `EmitStatement` now asks the expression emitter for the target it used to spell
 itself. #49 gave `Scope` an extent and a recording line on each of the three branches where a
 declaration is accepted, so that what the binder knew about visibility outlives the descent that
-knew it. Everything from here should be additive: new types, new projects. Rewriting the binder is
-the signal to stop and re-scope.
+knew it. #48 made the descriptor load cacheable and stopped it discarding the descriptor set, which
+reached `Compilation` twice: it now holds the loader it resolved rather than locating `protoc` again
+per keystroke, and it publishes the bundle on the result. Everything from here should be additive:
+new types, new projects. Rewriting the binder is the signal to stop and re-scope.
