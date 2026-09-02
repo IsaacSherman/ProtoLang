@@ -38,13 +38,33 @@ public static class PathIdentity
     /// Compares whole paths. Use it for a dictionary of paths, a <c>Contains</c>, or a set.
     /// </summary>
     /// <remarks>
-    /// Case is the only difference this handles, because a <see cref="StringComparer"/> cannot
-    /// normalize a separator or a trailing slash. Where those are possible -- anything reaching the
-    /// compiler from a URI, a settings file, or a command line -- compare <see cref="KeyFor"/> values
-    /// instead, which settle all three.
+    /// <para>
+    /// Every difference <see cref="KeyFor"/> settles, because it is <see cref="KeyFor"/>: case, the
+    /// alternate separator, and a trailing slash. An earlier version folded only case, on the
+    /// reasoning that a <see cref="StringComparer"/> cannot normalize a separator -- which was true
+    /// and beside the point. It left two ways to ask one question, and the call site that reached for
+    /// the weaker one kept <c>C:\schemas</c> and <c>C:\schemas\</c> as two search roots for one
+    /// directory, handed protoc the same root twice, and keyed a descriptor load away from the
+    /// identical load spelled without the slash.
+    /// </para>
+    /// <para>
+    /// It allocates a key per operand, which is the right trade everywhere it is used: these are
+    /// short lists settled once per compilation, not a hot dictionary. The one place that compares
+    /// paths per keystroke, <see cref="Binding.DescriptorRequest"/>, renders its keys once at
+    /// construction and compares the rendering.
+    /// </para>
     /// </remarks>
-    public static StringComparer Comparer { get; }
-        = IsCaseSensitive ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+    public static IEqualityComparer<string> Comparer { get; } = new PathComparer();
+
+    private sealed class PathComparer : IEqualityComparer<string>
+    {
+        public bool Equals(string? left, string? right)
+            => left is null || right is null
+                ? left is null && right is null
+                : string.Equals(KeyFor(left), KeyFor(right), StringComparison.Ordinal);
+
+        public int GetHashCode(string path) => KeyFor(path).GetHashCode(StringComparison.Ordinal);
+    }
 
     /// <summary>
     /// The spelling-independent form of <paramref name="path"/>: two strings naming one file produce
@@ -98,9 +118,9 @@ public static class PathIdentity
     }
 
     /// <summary>Whether two paths name the same file or directory, however each is spelled.</summary>
-    /// <remarks>Null equals null and nothing else, so a caller with an optional path asks once.</remarks>
-    public static bool AreSame(string? left, string? right)
-        => left is null || right is null
-            ? left is null && right is null
-            : string.Equals(KeyFor(left), KeyFor(right), StringComparison.Ordinal);
+    /// <remarks>
+    /// <see cref="Comparer"/> in the form a single comparison wants. Null equals null and nothing
+    /// else, so a caller with an optional path asks once.
+    /// </remarks>
+    public static bool AreSame(string? left, string? right) => Comparer.Equals(left, right);
 }

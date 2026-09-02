@@ -149,8 +149,10 @@ public sealed record DocumentConfiguration
     /// <see cref="ConfigurationSource.Discovery"/>.
     /// </param>
     /// <exception cref="ArgumentNullException">
-    /// A protoc was resolved and no loader was built for it. Which protoc runs can only reach a
-    /// compilation through its loader, so a null one here would discard the setting in silence.
+    /// A protoc was resolved and no loader was built for it, on a document that would otherwise have
+    /// compiled. Which protoc runs can only reach a compilation through its loader, so a null one
+    /// here would discard the setting in silence. A document that must not compile at all returns
+    /// false instead, whatever the loader is.
     /// </exception>
     /// <remarks>
     /// The refusal is deliberate and is the only thing in this type that throws.
@@ -163,6 +165,17 @@ public sealed record DocumentConfiguration
     /// </remarks>
     public bool TryCreateCompilationOptions(DescriptorLoader? loader, out CompilationOptions? options)
     {
+        // Before the loader is questioned at all. False is this method's "do not compile this
+        // document" answer, and a refused configuration file is exactly that -- so a caller taking
+        // the answer it was given, with no loader because it was not going to compile, must get the
+        // answer rather than an exception. The loader only matters to options that are going to be
+        // produced.
+        if (Config is null)
+        {
+            options = null;
+            return false;
+        }
+
         if (loader is null && ProtocPath is not null)
         {
             throw new ArgumentNullException(
@@ -170,12 +183,6 @@ public sealed record DocumentConfiguration
                 $"This document resolved protoc to '{ProtocPath}', from {ProtocPathSource.Describe()}, and "
                     + "a compilation can only be told which protoc to run through its loader. Build one "
                     + "for that path rather than passing null.");
-        }
-
-        if (Config is null)
-        {
-            options = null;
-            return false;
         }
 
         options = new CompilationOptions

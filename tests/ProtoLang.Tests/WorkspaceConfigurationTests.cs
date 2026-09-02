@@ -905,6 +905,27 @@ public class WorkspaceConfigurationTests
         Assert.Contains(protoc, refusal.Message);
     }
 
+    /// <summary>
+    /// False is this method's "do not compile this document" answer, and a refused configuration file
+    /// is exactly that. A caller taking the answer it was given -- with no loader, because it was not
+    /// going to compile -- must get the answer rather than an exception about the loader.
+    /// </summary>
+    [Fact]
+    public void ADocumentThatMustNotCompileSaysSoRatherThanAskingAboutTheLoader()
+    {
+        var directory = TempDirectory();
+        var protoc = TempFile(directory, "protoc-here");
+        TempFile(directory, ProjectConfig.FileName, UnreadableConfig);
+
+        var folder = WorkspaceFolder.FromPath(directory, settings: new ProtoLangSettings { ProtocPath = protoc });
+        var resolved = Workspace(folder).Resolve(Document(directory));
+
+        Assert.Equal(protoc, resolved.ProtocPath);
+        Assert.True(resolved.ConfigRefused);
+        Assert.False(resolved.TryCreateCompilationOptions(null, out var options));
+        Assert.Null(options);
+    }
+
     [Fact]
     public void EveryResolvedValueSaysWhereItCameFrom()
     {

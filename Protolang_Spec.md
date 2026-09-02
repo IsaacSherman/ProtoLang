@@ -124,6 +124,12 @@ Normative Requirements:
 
 - Imports use `import proto "path/to/schema.proto";`.
 - The path is resolved against compiler include paths, then against the source file's own directory.
+- **One directory is one search path, however it is spelled.** Include paths are searched in the
+  order given, and a directory already in that order is not added again — whether the second
+  spelling differs by case where the file system ignores case, by a trailing separator, by the
+  alternate separator, or by being the source directory that would have been appended anyway. A
+  directory searched twice is a redundant `--proto_path`, a diagnostic that names it twice, and, for
+  a cached load (21.1), a second key for one configuration.
 - Well-known protobuf imports may be resolved by the descriptor loader's implicit include paths.
 - A file with no `import proto` declaration does not reach binding (`PL0001`).
 - ProtoLang does not define an independent package declaration. Message, enum, and field names come
