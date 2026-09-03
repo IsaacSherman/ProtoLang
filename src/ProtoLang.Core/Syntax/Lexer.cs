@@ -5,13 +5,22 @@ using ProtoLang.Diagnostics;
 namespace ProtoLang.Syntax;
 
 /// <summary>
-/// Converts ProtoLang source text into a token stream. Comments and whitespace are discarded;
-/// both line (<c>//</c>) and block (<c>/* */</c>) comments are accepted, though spec 6.2 still
-/// lists block comments as an open question for version 1.
+/// Converts ProtoLang source text into a token stream. Whitespace is discarded and comments are
+/// not tokens; both line (<c>//</c>) and block (<c>/* */</c>) comments are accepted, and where each
+/// one was is kept in <see cref="Comments"/>.
 /// </summary>
 public sealed class Lexer
 {
-    private static readonly Dictionary<string, TokenKind> Keywords = new(StringComparer.Ordinal)
+    /// <summary>Every keyword and the kind it lexes to: spec 6.4's reserved words, as data.</summary>
+    /// <remarks>
+    /// Published because the classification question a host asks -- is this token a keyword? -- has to
+    /// be answered from the same list the lexer resolves against.
+    /// <see cref="TokenKindExtensions.IsKeyword"/> reads it, so there is no second reserved-word list
+    /// to drift out of agreement with this one.
+    /// </remarks>
+    public static IReadOnlyDictionary<string, TokenKind> Keywords => KeywordKinds;
+
+    private static readonly Dictionary<string, TokenKind> KeywordKinds = new(StringComparer.Ordinal)
     {
         ["and"] = TokenKind.And,
         ["as"] = TokenKind.As,
@@ -59,6 +68,7 @@ public sealed class Lexer
     private readonly string _text;
     private readonly string _file;
     private readonly DiagnosticBag _diagnostics;
+    private readonly List<Comment> _comments = [];
 
     private int _position;
     private int _line = 1;
@@ -70,6 +80,15 @@ public sealed class Lexer
         _file = file;
         _diagnostics = diagnostics;
     }
+
+    /// <summary>Every comment lexed so far, in the order they appear in the text.</summary>
+    /// <remarks>
+    /// Filled in as <see cref="Tokenize"/> runs, because the scan that skips a comment is the scan
+    /// that knows where it ended -- a second pass would be a second definition of what a comment is.
+    /// See <see cref="Comment"/>. Nothing about the token stream changes: comments are still not
+    /// tokens and the parser is still never shown one.
+    /// </remarks>
+    public IReadOnlyList<Comment> Comments => _comments;
 
     private char Current => Peek(0);
 
@@ -141,9 +160,7 @@ public sealed class Lexer
 
             if (current == '\n')
             {
-                Advance();
-                _line++;
-                _lineStart = _position;
+                AdvanceOverNewline();
                 continue;
             }
 
@@ -155,54 +172,13 @@ public sealed class Lexer
 
             if (current == '/' && Lookahead == '/')
             {
-                while (_position < _text.Length && Current != '\n')
-                {
-                    Advance();
-                }
-
+                SkipLineComment();
                 continue;
             }
 
             if (current == '/' && Lookahead == '*')
             {
-                var commentStart = _position;
-                var commentLine = _line;
-                var commentColumn = Column;
-                Advance();
-                Advance();
-
-                var closed = false;
-                while (_position < _text.Length)
-                {
-                    if (Current == '*' && Lookahead == '/')
-                    {
-                        Advance();
-                        Advance();
-                        closed = true;
-                        break;
-                    }
-
-                    if (Current == '\n')
-                    {
-                        Advance();
-                        _line++;
-                        _lineStart = _position;
-                        continue;
-                    }
-
-                    Advance();
-                }
-
-                if (!closed)
-                {
-                    _diagnostics.Error(
-                        "PL0004",
-                        "unterminated block comment",
-                        "Reached end of file while scanning a block comment.",
-                        SourceSpan.SingleLine(_file, commentStart, commentLine, commentColumn, 2),
-                        "Close the comment with '*/'.");
-                }
-
+                SkipBlockComment();
                 continue;
             }
 
@@ -210,7 +186,84 @@ public sealed class Lexer
         }
     }
 
+    /// <summary>A line comment runs to the newline that ends it, and does not take the newline.</summary>
+    private void SkipLineComment()
+    {
+        var start = Mark();
+
+        while (_position < _text.Length && Current != '\n')
+        {
+            Advance();
+        }
+
+        Record(start, isBlock: false);
+    }
+
+    /// <remarks>
+    /// Block comments do not nest (spec 6.2), so the first <c>*/</c> closes the comment whatever else
+    /// is inside it. An unterminated one is <c>PL0004</c> and is recorded all the same: the text
+    /// really is a comment as far as the lexer ever got, and a host that stopped coloring at the
+    /// broken delimiter would leave the rest of the file looking like code the compiler was reading.
+    /// </remarks>
+    private void SkipBlockComment()
+    {
+        var start = Mark();
+
+        Advance();
+        Advance();
+
+        var closed = false;
+        while (_position < _text.Length)
+        {
+            if (Current == '*' && Lookahead == '/')
+            {
+                Advance();
+                Advance();
+                closed = true;
+                break;
+            }
+
+            if (Current == '\n')
+            {
+                AdvanceOverNewline();
+                continue;
+            }
+
+            Advance();
+        }
+
+        if (!closed)
+        {
+            _diagnostics.Error(
+                "PL0004",
+                "unterminated block comment",
+                "Reached end of file while scanning a block comment.",
+                SourceSpan.SingleLine(_file, start.Offset, start.Line, start.Column, 2),
+                "Close the comment with '*/'.");
+        }
+
+        Record(start, isBlock: true);
+    }
+
+    /// <summary>Where the lexer stands now, in both of the coordinate systems a span carries.</summary>
+    private SourcePosition Mark() => new(_position, _line, Column);
+
+    private void Record(SourcePosition start, bool isBlock)
+        => _comments.Add(new Comment(new SourceSpan(_file, start, Mark()), isBlock));
+
     private void Advance() => _position++;
+
+    /// <remarks>
+    /// The newline belongs to the line it ends, so a position taken before this call still names that
+    /// line -- which is what makes a line comment's range stop where the text does rather than
+    /// wrapping onto the next line at column one.
+    /// </remarks>
+    private void AdvanceOverNewline()
+    {
+        Advance();
+        _line++;
+        _lineStart = _position;
+    }
 
     private Token LexIdentifierOrKeyword(int start, int line, int column)
     {
@@ -220,7 +273,7 @@ public sealed class Lexer
         }
 
         var text = _text[start.._position];
-        var kind = Keywords.TryGetValue(text, out var keyword) ? keyword : TokenKind.Identifier;
+        var kind = KeywordKinds.TryGetValue(text, out var keyword) ? keyword : TokenKind.Identifier;
         return new Token(kind, text, SourceSpan.SingleLine(_file, start, line, column, text.Length));
     }
 
