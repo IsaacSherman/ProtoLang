@@ -331,6 +331,29 @@ public class InMemoryCompilationTests
             searchPaths);
     }
 
+    /// <summary>
+    /// One directory is one place to search, however the caller spelled it. A second spelling costs a
+    /// redundant <c>--proto_path</c>, a "Searched:" line that names the same directory twice, and --
+    /// because the roots are part of a descriptor request -- a cache entry that the identical load
+    /// spelled the other way will never match.
+    /// </summary>
+    [Fact]
+    public void TwoSpellingsOfOneIncludeDirectoryAreOneSearchPath()
+    {
+        var path = TestPaths.WriteTempScript(Prelude + Body);
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path))!;
+
+        var searchPaths = Compilation.GetSearchPaths(
+            path,
+            [
+                TestPaths.FixtureProtoDirectory + Path.DirectorySeparatorChar,
+                TestPaths.FixtureProtoDirectory,
+                directory + Path.DirectorySeparatorChar,
+            ]);
+
+        Assert.Equal([TestPaths.FixtureProtoDirectory + Path.DirectorySeparatorChar, directory + Path.DirectorySeparatorChar], searchPaths);
+    }
+
     // ---------------------------------------------------------------- scaffolding
 
     [Fact]

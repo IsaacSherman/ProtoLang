@@ -4,6 +4,7 @@
     <Project Path="src/ProtoLang.Backend.CSharp/ProtoLang.Backend.CSharp.csproj" />
     <Project Path="src/ProtoLang.Cli/ProtoLang.Cli.csproj" />
     <Project Path="src/ProtoLang.Core/ProtoLang.Core.csproj" />
+    <Project Path="src/ProtoLang.LanguageServer/ProtoLang.LanguageServer.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/ProtoLang.Tests/ProtoLang.Tests.csproj" />

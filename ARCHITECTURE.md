@@ -10,7 +10,7 @@ Behavior is defined once and generated per target, and it has to mean the same t
 
 ## The solution
 
-`ProtoLang.slnx`, five projects, `net10.0`. Settings are central in
+`ProtoLang.slnx`, six projects, `net10.0`. Settings are central in
 [Directory.Build.props](Directory.Build.props): nullable enabled, implicit usings, **warnings as
 errors**, and `CheckForOverflowUnderflow=false` on purpose — the compiler must never inherit the
 arithmetic behavior it exists to define.
@@ -21,11 +21,12 @@ arithmetic behavior it exists to define.
 | [src/ProtoLang.Backend.CSharp](src/ProtoLang.Backend.CSharp) | C# emission, plus generated test projects. |
 | [src/ProtoLang.Backend.Cpp](src/ProtoLang.Backend.Cpp) | The same for C++. |
 | [src/ProtoLang.Cli](src/ProtoLang.Cli) | `protolangc`: argument parsing, driving a compilation, writing files. |
+| [src/ProtoLang.LanguageServer](src/ProtoLang.LanguageServer) | The editor host. Today: the workspace configuration model. #42 adds the LSP host over it. |
 | [tests/ProtoLang.Tests](tests/ProtoLang.Tests) | One xunit project covering all of it. |
 
-Dependencies run one way. Backends and the CLI reference Core; **Core references nothing in the
-repo**. That is what lets a language server consume the compiler without dragging the CLI along, and
-it is worth preserving.
+Dependencies run one way. Backends, the CLI and the language server reference Core; **Core
+references nothing in the repo**. That is what lets a language server consume the compiler without
+dragging the CLI along, and it is worth preserving.
 
 ## The pipeline
 
@@ -38,7 +39,10 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    place the compiler reads ProtoLang source from disk.
 2. **Policy.** The nearest `protolang.config.xml` at or above the source directory
    ([`ProjectConfig.Discover`/`Load`](src/ProtoLang.Core/Config/ProjectConfig.cs)). A config that
-   exists and cannot be read **stops** the compilation rather than falling back to defaults.
+   exists and cannot be read **stops** the compilation rather than falling back to defaults. A host
+   serving an editor settles this per document instead, through
+   [`WorkspaceConfiguration`](src/ProtoLang.LanguageServer/Workspace/WorkspaceConfiguration.cs) — see
+   *Configuration* below.
 3. **Lex.** [`Lexer.Tokenize`](src/ProtoLang.Core/Syntax/Lexer.cs) → `List<Token>`. No token spans
    more than one line.
 4. **Parse.** [`Parser.ParseCompilationUnit`](src/ProtoLang.Core/Syntax/Parser.cs) → the AST in
@@ -119,6 +123,10 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | Concern | Type | File |
 |---|---|---|
 | Location | `SourceSpan`, `SourcePosition` | [Diagnostics/SourceSpan.cs](src/ProtoLang.Core/Diagnostics/SourceSpan.cs) |
+| Whether two paths are one path | `PathIdentity` | [PathIdentity.cs](src/ProtoLang.Core/PathIdentity.cs) |
+| A document, to an editor and to the compiler | `DocumentUri` | [Workspace/DocumentUri.cs](src/ProtoLang.LanguageServer/Workspace/DocumentUri.cs) |
+| What an editor may configure, and where it wins | `WorkspaceConfiguration`, `ProtoLangSettings` | [Workspace/WorkspaceConfiguration.cs](src/ProtoLang.LanguageServer/Workspace/WorkspaceConfiguration.cs) |
+| What one document compiles under | `DocumentConfiguration`, `ConfigurationSource` | [Workspace/DocumentConfiguration.cs](src/ProtoLang.LanguageServer/Workspace/DocumentConfiguration.cs) |
 | Written or not-yet-written names | `SyntaxName` | [Syntax/SyntaxName.cs](src/ProtoLang.Core/Syntax/SyntaxName.cs) |
 | What became of an import | `ImportResolution` | [ImportResolution.cs](src/ProtoLang.Core/ImportResolution.cs) |
 | What a descriptor load produced | `DescriptorBundle`, `SchemaFile` | [Binding/DescriptorBundle.cs](src/ProtoLang.Core/Binding/DescriptorBundle.cs) |
@@ -161,6 +169,18 @@ divide-by-zero, unset-message reads. Discovery walks up from the source director
 `.editorconfig` does. A command-line flag that contradicts an explicit setting is **refused** unless
 `--override-config` is passed — generated code has to mean the same thing however it was built.
 
+An editor adds an axis the command line never had: one process, many documents, one or more
+workspace folders, each able to state settings of its own. Spec 10.4.1 settles that in the server
+and `WorkspaceConfiguration.Resolve` is the only place it is applied. Configuration is resolved
+**per document**, in the order folder → workspace → user setting → `PROTOLANG_PROTOC` → discovery.
+Language policy stays out of settings entirely — a host may name a different `protolang.config.xml`
+and may not restate what is in one — and **every setting that is not being used is reported**
+(`PL2101`–`PL2105`), because a user who cannot tell a typo from a refusal has nothing to go on. A
+`protolang.config.xml` that is found and cannot be read stops the document and is named as *refused*
+(`PL2106`), rather than being reported as having supplied the defaults it did not supply.
+`DocumentUri` and `PathIdentity` are between them the only places a URI becomes a path and two paths
+are compared, which is what makes one file one document and one cache entry however it is spelled.
+
 ### Backends
 
 Per spec 23 a backend consumes only the typed IR, never the AST, and rejects what it cannot support
@@ -174,7 +194,7 @@ One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized b
 `LexerTests`, `ParserTests`, `ParserResilienceTests` and `BinderResilienceTests` (fuzz),
 `SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
 `SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `ScopeQueryTests`,
-`DescriptorCacheTests`,
+`DescriptorCacheTests`, `WorkspaceConfigurationTests`,
 `TreeWalkTests`, `ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`,
 and the scaffolding and smoke suites.
 
@@ -217,5 +237,8 @@ itself. #49 gave `Scope` an extent and a recording line on each of the three bra
 declaration is accepted, so that what the binder knew about visibility outlives the descent that
 knew it. #48 made the descriptor load cacheable and stopped it discarding the descriptor set, which
 reached `Compilation` twice: it now holds the loader it resolved rather than locating `protoc` again
-per keystroke, and it publishes the bundle on the result. Everything from here should be additive:
+per keystroke, and it publishes the bundle on the result. #53 opened the server project and settled
+the configuration model in it before #42, #45 and #46 could each invent part of one; it reached Core
+only to give "are these two paths the same path?" a single home, which is what collapses the
+duplicate cache entries #48 left behind. Everything from here should be additive:
 new types, new projects. Rewriting the binder is the signal to stop and re-scope.

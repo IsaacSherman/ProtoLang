@@ -157,39 +157,44 @@ public sealed class DescriptorRequest : IEquatable<DescriptorRequest>
     public override int GetHashCode() => Comparer.GetHashCode(_canonical);
 
     /// <remarks>
-    /// <para>
-    /// Ordinal, deliberately, even though <c>Compilation</c> dedupes its search paths
-    /// case-insensitively. The two are not the same question asked twice. There, folding case merges
-    /// two spellings of one directory, and being wrong about it on a case-sensitive file system costs
-    /// a redundant search path. Here, folding case merges two <em>requests</em>, and being wrong about
-    /// it means <c>Leaf.proto</c> is answered with the descriptors built for <c>leaf.proto</c> -- and
-    /// the closure check cannot catch it, because the stored closure names the file it really loaded
-    /// and that file really is unchanged.
-    /// </para>
-    /// <para>
-    /// The cost of ordinal comparison is the mirror case: on Windows, two spellings of one path make
-    /// two entries and one extra protoc run. A duplicate entry is a waste; a wrong entry is a wrong
-    /// answer, so the trade only goes one way. Collapsing the Windows duplicates wants real path
-    /// normalization, which is #53's to define for the whole server rather than this type's to guess.
-    /// </para>
+    /// Ordinal, over a rendering that has already settled how each component compares. A comparer
+    /// cannot be right for the whole key, because the key holds two kinds of string: locations, where
+    /// two spellings may name one directory, and names, where they may not. Rendering each component
+    /// through the rule that fits it leaves one string to compare, one way.
     /// </remarks>
     private static StringComparer Comparer => StringComparer.Ordinal;
 
+    /// <remarks>
+    /// <para>
+    /// Paths render through <see cref="PathIdentity.KeyFor"/> and schema names do not, and the
+    /// asymmetry is the point. An include root is a place: <c>C:\schemas</c> and <c>c:/schemas/</c>
+    /// are one directory, protoc searches it once, and keying them apart buys two entries and a
+    /// second protoc run for one answer. A schema name is not a place -- it is the string protoc
+    /// echoes back as <c>FileDescriptor.Name</c>, which the descriptors then carry and the generated
+    /// code depends on. Folding <c>Leaf.proto</c> into <c>leaf.proto</c> would answer a request for one
+    /// with descriptors named after the other, and the closure check cannot catch it: the stored
+    /// closure names the file it really loaded, and that file really is unchanged.
+    /// </para>
+    /// <para>
+    /// protoc itself is a location, and the two spellings that fold together here would have produced
+    /// the same length and write time anyway.
+    /// </para>
+    /// </remarks>
     private string Render()
     {
         var builder = new StringBuilder();
 
-        builder.Append(ProtocPath).Append(Separator);
+        builder.Append(PathIdentity.KeyFor(ProtocPath)).Append(Separator);
         builder.Append(ProtocLength).Append(Separator);
         builder.Append(ProtocLastWriteUtc.Ticks).Append(Separator);
 
-        Append(IncludePaths);
-        Append(ImplicitIncludePaths);
-        Append(ProtoFiles);
+        Append(IncludePaths, PathIdentity.KeyFor);
+        Append(ImplicitIncludePaths, PathIdentity.KeyFor);
+        Append(ProtoFiles, name => name);
 
         return builder.ToString();
 
-        void Append(IReadOnlyList<string> values)
+        void Append(IReadOnlyList<string> values, Func<string, string> render)
         {
             // The count is rendered as well as the values, so that a component of two entries and a
             // component of one cannot render identically by having the shorter one end where the
@@ -198,7 +203,7 @@ public sealed class DescriptorRequest : IEquatable<DescriptorRequest>
 
             foreach (var value in values)
             {
-                builder.Append(value).Append(Separator);
+                builder.Append(render(value)).Append(Separator);
             }
         }
     }

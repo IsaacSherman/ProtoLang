@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\ProtoLang.Core\ProtoLang.Core.csproj" />
+    <ProjectReference Include="..\..\src\ProtoLang.LanguageServer\ProtoLang.LanguageServer.csproj" />
     <ProjectReference Include="..\..\src\ProtoLang.Backend.CSharp\ProtoLang.Backend.CSharp.csproj" />
     <ProjectReference Include="..\..\src\ProtoLang.Backend.Cpp\ProtoLang.Backend.Cpp.csproj" />
   </ItemGroup>

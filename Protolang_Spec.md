@@ -124,6 +124,12 @@ Normative Requirements:
 
 - Imports use `import proto "path/to/schema.proto";`.
 - The path is resolved against compiler include paths, then against the source file's own directory.
+- **One directory is one search path, however it is spelled.** Include paths are searched in the
+  order given, and a directory already in that order is not added again — whether the second
+  spelling differs by case where the file system ignores case, by a trailing separator, by the
+  alternate separator, or by being the source directory that would have been appended anyway. A
+  directory searched twice is a redundant `--proto_path`, a diagnostic that names it twice, and, for
+  a cached load (21.1), a second key for one configuration.
 - Well-known protobuf imports may be resolved by the descriptor loader's implicit include paths.
 - A file with no `import proto` declaration does not reach binding (`PL0001`).
 - ProtoLang does not define an independent package declaration. Message, enum, and field names come
@@ -797,6 +803,86 @@ Open Questions:
 - Whether a language version (27.1) belongs in this file rather than in each source file.
 - Whether a backend may add settings of its own, and if so how a third-party backend's settings
   avoid colliding with the language's.
+
+### 10.4.1 Host Configuration
+
+**Decided: a host resolves configuration per document, in one documented order, and may not restate
+language policy.**
+
+10.4 settles where language policy lives, for a compiler invoked once over one file. A host that
+serves an editor has a question the command line never had: one process holds many documents at
+once, over one or more workspace folders, each of which may carry settings of its own and its own
+`protolang.config.xml`. Left to each client to answer, that becomes two settings models and a server
+receiving both dialects.
+
+Normative Requirements:
+
+- Configuration is resolved **for a document**, not for a session. Two documents open at once may
+  legitimately resolve different include paths and different policy.
+- The precedence order, most specific first, is: an editor setting for the workspace folder holding
+  the document; an editor setting for the workspace; an editor setting at user scope; the
+  `PROTOLANG_PROTOC` environment variable; and finally discovery -- `PATH`, then the NuGet package
+  cache. A setting beats the environment because a setting is the project's answer and the
+  environment is the machine's, and because the setting is the one the user can see in front of
+  them.
+- **Language policy is not host-configurable.** 10.4 says the file wins, and a host that could
+  restate a policy would make a buffer mean one thing on screen and another in the build. A host may
+  name a different `protolang.config.xml`, which is what `--config` does for the command line, and
+  may not state what is inside one.
+- **Anything the user wrote that is not being used is reported**, as a warning naming the scope it
+  was written at. A setting stating language policy (`PL2101`), a setting the host does not
+  recognize (`PL2102`), a path that is relative with nothing to resolve it against or that is not a
+  path at all (`PL2103`), a named configuration file that does not exist (`PL2104`), and a named
+  `protoc` that does not exist (`PL2105`). A setting ignored in silence leaves a user unable to tell
+  a typo from a refusal from a defect.
+- **A setting that is present and blank states nothing.** An editor writes an unset string setting as
+  the empty string rather than leaving it out, so blank is the ordinary shape of "no answer" and
+  falls through to the next source without comment.
+- **A configuration file that is found and cannot be read stops the document, and says so.**
+  `PL2106` is an error, not a warning, and names the file, how it came to be consulted, every problem
+  reported inside it with its position, and the fact that nothing is compiled for the document until
+  it is fixed. This is 10.4's rule applied to a host: a project that states a policy and is then
+  silently ignored is worse off than one that states nothing. The resolved configuration reports such
+  a file as *refused*, rather than reporting the defaults beside the file that in fact supplied none.
+- A relative path resolves against **the scope that supplied it**: a folder-scope setting against
+  that folder, a workspace-scope setting against the workspace -- or against the only open folder,
+  when the workspace has no file of its own -- and a user-scope setting against nothing, which is
+  reported and ignored. A setting that applies to every workspace on the machine names no one
+  directory, and resolving it against whichever folder the document happens to be in would give one
+  setting a different meaning in every project.
+- Include paths **accumulate** across scopes, most specific first, deduplicated. They are a search
+  order rather than a value, so a nearer scope adds to a further one instead of replacing it.
+- A document that belongs to no workspace folder resolves against workspace and user scope, and
+  discovers its policy file by walking up from its own directory as 10.4 requires. A document with
+  no path at all -- a buffer that has never been saved -- belongs to the only open folder when there
+  is exactly one, and to none otherwise.
+- **Two spellings of one path are one document and one cache entry.** Case where the file system
+  ignores case, a percent-encoded drive colon, a forward-slashed Windows path, a trailing separator,
+  and a URI against the path it names must all resolve to one identity.
+- **Every setting takes effect on the next compilation, and none requires a restart.** Work already
+  in flight keeps the configuration it began under and carries the generation of that configuration,
+  so a host can tell that a result it is handed was computed under settings that no longer apply.
+- The resolved configuration for a document, with the source each value came from, must be
+  retrievable.
+
+Implementation Note:
+
+- `WorkspaceConfiguration` in `ProtoLang.LanguageServer` is the model, and `Resolve` is the only
+  place the order above is applied. `ConfigurationSource` declares the order, and the resolver walks
+  that declaration rather than restating it.
+- `DocumentUri` is the single conversion between a URI and a path. Every spelling above is settled
+  there and in `PathIdentity`, which is where the compiler asks whether two paths are one path.
+- A configuration file named by a setting and then not found is a warning and a fall-through rather
+  than a stop, which is where a host deliberately differs from the command line: `--config` naming
+  nothing is refused outright, because a build must not quietly produce different code, while an
+  editor that went dark over a stale path in a settings file would take away the diagnostics the
+  user is trying to read. A file that exists and cannot be *read* still stops the document, exactly
+  as 10.4 requires.
+
+Open Question:
+
+- What a repository is allowed to configure in an untrusted workspace, which is a trust question
+  rather than a precedence one.
 
 ## 11. Strings
 
@@ -1719,10 +1805,14 @@ Code ranges:
 | `PL0001`–`PL0999` | The compiler front end: lexer, parser, binder |
 | `PL1001`–`PL1099` | The C# backend |
 | `PL1101`–`PL1199` | The C++ backend |
-| `PL2001`–`PL2999` | The driver and the configuration file (10.4) |
+| `PL2001`–`PL2099` | The driver and the configuration file (10.4) |
+| `PL2100`–`PL2199` | Host configuration: settings, scopes, and precedence (10.4.1) |
 
 A configuration diagnostic names `protolang.config.xml` and the line and column inside it, rather
-than a position in a `.protolang` source.
+than a position in a `.protolang` source. A host-configuration diagnostic has no file and no
+position at all: it names the scope the setting was written at — `<user settings>`,
+`<workspace settings>`, `<folder settings>`, `<environment>` — because a client sends settings as
+values rather than as the text of the file it read them from.
 
 Open Questions:
 
@@ -1935,3 +2025,4 @@ Use this table to record decisions as the language stabilizes.
 | 2026-08-30 | Import results | Import resolution is returned as per-import outcomes, and descriptor-load failures preserve the resolved import list (21.1, 22.1) | A count or empty list cannot distinguish an unwritten import, a not-found import, and a schema that was found but rejected by protoc. Tooling needs the declaration-to-file mapping even when descriptor loading fails | Draft |
 | 2026-08-30 | Symbols | The IR carries declaration sites and stable symbol IDs for ProtoLang declarations, and descriptor-based IDs for schema symbols (22.2) | Editor features, occurrence highlighting, and caching need identities that survive a rebind of unchanged text and do not collapse same-named locals or fields from different scopes/messages | Draft |
 | 2026-09-01 | Descriptor input | A load returns the whole descriptor set with its source info and the file each schema came from, and may be cached against the located protoc, the ordered include paths, and the content of the transitive closure (21.1) | Building descriptors and dropping the set paid protoc for source info on every run and then discarded it, which is exactly what resolving a schema declaration or its doc comment needs. Keying a cache on the files a compilation named would be wrong in five ways at once -- a transitively imported schema, a reordered include list, a file appearing in a root that was empty, a deletion, and protoc itself changing -- so correctness is defined over the closure protoc reports rather than over the request | Draft |
+| 2026-09-02 | Host configuration | A host resolves configuration per document under one documented precedence -- folder, then workspace, then user settings, then `PROTOLANG_PROTOC`, then discovery -- may point at a `protolang.config.xml` but never restate what is in one, and reports every setting it is ignoring (10.4.1) | Configuration already had three independent sources before an editor was involved, and the workspace adds a fourth axis the command line never had; leaving it to each client would have produced two settings models and a server receiving both. A setting beats the environment because it is the project's answer rather than the machine's, and the one the user can see. Policy stays in the file because 10.4's guarantee -- that generated code means the same thing however it was built -- is precisely what an editor-settable overflow mode would break. Reporting an ignored setting rather than dropping it is the difference between a user finding their own typo and filing a defect: they cannot otherwise tell a typo from a refusal | Draft |

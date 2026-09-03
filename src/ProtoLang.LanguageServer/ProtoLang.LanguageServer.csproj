@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>ProtoLang.LanguageServer</RootNamespace>
+  </PropertyGroup>
+
+  <!--
+    No LSP dependency yet, and no protocol types. #53 builds the configuration model the server
+    resolves settings with; #42 adds the host that speaks the protocol over it. The project exists
+    first so that the model lands where it is going to live, rather than in Core, which must not
+    learn about editors, or in a fourth project that would have to be folded in later.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\ProtoLang.Core\ProtoLang.Core.csproj" />
+  </ItemGroup>
+
+</Project>

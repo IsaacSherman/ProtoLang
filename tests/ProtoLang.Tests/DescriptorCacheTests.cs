@@ -261,16 +261,49 @@ public class DescriptorCacheTests
     }
 
     /// <summary>
-    /// Folding case here would answer a request for one schema with another schema's descriptors on
-    /// any file system that tells them apart, and the closure check could not catch it: the entry
-    /// names the file it really loaded, and that file really is unchanged. Two entries on Windows for
-    /// two spellings of one path is the price, and a duplicate entry is only a wasted protoc run.
+    /// A schema name is not a location. It is the string protoc echoes back as
+    /// <c>FileDescriptor.Name</c>, so folding case would answer a request for one schema with
+    /// descriptors named after another, and the closure check could not catch it: the entry names the
+    /// file it really loaded, and that file really is unchanged.
     /// </summary>
     [Fact]
     public void TwoSpellingsOfOneSchemaNameAreDifferentRequests()
+        => Assert.NotEqual(Request(protoFiles: ["leaf.proto"]), Request(protoFiles: ["Leaf.proto"]));
+
+    /// <summary>
+    /// An include root, by contrast, is a location, and two spellings of one directory are one place
+    /// for protoc to search. Keying them apart bought two entries and a second protoc run for the
+    /// same answer.
+    /// </summary>
+    [Fact]
+    public void ATrailingSeparatorOnAnIncludeRootDoesNotMakeASecondRequest()
     {
-        Assert.NotEqual(Request(protoFiles: ["leaf.proto"]), Request(protoFiles: ["Leaf.proto"]));
-        Assert.NotEqual(Request(includePaths: ["/schemas"]), Request(includePaths: ["/Schemas"]));
+        var bare = Request(includePaths: ["/schemas"]);
+        var trailing = Request(includePaths: ["/schemas" + Path.DirectorySeparatorChar]);
+
+        Assert.Equal(bare, trailing);
+        Assert.Equal(bare.GetHashCode(), trailing.GetHashCode());
+    }
+
+    /// <summary>
+    /// And case follows the file system rather than a fixed rule, because the two ways of being wrong
+    /// are not symmetric: merging two roots this platform tells apart would search the wrong
+    /// directory, where splitting one it does not costs a redundant entry.
+    /// </summary>
+    [Fact]
+    public void AnIncludeRootIsComparedTheWayThisPlatformComparesPaths()
+    {
+        var lower = Request(includePaths: ["/schemas"]);
+        var upper = Request(includePaths: ["/Schemas"]);
+
+        if (PathIdentity.IsCaseSensitive)
+        {
+            Assert.NotEqual(lower, upper);
+            return;
+        }
+
+        Assert.Equal(lower, upper);
+        Assert.Equal(lower.GetHashCode(), upper.GetHashCode());
     }
 
     [Fact]

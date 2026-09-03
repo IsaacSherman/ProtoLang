@@ -62,7 +62,7 @@ public static class ProtocLocator
             return FullPathOrAsGiven(protocPath);
         }
 
-        if (NamesALocation(protocPath))
+        if (PathIdentity.NamesALocation(protocPath))
         {
             return protocPath;
         }
@@ -77,11 +77,6 @@ public static class ProtocLocator
         => RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !Path.HasExtension(name)
             ? name + ".exe"
             : name;
-
-    private static bool NamesALocation(string path)
-        => Path.IsPathRooted(path)
-            || path.Contains(Path.DirectorySeparatorChar)
-            || path.Contains(Path.AltDirectorySeparatorChar);
 
     /// <remarks>
     /// Normalizing a path is not something this may fail at. The file is known to exist, so the guard
@@ -213,7 +208,7 @@ public static class ProtocLocator
             // Require a schema every protobuf distribution carries rather than trusting the
             // directory name, so a wrong guess never becomes a --proto_path pointing at nothing.
             if (File.Exists(Path.Combine(full, "google", "protobuf", "descriptor.proto"))
-                && !found.Contains(full, StringComparer.OrdinalIgnoreCase))
+                && !found.Contains(full, PathIdentity.Comparer))
             {
                 found.Add(full);
             }
