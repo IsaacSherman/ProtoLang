@@ -194,7 +194,14 @@ public sealed class LanguageServerHost : IDisposable
         var capabilities = message.Capabilities;
 
         _mapper = new DiagnosticMapper(capabilities?.TextDocument?.PublishDiagnostics?.RelatedInformation is true);
-        _log.Level = TraceLevel.Parse(message.Trace);
+
+        // Only when the client says something. A client that omits trace has stated no preference, and
+        // taking the default here would quietly undo a --log-level given on the command line -- which
+        // is the one thing somebody debugging a broken session has reached for.
+        if (message.Trace is { Length: > 0 } trace)
+        {
+            _log.Level = TraceLevel.Parse(trace);
+        }
 
         _configuration.Negotiate(capabilities);
         _configuration.SetFolders(FoldersOf(message));

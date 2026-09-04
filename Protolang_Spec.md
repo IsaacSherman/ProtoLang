@@ -885,6 +885,11 @@ Normative Requirements:
   path at all (`PL2103`), a named configuration file that does not exist (`PL2104`), and a named
   `protoc` that does not exist (`PL2105`). A setting ignored in silence leaves a user unable to tell
   a typo from a refusal from a defect.
+- **A named `protoc` that exists and still cannot be run stops the document**, as `PL2107`, an error.
+  It is deliberately not `PL2105`: that one is a warning and a fall-through, because the host can go
+  on to the next source, and here there is nowhere to fall through to. Falling back to a located
+  `protoc` instead would compile against an executable the settings do not name while the resolved
+  configuration went on reporting that the setting was in force.
 - **A setting that is present and blank states nothing.** An editor writes an unset string setting as
   the empty string rather than leaving it out, so blank is the ordinary shape of "no answer" and
   falls through to the next source without comment.

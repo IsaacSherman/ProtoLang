@@ -202,13 +202,14 @@ public sealed class CompileScheduler
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (IsStale(document, configuration))
+        // The staleness question is handed to the router rather than asked here, because the router's
+        // lock is the only thing that orders this publication against the withdrawal a close performs.
+        // Asked here, it could be answered "still fresh" and then overtaken by the close, leaving
+        // diagnostics on a document the editor has shut and nothing left that would ever clear them.
+        if (!await _router.PublishAsync(uri, contribution, () => IsStale(document, configuration)).ConfigureAwait(false))
         {
             _log.Trace($"Discarding a compilation of '{uri}' that no longer describes the buffer.");
-            return;
         }
-
-        await _router.PublishAsync(uri, contribution).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -238,6 +239,11 @@ public sealed class CompileScheduler
         // A protoc that was named and cannot be built into a loader stops this document. Falling back
         // to a located one would compile against a different executable than the settings state, while
         // this object went on reporting that the setting was in force.
+        //
+        // PL2107 rather than PL2105: 10.4.1 gives PL2105 to a named protoc that is not there, which is
+        // a warning and falls through to the next source. This one exists and still cannot be used, it
+        // is an error, and it stops the document -- a second meaning behind one code would leave a
+        // reader looking up a severity the code is documented never to have.
         if (!_loaders.TryGet(settings.ProtocPath, out var loader, out var failure) && settings.ProtocPath is not null)
         {
             var refused = new DiagnosticContribution();
@@ -247,10 +253,11 @@ public sealed class CompileScheduler
                 {
                     Range = DiagnosticMapper.WholeDocumentStart,
                     Severity = DiagnosticSeverity.Error,
-                    Code = "PL2105",
+                    Code = "PL2107",
                     Source = DiagnosticMapper.Source,
-                    Message = $"'{settings.ProtocPath}', from {settings.ProtocPathSource.Describe()}, could not "
-                        + $"be used: {failure?.Message}",
+                    Message = $"protoc could not be used: '{settings.ProtocPath}', from "
+                        + $"{settings.ProtocPathSource.Describe()}, exists but could not be prepared to run. "
+                        + $"{failure?.Message} Nothing is compiled for this document until it can be.",
                 });
 
             return WithConfiguration(refused, uri, settings, mapper);

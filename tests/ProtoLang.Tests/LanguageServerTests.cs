@@ -326,6 +326,11 @@ public class LanguageServerTests
         var published = await client.DiagnosticsAsync(uri, message => message.Diagnostics.Count > 0);
         var noImports = Assert.Single(published.Diagnostics, diagnostic => diagnostic.Code == "PL0001");
 
+        // The title, which LSP has no field for and which spec 26's own template puts first. Losing it
+        // costs most on PL0003, whose message is whatever protoc wrote and which then says nothing
+        // about who is speaking.
+        Assert.StartsWith("no proto imports:", noImports.Message, StringComparison.Ordinal);
+
         // PL0001's help says what to write instead. This client declared relatedInformation, so the
         // help arrives as its own item rather than run into the message.
         var help = Assert.Single(noImports.RelatedInformation!);
@@ -379,6 +384,42 @@ public class LanguageServerTests
         var cleared = await client.DiagnosticsAsync(uri, message => message.Diagnostics.Count == 0);
 
         Assert.Empty(cleared.Diagnostics);
+
+        // And they stay cleared. A compilation that was in flight when the close arrived must not
+        // publish afterwards: its owner is gone from the document store, so nothing would ever
+        // withdraw what it put back.
+        Assert.True(
+            await client.StaysSilentAboutAsync(uri, TimeSpan.FromMilliseconds(750)),
+            "a compilation published diagnostics for a document that had been closed");
+    }
+
+    /// <summary>
+    /// Below the protocol on purpose. What is being asserted is that the question "is this answer
+    /// still wanted?" is settled by the router rather than by its caller, and the failure it prevents
+    /// is a race whose losing interleaving cannot be produced on demand from the wire.
+    /// </summary>
+    [Fact]
+    public async Task AnAnswerThatWentStaleWhileItWasComputedIsRefusedRatherThanPublished()
+    {
+        var sent = new List<PublishDiagnosticsParams>();
+
+        var router = new DiagnosticRouter(
+            message =>
+            {
+                sent.Add(message);
+                return Task.CompletedTask;
+            },
+            _ => null);
+
+        var uri = ProtoLang.LanguageServer.Workspace.DocumentUri.FromPath(WriteDocument(NoImports));
+        var contribution = new DiagnosticContribution();
+        contribution.Add(uri, new Diagnostic { Message = "something was wrong" });
+
+        Assert.False(await router.PublishAsync(uri, contribution, stale: () => true));
+        Assert.Empty(sent);
+
+        Assert.True(await router.PublishAsync(uri, contribution, stale: () => false));
+        Assert.Single(sent);
     }
 
     [Fact]

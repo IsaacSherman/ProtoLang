@@ -87,14 +87,36 @@ public sealed class DiagnosticRouter(
     private readonly Dictionary<string, string> _lastPublished = new(StringComparer.Ordinal);
 
     /// <summary>Replaces everything <paramref name="owner"/> had to say.</summary>
-    public Task PublishAsync(DocumentUri owner, DiagnosticContribution contribution)
+    /// <param name="stale">
+    /// Asked, under the lock, whether the answer still describes anything. Its job is to order this
+    /// publication against a <see cref="ClearAsync"/> that may be happening at the same moment.
+    /// </param>
+    /// <returns>Whether the answer was published, as opposed to refused for being stale.</returns>
+    /// <remarks>
+    /// The predicate has to be evaluated here rather than by the caller beforehand, and the reason is
+    /// a race that costs a user real squiggles. A compile checks that its document is still open,
+    /// finds that it is, and is then descheduled; the close arrives, withdraws the document's
+    /// diagnostics, and removes it from the store; the compile resumes and publishes. The owner is
+    /// gone from everything that would later clear it, so the editor shows errors on a closed file
+    /// until the session ends. This lock is the only thing that orders a publication against a
+    /// withdrawal, so the question has to be asked while it is held.
+    /// </remarks>
+    public async Task<bool> PublishAsync(DocumentUri owner, DiagnosticContribution contribution, Func<bool>? stale = null)
     {
         ArgumentNullException.ThrowIfNull(owner);
         ArgumentNullException.ThrowIfNull(contribution);
 
         var replacement = contribution.Entries.ToDictionary(entry => entry.Uri.Key, StringComparer.Ordinal);
+        var messages = Settle(owner.Key, replacement, stale);
 
-        return SendAsync(Settle(owner.Key, replacement));
+        if (messages is null)
+        {
+            return false;
+        }
+
+        await SendAsync(messages).ConfigureAwait(false);
+
+        return true;
     }
 
     /// <summary>Withdraws everything <paramref name="owner"/> had to say, because it has closed.</summary>
@@ -102,7 +124,7 @@ public sealed class DiagnosticRouter(
     {
         ArgumentNullException.ThrowIfNull(owner);
 
-        return SendAsync(Settle(owner.Key, []));
+        return SendAsync(Settle(owner.Key, [], stale: null)!);
     }
 
     /// <summary>
@@ -112,14 +134,21 @@ public sealed class DiagnosticRouter(
     /// Under the lock, and it does no I/O: it decides what to send and returns it. Sending inside the
     /// lock would mean holding it across a write to a stream a slow client may not be reading.
     /// </remarks>
-    private List<PublishDiagnosticsParams> Settle(
+    /// <returns>What to send, or null when the answer was refused as stale.</returns>
+    private List<PublishDiagnosticsParams>? Settle(
         string owner,
-        Dictionary<string, DiagnosticContribution.Entry> replacement)
+        Dictionary<string, DiagnosticContribution.Entry> replacement,
+        Func<bool>? stale)
     {
         var messages = new List<PublishDiagnosticsParams>();
 
         lock (_gate)
         {
+            if (stale?.Invoke() == true)
+            {
+                return null;
+            }
+
             _byOwner.TryGetValue(owner, out var previous);
 
             if (replacement.Count == 0)
