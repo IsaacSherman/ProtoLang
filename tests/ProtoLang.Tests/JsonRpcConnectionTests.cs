@@ -63,6 +63,169 @@ public class JsonRpcConnectionTests
         }
     }
 
+    /// <summary>
+    /// Ending a conversation cancels the requests that are still running, and stops cleanly.
+    /// </summary>
+    /// <remarks>
+    /// The assumption the shutdown path rests on, made explicit. Requests still running are not swept
+    /// at shutdown, on the grounds that every one of them holds a cancellation source linked to the
+    /// connection's own -- so cancelling that one cancels them all, and a second pass over them would
+    /// only race the requests retiring themselves. That reasoning is only as good as the link: a
+    /// change that gave a request an unlinked source would leave running handlers waiting forever on
+    /// a connection that had already gone, and nothing else in the suite would notice.
+    /// </remarks>
+    [Fact]
+    public async Task EndingAConnectionCancelsARequestThatIsStillRunning()
+    {
+        await using var streams = new ConnectionHarness();
+
+        using var connection = new JsonRpcConnection(
+            streams.ToServer,
+            streams.FromServer,
+            new ServerLog { Mirror = TextWriter.Null });
+
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        connection.OnRequest(
+            "test/slow",
+            async (_, cancellationToken) =>
+            {
+                started.SetResult();
+
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    cancelled.SetResult();
+                    throw;
+                }
+
+                return null;
+            });
+
+        var serving = connection.RunAsync(TestContext.Current.CancellationToken);
+
+        await streams.ClientWriter.WriteAsync(
+                new
+                {
+                    jsonrpc = "2.0",
+                    id = 1,
+                    method = "test/slow",
+                },
+                TestContext.Current.CancellationToken);
+
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        streams.Complete();
+
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await serving.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>
+    /// Ending a conversation stops it cleanly, even though the requests it is ending are retiring
+    /// themselves at the same moment.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A stress test, and it says so rather than pretending otherwise. <c>Stop</c> releases every
+    /// in-flight handler before shutdown finishes -- they all wait on tokens linked to the
+    /// connection's own -- so the dispatcher retires and disposes cancellation sources on one thread
+    /// while shutdown walks the same collections on another. The window is microseconds wide and
+    /// cannot be opened on command.
+    /// </para>
+    /// <para>
+    /// So it is widened honestly rather than waited for. The pending client requests are the lever:
+    /// shutdown cancels those first, and five thousand of them take long enough that the dispatcher
+    /// has retired real work before the second collection is reached. Without that the shutdown path
+    /// finishes in microseconds and wins every time -- this test passed against the defect until the
+    /// requests were added, which is exactly the sort of test worth not shipping.
+    /// </para>
+    /// <para>
+    /// Twenty shutdowns, and twenty is not a number arrived at by arithmetic. Whether a run collides
+    /// at all turns out to be settled before the first shutdown -- by how many threads the pool has
+    /// warm, most likely -- so runs are bimodal and more iterations buy almost nothing: against the
+    /// defect, twelve caught it five times in six, fifty also five in six, and twenty nine times in
+    /// ten. Twenty is the cheapest of those. A green from this test is evidence and not a proof,
+    /// which is why the guarantee is asserted separately, by the test above.
+    /// </para>
+    /// <para>
+    /// The cost of the defect is why it earns a two-second test. Shutdown runs inside a
+    /// <c>finally</c>: an <see cref="ObjectDisposedException"/> there skips the await on the
+    /// dispatcher, leaves the rest of the outstanding work uncancelled, and faults the task whose
+    /// caller is entitled to a clean stop -- so a shutdown that succeeded is reported as a crash.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task EndingAConnectionWhileItsRequestsRetireThemselvesNeverFaultsIt()
+    {
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            await using var streams = new ConnectionHarness();
+
+            using var connection = new JsonRpcConnection(
+                streams.ToServer,
+                streams.FromServer,
+                new ServerLog { Mirror = TextWriter.Null });
+
+            var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            connection.OnRequest(
+                "test/slow",
+                async (_, cancellationToken) =>
+                {
+                    started.TrySetResult();
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    return null;
+                });
+
+            var serving = connection.RunAsync(TestContext.Current.CancellationToken);
+
+            // One of these runs and the rest queue behind it, but every one of them has a cancellation
+            // source registered the moment it is read -- so the sweep has a hundred entries to walk.
+            for (var id = 1; id <= 100; id++)
+            {
+                await streams.ClientWriter.WriteAsync(
+                        new
+                        {
+                            jsonrpc = "2.0",
+                            id,
+                            method = "test/slow",
+                        },
+                        TestContext.Current.CancellationToken);
+            }
+
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            // Not decoration: see the remarks. These are what give the dispatcher time to retire a
+            // request while shutdown is still working through what is outstanding.
+            var asking = new List<Task>();
+            for (var ask = 0; ask < 5000; ask++)
+            {
+                asking.Add(connection.RequestAsync<object>("test/ask", null, CancellationToken.None));
+            }
+
+            streams.Complete();
+
+            // The assertion is that this returns rather than throws.
+            await serving.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            foreach (var ask in asking)
+            {
+                try
+                {
+                    await ask;
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+        }
+    }
+
     private static async Task<IncomingMessage> ReadAsync(MessageReader reader)
     {
         var body = await reader.ReadAsync(TestContext.Current.CancellationToken);

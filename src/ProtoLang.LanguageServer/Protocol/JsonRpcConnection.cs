@@ -454,20 +454,28 @@ public sealed class JsonRpcConnection : IDisposable
     }
 
     /// <remarks>
+    /// <para>
     /// Anything still waiting on the client is told the conversation is over. Without this, a handler
     /// blocked on <c>workspace/configuration</c> when the client exits waits forever, and the process
-    /// never leaves.
+    /// never leaves. These are the ones that need saying: a pending request's completion is cancelled
+    /// through the caller's own token, and a caller is entitled to pass one that never cancels.
+    /// </para>
+    /// <para>
+    /// The requests still <em>running</em> are deliberately not swept, and it took a crash to notice
+    /// why they should not be. Every source in <c>_running</c> is linked to <see cref="_stopping"/>,
+    /// which <see cref="Stop"/> cancelled on the line above, so each of them is already cancelled by
+    /// the time this runs and a second cancel achieves nothing. What it does achieve is touching a
+    /// source that the request retiring itself on another thread is disposing at that moment -- and
+    /// the resulting <see cref="ObjectDisposedException"/> escapes a <c>finally</c>, so the rest of
+    /// the outstanding work goes uncancelled, the dispatcher is never awaited, and a clean shutdown
+    /// is reported to its caller as a crash. A redundant loop is a poor thing to pay that for.
+    /// </para>
     /// </remarks>
     private void CancelEverythingOutstanding()
     {
         foreach (var completion in _pending.Values)
         {
             completion.TrySetCanceled();
-        }
-
-        foreach (var cancellation in _running.Values)
-        {
-            CancelQuietly(cancellation);
         }
     }
 }
