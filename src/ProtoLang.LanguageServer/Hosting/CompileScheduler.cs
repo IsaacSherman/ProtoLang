@@ -178,10 +178,13 @@ public sealed class CompileScheduler
         }
         finally
         {
-            if (_pending.TryGetValue(document.Key, out var current) && ReferenceEquals(current, cancellation))
-            {
-                _pending.TryRemove(document.Key, out _);
-            }
+            // Both halves of "remove it only if it is still mine" in one operation. Looking first and
+            // removing afterwards is two, and a keystroke lands between them: Schedule replaces this
+            // entry with the compile it just superseded this one for, and this line then removes that
+            // one instead. What is left is a compile nothing holds a handle to -- the next edit cannot
+            // supersede it and closing the document cannot cancel it, so it runs to completion holding
+            // a concurrency slot to publish an answer about text that has already moved on.
+            _pending.TryRemove(KeyValuePair.Create(document.Key, cancellation));
         }
     }
 

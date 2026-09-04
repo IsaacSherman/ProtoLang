@@ -81,6 +81,29 @@ public sealed class DiagnosticRouter(
 {
     private readonly Lock _gate = new();
 
+    /// <summary>What has been settled and not yet written, in the order it was settled.</summary>
+    /// <remarks>
+    /// <para>
+    /// Settling and writing were one step, and the order they happened in was whatever order the
+    /// threads doing them woke up in. That is how a client ends up holding the older of two answers:
+    /// a compile settles, is descheduled before it writes, a close settles and writes its empty list,
+    /// and then the compile writes the diagnostics the close had just withdrawn. Nothing corrects it
+    /// afterwards, because <see cref="_lastPublished"/> already records the newer state and so the
+    /// next comparison finds nothing to say.
+    /// </para>
+    /// <para>
+    /// The obvious repair -- hold the lock across the write -- trades that bug for a worse one. A
+    /// close would then wait on a write that a slow client has stalled, and closing a document is
+    /// handled on the one worker that reads every other notification, so the whole server would stop
+    /// with it. Queueing separates the two: the order is fixed when a message is settled, and the
+    /// thread that settled it is free to leave.
+    /// </para>
+    /// </remarks>
+    private readonly Queue<PublishDiagnosticsParams> _outbox = new();
+
+    /// <summary>The tail of the chain that drains <see cref="_outbox"/>, one message at a time.</summary>
+    private Task _pumping = Task.CompletedTask;
+
     private readonly Dictionary<string, Dictionary<string, DiagnosticContribution.Entry>> _byOwner =
         new(StringComparer.Ordinal);
 
@@ -107,32 +130,94 @@ public sealed class DiagnosticRouter(
         ArgumentNullException.ThrowIfNull(contribution);
 
         var replacement = contribution.Entries.ToDictionary(entry => entry.Uri.Key, StringComparer.Ordinal);
-        var messages = Settle(owner.Key, replacement, stale);
 
-        if (messages is null)
+        Task pumping;
+
+        lock (_gate)
         {
-            return false;
+            var messages = Settle(owner.Key, replacement, stale);
+
+            if (messages is null)
+            {
+                return false;
+            }
+
+            pumping = Enqueue(messages);
         }
 
-        await SendAsync(messages).ConfigureAwait(false);
+        // Waited for, unlike a clear: this runs on a compile worker, and a compile worker blocking
+        // while the client catches up is the backpressure that stops work piling up faster than it can
+        // be reported. #54 owns the bound that makes that a queue rather than a stall.
+        await pumping.ConfigureAwait(false);
 
         return true;
     }
 
     /// <summary>Withdraws everything <paramref name="owner"/> had to say, because it has closed.</summary>
+    /// <remarks>
+    /// Returns once the withdrawal is settled and queued, without waiting for it to be written. A
+    /// close is handled on the worker that reads every other notification, so a close that waited on a
+    /// stalled client would stop the server from reading anything at all. The ordering that matters is
+    /// already fixed: whatever was settled before this is written before it, and whatever comes after
+    /// is written after.
+    /// </remarks>
     public Task ClearAsync(DocumentUri owner)
     {
         ArgumentNullException.ThrowIfNull(owner);
 
-        return SendAsync(Settle(owner.Key, [], stale: null)!);
+        lock (_gate)
+        {
+            Enqueue(Settle(owner.Key, [], stale: null)!);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Adds messages to the outbox and makes sure something is draining it.</summary>
+    /// <remarks>
+    /// Called with <see cref="_gate"/> held, so the order messages enter the queue is the order they
+    /// were settled in. The drain is chained onto the previous one rather than started beside it,
+    /// which is what makes the writes serial; it is started on the thread pool rather than inline so
+    /// that it cannot begin while the caller still holds the lock it needs.
+    /// </remarks>
+    private Task Enqueue(List<PublishDiagnosticsParams> messages)
+    {
+        foreach (var message in messages)
+        {
+            _outbox.Enqueue(message);
+        }
+
+        _pumping = _pumping.ContinueWith(_ => DrainAsync(), TaskScheduler.Default).Unwrap();
+
+        return _pumping;
+    }
+
+    private async Task DrainAsync()
+    {
+        while (true)
+        {
+            PublishDiagnosticsParams message;
+
+            lock (_gate)
+            {
+                if (_outbox.Count == 0)
+                {
+                    return;
+                }
+
+                message = _outbox.Dequeue();
+            }
+
+            await publish(message).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
     /// Swaps in one owner's answer and works out which files that changed the published set for.
     /// </summary>
     /// <remarks>
-    /// Under the lock, and it does no I/O: it decides what to send and returns it. Sending inside the
-    /// lock would mean holding it across a write to a stream a slow client may not be reading.
+    /// Called with <see cref="_gate"/> already held, and it does no I/O of its own: it decides what to
+    /// send and hands it back to a caller that is still holding the gate while it writes.
     /// </remarks>
     /// <returns>What to send, or null when the answer was refused as stale.</returns>
     private List<PublishDiagnosticsParams>? Settle(
@@ -142,63 +227,60 @@ public sealed class DiagnosticRouter(
     {
         var messages = new List<PublishDiagnosticsParams>();
 
-        lock (_gate)
+        if (stale?.Invoke() == true)
         {
-            if (stale?.Invoke() == true)
+            return null;
+        }
+
+        _byOwner.TryGetValue(owner, out var previous);
+
+        if (replacement.Count == 0)
+        {
+            _byOwner.Remove(owner);
+        }
+        else
+        {
+            _byOwner[owner] = replacement;
+        }
+
+        // Everything this owner touches now, plus everything it used to touch: the second half is
+        // what clears a file the owner has stopped having an opinion about.
+        var affected = new Dictionary<string, DocumentUri>(StringComparer.Ordinal);
+        foreach (var entry in replacement.Values)
+        {
+            affected[entry.Uri.Key] = entry.Uri;
+        }
+
+        foreach (var entry in previous?.Values ?? Enumerable.Empty<DiagnosticContribution.Entry>())
+        {
+            affected[entry.Uri.Key] = entry.Uri;
+        }
+
+        foreach (var (key, uri) in affected)
+        {
+            var merged = Merge(key);
+            var signature = SignatureOf(merged);
+
+            if (_lastPublished.TryGetValue(key, out var sent) && string.Equals(sent, signature, StringComparison.Ordinal))
             {
-                return null;
+                continue;
             }
 
-            _byOwner.TryGetValue(owner, out var previous);
-
-            if (replacement.Count == 0)
+            if (merged.Count == 0)
             {
-                _byOwner.Remove(owner);
+                _lastPublished.Remove(key);
             }
             else
             {
-                _byOwner[owner] = replacement;
+                _lastPublished[key] = signature;
             }
 
-            // Everything this owner touches now, plus everything it used to touch: the second half is
-            // what clears a file the owner has stopped having an opinion about.
-            var affected = new Dictionary<string, DocumentUri>(StringComparer.Ordinal);
-            foreach (var entry in replacement.Values)
+            messages.Add(new PublishDiagnosticsParams
             {
-                affected[entry.Uri.Key] = entry.Uri;
-            }
-
-            foreach (var entry in previous?.Values ?? Enumerable.Empty<DiagnosticContribution.Entry>())
-            {
-                affected[entry.Uri.Key] = entry.Uri;
-            }
-
-            foreach (var (key, uri) in affected)
-            {
-                var merged = Merge(key);
-                var signature = SignatureOf(merged);
-
-                if (_lastPublished.TryGetValue(key, out var sent) && string.Equals(sent, signature, StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                if (merged.Count == 0)
-                {
-                    _lastPublished.Remove(key);
-                }
-                else
-                {
-                    _lastPublished[key] = signature;
-                }
-
-                messages.Add(new PublishDiagnosticsParams
-                {
-                    Uri = uri.Text,
-                    Version = versionOf(uri),
-                    Diagnostics = merged,
-                });
-            }
+                Uri = uri.Text,
+                Version = versionOf(uri),
+                Diagnostics = merged,
+            });
         }
 
         return messages;
@@ -227,14 +309,6 @@ public sealed class DiagnosticRouter(
         }
 
         return merged;
-    }
-
-    private async Task SendAsync(List<PublishDiagnosticsParams> messages)
-    {
-        foreach (var message in messages)
-        {
-            await publish(message).ConfigureAwait(false);
-        }
     }
 
     /// <remarks>

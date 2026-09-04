@@ -10,6 +10,41 @@ namespace ProtoLang.Tests;
 public class LanguageServerDiagnosticRoutingTests
 {
     [Fact]
+    public async Task ANewerDiagnosticStateCannotBeOvertakenByAnEarlierWrite()
+    {
+        var uri = DocumentUri.FromPath(Path.Combine(TestPaths.CreateTempDirectory(), "source.protolang"));
+        var oldAnswerReachedTheWriter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowOldAnswerToWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sent = new List<PublishDiagnosticsParams>();
+
+        var router = new DiagnosticRouter(
+            async message =>
+            {
+                if (message.Diagnostics.Any(diagnostic => diagnostic.Message == "old"))
+                {
+                    oldAnswerReachedTheWriter.TrySetResult();
+                    await allowOldAnswerToWrite.Task.WaitAsync(TestContext.Current.CancellationToken);
+                }
+
+                sent.Add(message);
+            },
+            _ => 1);
+
+        var old = new DiagnosticContribution();
+        old.Add(uri, new Diagnostic { Message = "old" });
+
+        var publishingOld = router.PublishAsync(uri, old);
+        await oldAnswerReachedTheWriter.Task.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+
+        await router.ClearAsync(uri);
+
+        allowOldAnswerToWrite.TrySetResult();
+        await publishingOld;
+
+        Assert.Empty(sent[^1].Diagnostics);
+    }
+
+    [Fact]
     public async Task ConfigFileDiagnosticsArePublishedAgainstTheConfigFileRatherThanTheSourceDocument()
     {
         var directory = TestPaths.CreateTempDirectory();
