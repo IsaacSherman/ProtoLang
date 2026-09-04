@@ -61,11 +61,16 @@ public sealed class DiagnosticMapper(bool relatedInformationSupported)
     /// </remarks>
     public static Range WholeDocumentStart { get; } = new(new Position(0, 0), new Position(0, 0));
 
-    public Diagnostic Map(ProtoLang.Diagnostics.Diagnostic diagnostic, string uri)
+    /// <param name="at">
+    /// Where to draw it, when the caller knows better than the span does. Used for a diagnostic whose
+    /// position is a position in some other file: publishing it at that position against this document
+    /// would be a squiggle on an unrelated line, or past the end of the text.
+    /// </param>
+    public Diagnostic Map(ProtoLang.Diagnostics.Diagnostic diagnostic, string uri, Range? at = null)
     {
         ArgumentNullException.ThrowIfNull(diagnostic);
 
-        var range = RangeOf(diagnostic.Span);
+        var range = at ?? RangeOf(diagnostic.Span);
         var help = diagnostic.Help;
         var message = $"{diagnostic.Title}: {diagnostic.Message}";
 

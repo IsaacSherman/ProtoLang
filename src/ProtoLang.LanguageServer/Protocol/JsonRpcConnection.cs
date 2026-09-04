@@ -284,20 +284,28 @@ public sealed class JsonRpcConnection : IDisposable
             return;
         }
 
-        if (!_running.TryGetValue(id.ToString(), out var cancellation))
+        if (_running.TryGetValue(id.ToString(), out var cancellation))
         {
-            return;
+            CancelQuietly(cancellation);
         }
+    }
 
+    /// <summary>Cancels a source that another thread may already have finished with.</summary>
+    /// <remarks>
+    /// A running request's source stays reachable until the request answers, so a cancel and the
+    /// retirement of the very request it names can overlap. Both callers run somewhere an exception
+    /// would cost more than the cancel is worth: one is the read loop, where it would end the
+    /// conversation over a request that had already been answered, and the other is the shutdown path,
+    /// where it would leave the rest of the outstanding work uncancelled.
+    /// </remarks>
+    private static void CancelQuietly(CancellationTokenSource cancellation)
+    {
         try
         {
             cancellation.Cancel();
         }
         catch (ObjectDisposedException)
         {
-            // The request finished between the lookup and the cancel, and its handler disposed the
-            // source it owned. There is nothing left to cancel, and this runs on the read loop, where
-            // an exception would end the conversation over a request that had already been answered.
         }
     }
 
@@ -326,13 +334,17 @@ public sealed class JsonRpcConnection : IDisposable
         var id = message.Id!.Value;
         var key = id.ToString();
 
-        _running.TryRemove(key, out var cancellation);
-        using var owned = cancellation;
+        // Looked up, not taken. The entry has to stay reachable for as long as the handler runs, or
+        // $/cancelRequest can only reach a request that is still queued -- which is the half of
+        // cancellation that does not matter. A request worth cancelling is one that has started.
+        _running.TryGetValue(key, out var cancellation);
 
-        var token = owned?.Token ?? _stopping.Token;
+        var token = cancellation?.Token ?? _stopping.Token;
 
         if (!_requests.TryGetValue(message.Method!, out var handler))
         {
+            Retire(key, cancellation);
+
             await SendAsync(
                     ResponseMessage.Failure(
                         id,
@@ -369,6 +381,23 @@ public sealed class JsonRpcConnection : IDisposable
             _log.Error($"'{message.Method}' failed.", ex);
             await SendAsync(ResponseMessage.Failure(id, ErrorCodes.InternalError, ex.Message)).ConfigureAwait(false);
         }
+        finally
+        {
+            Retire(key, cancellation);
+        }
+    }
+
+    /// <summary>Forgets a finished request, and releases what its cancellation source was holding.</summary>
+    /// <remarks>
+    /// Disposed rather than dropped, because each source is linked to <see cref="_stopping"/> and a
+    /// registration on that token would otherwise accumulate for the life of the connection -- one per
+    /// request, over a working day. A <c>$/cancelRequest</c> that read the entry a moment before this
+    /// runs may cancel a disposed source; <see cref="Cancel"/> expects that and says why.
+    /// </remarks>
+    private void Retire(string key, CancellationTokenSource? cancellation)
+    {
+        _running.TryRemove(key, out _);
+        cancellation?.Dispose();
     }
 
     private async Task ActAsync(IncomingMessage message)
@@ -438,7 +467,7 @@ public sealed class JsonRpcConnection : IDisposable
 
         foreach (var cancellation in _running.Values)
         {
-            cancellation.Cancel();
+            CancelQuietly(cancellation);
         }
     }
 }

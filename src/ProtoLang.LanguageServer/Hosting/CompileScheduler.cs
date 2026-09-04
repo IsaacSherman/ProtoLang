@@ -305,16 +305,56 @@ public sealed class CompileScheduler
     {
         contribution.Claim(uri);
 
+        var configuration = settings.ConfigPath is { } path && DocumentUri.TryParse(path, out var file) ? file : null;
+
         foreach (var diagnostic in settings.Diagnostics)
         {
-            contribution.Add(uri, mapper.Map(diagnostic, uri.Text));
+            Attribute(contribution, uri, configuration, diagnostic, mapper);
         }
 
         foreach (var diagnostic in _configuration.SettingsDiagnostics)
         {
-            contribution.Add(uri, mapper.Map(diagnostic, uri.Text));
+            Attribute(contribution, uri, configuration, diagnostic, mapper);
         }
 
         return contribution;
+    }
+
+    /// <summary>Files one configuration diagnostic against the document its position is a position in.</summary>
+    /// <remarks>
+    /// <para>
+    /// A configuration diagnostic is not always about the document being compiled, and the two kinds
+    /// look nothing alike. <c>ProjectConfig.Load</c> reports a line and a column inside
+    /// <c>protolang.config.xml</c>: published against the source buffer, an invalid value on line 4 of
+    /// the configuration file draws a squiggle on line 4 of the source, which is a different file
+    /// saying a different thing -- or past the end of it, on a source shorter than the configuration.
+    /// The file it belongs to is <see cref="DocumentConfiguration.ConfigPath"/>, the same file
+    /// <c>PL2106</c> names.
+    /// </para>
+    /// <para>
+    /// A diagnostic with no position is the other kind: a setting being ignored, a path that would not
+    /// resolve, the refusal summary itself. Those belong on the document, at its start, because what
+    /// they are about is this document not compiling. They stay there.
+    /// </para>
+    /// <para>
+    /// The fallback is the document at its start rather than the document at the position, for a
+    /// located diagnostic whose file cannot be turned into a URI. A range that is honestly wrong is
+    /// worse than one that admits it knows nothing: the message already names the file.
+    /// </para>
+    /// </remarks>
+    private static void Attribute(
+        DiagnosticContribution contribution,
+        DocumentUri document,
+        DocumentUri? configuration,
+        Diagnostics.Diagnostic diagnostic,
+        DiagnosticMapper mapper)
+    {
+        if (!diagnostic.Span.IsNone && configuration is not null)
+        {
+            contribution.Add(configuration, mapper.Map(diagnostic, configuration.Text));
+            return;
+        }
+
+        contribution.Add(document, mapper.Map(diagnostic, document.Text, DiagnosticMapper.WholeDocumentStart));
     }
 }

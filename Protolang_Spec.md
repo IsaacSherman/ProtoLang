@@ -1898,8 +1898,17 @@ Normative Requirements:
   include path, an ignored setting, a refused configuration file: none is anywhere in the source, and
   all of them have to be seen. It is never converted from the 1-based scheme, which for a
   `SourceSpan.None` would name line zero minus one.
-- A configuration diagnostic (10.4.1) is published against **every** open document, because that is
-  the extent of what it affects.
+- **A diagnostic that does have a position is published against the file that position is in**, which
+  is not always the file being compiled. A `protolang.config.xml` reports a line and a column inside
+  itself, and a `protoc` failure reports a line and a column inside a `.proto`; published against the
+  source buffer instead, an error on line 4 of the configuration file becomes a squiggle on line 4 of
+  a source that says something else entirely, or past the end of a source shorter than it. Where the
+  named file cannot be resolved to a document, the diagnostic goes to the document being compiled at
+  its start rather than at that position: a range that is honestly wrong is worse than one that admits
+  it knows nothing, and the message names the file either way.
+- A configuration diagnostic with no position (10.4.1) is published against **every** open document,
+  because that is the extent of what it affects. The ones with positions belong to the configuration
+  file, and are published once however many documents that file governs.
 - **A `protoc` failure is published in the `.proto` it names, at the position it gave, and summarized
   on the `import proto` declaration that reached that schema.** The import line is not optional: a
   reader looking at a ProtoLang buffer whose schema is broken must not be shown an empty problem
