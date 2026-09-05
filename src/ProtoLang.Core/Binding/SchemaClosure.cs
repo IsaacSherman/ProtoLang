@@ -106,6 +106,16 @@ public static class SchemaClosure
         return new SchemaFile(name, path, path is null ? null : Hash(path));
     }
 
+    /// <summary>The content hash of bytes already in hand, which is the hash a description records.</summary>
+    /// <remarks>
+    /// Published because a second consumer arrived. Resolving a schema declaration reads the
+    /// <c>.proto</c> to convert protoc's columns into real ones, and it may only trust what it read
+    /// if it can tell that those bytes are the bytes protoc compiled -- which means hashing them the
+    /// way the closure did. Two spellings of one hash would eventually disagree, and the way that
+    /// would show up is go-to-definition declining on files nobody had touched.
+    /// </remarks>
+    public static string HashOf(ReadOnlySpan<byte> bytes) => Convert.ToHexString(SHA256.HashData(bytes));
+
     /// <remarks>
     /// A file the compiler can see but cannot read gets a hash that will never match another, so the
     /// entry is treated as changed every time it is examined. That costs a protoc run this compiler
@@ -117,7 +127,7 @@ public static class SchemaClosure
     {
         try
         {
-            return Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
+            return HashOf(File.ReadAllBytes(path));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

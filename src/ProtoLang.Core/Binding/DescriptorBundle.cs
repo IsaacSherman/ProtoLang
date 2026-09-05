@@ -173,7 +173,8 @@ public sealed class DescriptorBundle
     /// <see cref="SchemaDeclaration.Site"/> is null, or whose documentation is empty, means the file
     /// is here and the information is not: a schema with no comments, a descriptor set built without
     /// source info, a well-known type protoc resolved from its own compiled-in descriptors, a file
-    /// that could not be read. Each of those is ordinary and none of them is an error.
+    /// that could not be read, a file that has been edited since the descriptors were built. Each of
+    /// those is ordinary and none of them is an error.
     /// </para>
     /// <para>
     /// The answer describes what <em>this</em> bundle holds. A descriptor from another load with the
@@ -216,10 +217,11 @@ public sealed class DescriptorBundle
         => SourceOf(schemaName)?.DeclarationOf(symbol);
 
     /// <remarks>
-    /// Both halves come from this bundle: the built tree supplies the identities and the index of
-    /// each element within its parent, and the unbuilt one supplies the source info those indices
-    /// address. Taking either from anywhere else would be reading one file's source info against
-    /// another file's shape.
+    /// Every part comes from this bundle: the built tree supplies the identities and the index of
+    /// each element within its parent, the unbuilt one supplies the source info those indices
+    /// address, and the closure entry says which file to measure the positions against and how to
+    /// tell whether it is still the file protoc read. Taking any of them from anywhere else would be
+    /// reading one file's source info against another file's shape.
     /// </remarks>
     private SchemaSourceIndex? SourceOf(string schemaName)
     {
@@ -231,6 +233,6 @@ public sealed class DescriptorBundle
 
         return _sources.GetOrAdd(
             schemaName,
-            _ => SchemaSourceIndex.For(descriptor, proto, PathFor(schemaName)));
+            _ => SchemaSourceIndex.For(descriptor, proto, _files.GetValueOrDefault(schemaName)));
     }
 }

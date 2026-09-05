@@ -1,3 +1,4 @@
+using System.Text;
 using Google.Protobuf.Reflection;
 using ProtoLang.Diagnostics;
 using ProtoLang.Symbols;
@@ -45,10 +46,13 @@ internal sealed class SchemaSourceIndex
     /// <summary>Reads one file's source info into declarations.</summary>
     /// <param name="descriptor">The built tree, which supplies the identities and the path indices.</param>
     /// <param name="proto">The same file unbuilt, which is where the source info is.</param>
-    /// <param name="path">The file on disk, or null when nothing on disk backs this schema.</param>
-    public static SchemaSourceIndex For(FileDescriptor descriptor, FileDescriptorProto proto, string? path)
+    /// <param name="file">
+    /// What the closure recorded about the schema on disk: the file to read the positions against,
+    /// and the hash that says whether it is still the file protoc read.
+    /// </param>
+    public static SchemaSourceIndex For(FileDescriptor descriptor, FileDescriptorProto proto, SchemaFile? file)
     {
-        var builder = new Builder(descriptor.Name, LocationsByPath(proto), SchemaText.Read(path));
+        var builder = new Builder(descriptor.Name, LocationsByPath(proto), SchemaText.Read(file));
 
         builder.AddFile(descriptor);
 
@@ -214,9 +218,8 @@ internal sealed class SchemaSourceIndex
         /// <summary>The range a protoc location names, in this compiler's coordinates.</summary>
         /// <remarks>
         /// A span is <c>[startLine, startColumn, endLine, endColumn]</c>, or three elements when the
-        /// declaration is on one line, and both coordinates are 0-based. Null when it names nothing
-        /// this text has -- a file edited since protoc read it, which resolves on the next compile
-        /// because the closure hash no longer matches.
+        /// declaration is on one line, and both coordinates are 0-based. Null when it names a line
+        /// the text does not have, or a column before the start of one.
         /// </remarks>
         private SourceSpan? SpanOf(SchemaText source, Location location)
         {
@@ -292,19 +295,48 @@ internal sealed class SchemaSourceIndex
     /// needs the text -- and the text is needed anyway, because a <see cref="SourceSpan"/> carries an
     /// offset as well as a line and a column, and neither can be derived from the other without it.
     /// </para>
+    /// <para>
+    /// <b>Which makes the text part of the answer, and so something to be sure of.</b> The file is
+    /// read when the first question about the schema is asked, which can be long after protoc read
+    /// it, and a location that no longer describes the text does not announce itself: line and column
+    /// both clamp, so a stale location resolves to a plausible range over the wrong characters rather
+    /// than to nothing. The bytes are therefore hashed and checked against what the closure recorded
+    /// before any position is derived from them, and a file that has moved on has no positions at
+    /// all. The one gap that leaves is the closure's own -- a write landing between protoc reading a
+    /// file and <see cref="SchemaClosure"/> hashing it is recorded as though it were the compiled
+    /// text -- which is bounded by a single protoc invocation and written down where that description
+    /// is made.
+    /// </para>
     /// </remarks>
     private sealed class SchemaText
     {
         /// <summary>What protoc's tokenizer advances a tab to a multiple of.</summary>
         private const int TabWidth = 8;
 
+        private static readonly byte[] Utf8ByteOrderMark = [0xEF, 0xBB, 0xBF];
+
         private readonly string _text;
         private readonly LineMap _map;
 
-        private SchemaText(string path, string text)
+        /// <summary>
+        /// How many bytes of the file this text does not begin with, which is three for a schema
+        /// saved with a byte-order mark and zero otherwise.
+        /// </summary>
+        /// <remarks>
+        /// protoc counts the mark. Its tokenizer reads bytes and the mark is three of them, so every
+        /// column it reports on the <em>first</em> line is three further along than the character it
+        /// means; later lines are unaffected, because the column resets at each newline. The text
+        /// here does not carry the mark -- carrying it would put a character before offset zero of
+        /// the file, which nothing else in the compiler expects -- so the difference is subtracted
+        /// where it applies rather than pretended away.
+        /// </remarks>
+        private readonly int _markBytes;
+
+        private SchemaText(string path, string text, int markBytes)
         {
             Path = path;
             _text = text;
+            _markBytes = markBytes;
             _map = new LineMap(text);
         }
 
@@ -314,34 +346,65 @@ internal sealed class SchemaSourceIndex
         /// </summary>
         public string Path { get; }
 
-        /// <summary>Reads the file, or answers null when there is nothing to read or it cannot be read.</summary>
+        /// <summary>
+        /// Reads the file, or answers null when there is nothing to read, it cannot be read, or its
+        /// bytes are no longer the bytes protoc compiled.
+        /// </summary>
         /// <remarks>
+        /// <para>
         /// A locked or deleted schema is a thing an editor meets, and it means "no location", not a
         /// failed compilation. <see cref="SchemaClosure"/> takes the same view of the same files.
+        /// </para>
+        /// <para>
+        /// So is an edited one, and it is the more dangerous of the two: the descriptors describe the
+        /// file as it was, and an editor that saves a comment into a schema between the compile and
+        /// the hover would otherwise be sent to a range computed from the old text and clamped into
+        /// the new. The recorded hash is what settles it, and both sides of the comparison come from
+        /// <see cref="SchemaClosure.HashOf"/> so that they cannot drift apart. A schema whose
+        /// description carries no hash is treated the same way, because a claim that cannot be
+        /// checked is not one to navigate on.
+        /// </para>
+        /// <para>
+        /// Decoded here rather than through <c>File.ReadAllText</c>, which reads the bytes a second
+        /// time and hides whether there was a byte-order mark -- the one thing about the encoding that
+        /// changes what a column means. UTF-8 without inference, which is what a <c>.proto</c> is.
+        /// </para>
         /// </remarks>
-        public static SchemaText? Read(string? path)
+        public static SchemaText? Read(SchemaFile? file)
         {
-            if (path is null)
+            if (file is not { Path: { } path, ContentHash: { } hash })
             {
                 return null;
             }
 
+            byte[] bytes;
             try
             {
-                return new SchemaText(path, File.ReadAllText(path));
+                bytes = File.ReadAllBytes(path);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 return null;
             }
+
+            if (!string.Equals(SchemaClosure.HashOf(bytes), hash, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var mark = bytes.AsSpan().StartsWith(Utf8ByteOrderMark) ? Utf8ByteOrderMark.Length : 0;
+
+            return new SchemaText(path, Encoding.UTF8.GetString(bytes.AsSpan(mark)), mark);
         }
 
         /// <summary>
         /// Where a 0-based line and a column counted protoc's way is in this text, or null when the
         /// text has no such line.
         /// </summary>
-        public SourcePosition? PositionAt(int line, int column)
+        public SourcePosition? PositionAt(int line, int protocColumn)
         {
+            var column = line == 0 ? protocColumn - _markBytes : protocColumn;
+
             if (line < 0 || line >= _map.LineCount || column < 0)
             {
                 return null;

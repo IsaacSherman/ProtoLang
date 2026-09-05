@@ -1,3 +1,4 @@
+using System.Text;
 using Google.Protobuf;
 using Google.Protobuf.Reflection;
 using ProtoLang.Binding;
@@ -243,6 +244,35 @@ public class SchemaDeclarationTests
     }
 
     [Fact]
+    public void ReturnedDetachedCommentsCannotChangeLaterDeclarationQueries()
+    {
+        var schema = Load(DocumentedSchema);
+        var message = Message(schema, "Customer");
+        var customer = schema.Bundle.DeclarationOf(message);
+        const string Expected = "A paragraph about the section, detached from what follows.";
+
+        Assert.NotNull(customer);
+        Assert.Equal(Expected, Assert.Single(customer.Documentation.Detached));
+
+        // A read-only interface can still expose a mutable list or array. A read-only wrapper
+        // may offer IList but reject writes, which also protects the shared declaration.
+        if (customer.Documentation.Detached is IList<string> writable)
+        {
+            try
+            {
+                writable[0] = "Replaced by a consumer";
+            }
+            catch (NotSupportedException)
+            {
+            }
+        }
+
+        var queriedAgain = schema.Bundle.DeclarationOf(message);
+        Assert.NotNull(queriedAgain);
+        Assert.Equal(Expected, Assert.Single(queriedAgain.Documentation.Detached));
+    }
+
+    [Fact]
     public void ASchemaWithNoCommentsAnswersEmptyRatherThanNull()
     {
         var schema = Load(DocumentedSchema);
@@ -284,7 +314,51 @@ public class SchemaDeclarationTests
         Assert.Equal("count", Slice(schema.Text, count!.Site!.Name));
     }
 
+    [Fact]
+    public void AUtf8BomDoesNotShiftDeclarationsOnTheFirstLine()
+    {
+        var schema = Load(
+            "syntax = \"proto3\"; message Customer { string email = 1; }\n",
+            utf8Bom: true);
+        var path = schema.Bundle.PathFor(SchemaName);
+        Assert.NotNull(path);
+        Assert.Equal(new byte[] { 0xef, 0xbb, 0xbf }, File.ReadAllBytes(path)[..3]);
+
+        foreach (var (name, declaration) in EverythingIn(schema))
+        {
+            Assert.NotNull(declaration);
+            Assert.NotNull(declaration.Site);
+            var span = declaration.Site.Name;
+
+            Assert.Equal(name, Slice(schema.Text, span));
+            Assert.Equal(1, span.Start.Line);
+            Assert.Equal(schema.Text.IndexOf(name, StringComparison.Ordinal) + 1, span.Start.Column);
+        }
+    }
+
     // ------------------------------------------------------------------ what is missing
+
+    [Theory]
+    [InlineData("/* inserted */ message Customer { string email = 1; }")]
+    [InlineData("// short")]
+    public void ASchemaEditedBeforeItsFirstDeclarationQueryHasNoSite(string replacement)
+    {
+        const string Declaration = "message Customer { string email = 1; }";
+        const string Source = "syntax = \"proto3\";\n// The original customer documentation.\n" + Declaration + "\n";
+        var schema = Load(Source);
+        var message = Message(schema, "Customer");
+        var path = schema.Bundle.PathFor(SchemaName);
+        Assert.NotNull(path);
+
+        // Leave the index unqueried until after the edit. Its descriptor locations still refer
+        // to Source, even when all their line numbers also exist in the replacement text.
+        File.WriteAllText(path, Source.Replace(Declaration, replacement, StringComparison.Ordinal));
+
+        var customer = schema.Bundle.DeclarationOf(message);
+        Assert.NotNull(customer);
+        Assert.Equal("The original customer documentation.", customer.Documentation.Leading);
+        Assert.Null(customer.Site);
+    }
 
     /// <summary>
     /// A bundle whose source info was never asked for. The file is still known, so the answer is a
@@ -414,12 +488,12 @@ public class SchemaDeclarationTests
     /// <summary>A schema on disk, the bundle protoc made of it, and the text it was made from.</summary>
     private sealed record LoadedSchema(DescriptorBundle Bundle, string Text);
 
-    private static LoadedSchema Load(string schema)
+    private static LoadedSchema Load(string schema, bool utf8Bom = false)
     {
         var directory = TestPaths.CreateTempDirectory();
         var path = Path.Combine(directory, SchemaName);
 
-        File.WriteAllText(path, schema);
+        File.WriteAllText(path, schema, new UTF8Encoding(encoderShouldEmitUTF8Identifier: utf8Bom));
 
         return new LoadedSchema(Loader().LoadBundle([SchemaName], [directory]), File.ReadAllText(path));
     }

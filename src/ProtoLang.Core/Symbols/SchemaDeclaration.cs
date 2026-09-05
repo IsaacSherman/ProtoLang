@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using ProtoLang.Diagnostics;
 
 namespace ProtoLang.Symbols;
@@ -66,16 +67,39 @@ public sealed record SchemaSite
 /// nothing is escaped, because escaping is a fact about the renderer rather than about the comment.
 /// </para>
 /// </remarks>
-/// <param name="Leading">The comment immediately above the declaration, or null when there is none.</param>
-/// <param name="Trailing">The comment on or after the declaration, or null when there is none.</param>
-/// <param name="Detached">Paragraphs above the declaration but separated from it, in order.</param>
-public sealed record SchemaComments(string? Leading, string? Trailing, IReadOnlyList<string> Detached)
+public sealed record SchemaComments
 {
-    /// <summary>What an undocumented element has to say.</summary>
+    /// <param name="leading">The comment immediately above the declaration, or null when there is none.</param>
+    /// <param name="trailing">The comment on or after the declaration, or null when there is none.</param>
+    /// <param name="detached">Paragraphs above the declaration but separated from it, in order.</param>
     /// <remarks>
-    /// Shared, and safe to share: every member is immutable, and the empty list is a
-    /// <see cref="Array.Empty{T}"/> singleton rather than a list anything could append to.
+    /// An explicit constructor for one reason: the paragraphs are copied into a wrapper that refuses
+    /// writes. <see cref="IReadOnlyList{T}"/> is a promise the caller makes and not one the type
+    /// keeps -- a <c>List</c> or an array behind it casts straight back to <see cref="IList{T}"/> and
+    /// takes an assignment. This object is cached and handed to every later caller, so a consumer
+    /// tidying up what it was given would be editing what the next reader is told about the schema,
+    /// with nothing anywhere near the cache to say where the change came from.
     /// </remarks>
+    public SchemaComments(string? leading, string? trailing, IEnumerable<string> detached)
+    {
+        ArgumentNullException.ThrowIfNull(detached);
+
+        Leading = leading;
+        Trailing = trailing;
+        Detached = new ReadOnlyCollection<string>([.. detached]);
+    }
+
+    /// <inheritdoc cref="SchemaComments(string?, string?, IEnumerable{string})" path="/param[@name='leading']"/>
+    public string? Leading { get; }
+
+    /// <inheritdoc cref="SchemaComments(string?, string?, IEnumerable{string})" path="/param[@name='trailing']"/>
+    public string? Trailing { get; }
+
+    /// <inheritdoc cref="SchemaComments(string?, string?, IEnumerable{string})" path="/param[@name='detached']"/>
+    public IReadOnlyList<string> Detached { get; }
+
+    /// <summary>What an undocumented element has to say.</summary>
+    /// <remarks>Shared, and safe to share: nothing reachable from it can be written to.</remarks>
     public static SchemaComments None { get; } = new(null, null, []);
 
     /// <summary>Whether the author wrote nothing about this element at all.</summary>
@@ -97,11 +121,12 @@ public sealed record SchemaComments(string? Leading, string? Trailing, IReadOnly
 /// <para>
 /// <b>Absence is ordinary and is not an error.</b> A schema with no comments, a descriptor set built
 /// without source info, a well-known type protoc resolved from descriptors compiled into itself, a
-/// file the compiler could not read: each of them yields a declaration with no
-/// <see cref="Site"/>, or empty <see cref="Documentation"/>, or both. The two are independent
-/// questions -- protoc's own schemas are richly documented and, on a recent protoc, nowhere on disk
-/// -- so a caller that wants to navigate asks about the site and a caller that wants to explain
-/// asks about the documentation.
+/// file the compiler could not read, a file somebody has edited since: each of them yields a
+/// declaration with no <see cref="Site"/>, or empty <see cref="Documentation"/>, or both. The two are
+/// independent questions -- protoc's own schemas are richly documented and, on a recent protoc,
+/// nowhere on disk; an edited schema is documented as it was and can no longer be pointed at -- so a
+/// caller that wants to navigate asks about the site and a caller that wants to explain asks about
+/// the documentation.
 /// </para>
 /// </remarks>
 /// <param name="Id">
