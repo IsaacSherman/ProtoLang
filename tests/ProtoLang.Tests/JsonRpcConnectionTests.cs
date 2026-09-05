@@ -9,6 +9,21 @@ namespace ProtoLang.Tests;
 
 public class JsonRpcConnectionTests
 {
+    /// <summary>
+    /// A cancellation naming a request that has already reached its handler reaches the handler too,
+    /// and the request answers with <see cref="ErrorCodes.RequestCancelled"/>.
+    /// </summary>
+    /// <remarks>
+    /// The waits here are a liveness backstop rather than a latency assertion. What is asserted is
+    /// that the reader loop dispatches, that the cancellation lands on a handler already running, and
+    /// that a response comes back at all -- so the deadline only has to outlast the worst scheduling
+    /// delay this suite can impose, and five seconds is what the tests below it already use. One
+    /// second was not: with a few dozen test classes starting in parallel the handler had not
+    /// signalled yet when the deadline fired, and the full suite failed here two runs in five while
+    /// the test passed every time it ran alone. A generous deadline costs nothing on a run that
+    /// passes, and still turns a hang into a failure rather than a suite that never finishes. The
+    /// latency a language server is actually held to is #57's to pin, and is not measured here.
+    /// </remarks>
     [Fact]
     public async Task CancelRequestReachesARequestHandlerThatIsAlreadyRunning()
     {
@@ -38,7 +53,7 @@ public class JsonRpcConnectionTests
                     },
                     TestContext.Current.CancellationToken);
 
-            await started.Task.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             await streams.ClientWriter.WriteAsync(
                     new
@@ -50,7 +65,7 @@ public class JsonRpcConnectionTests
                     TestContext.Current.CancellationToken);
 
             var response = await ReadAsync(streams.ClientReader)
-                .WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+                .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
             Assert.Equal(ErrorCodes.RequestCancelled, response.Error?.Code);
         }
@@ -58,7 +73,7 @@ public class JsonRpcConnectionTests
         {
             connection.Stop();
             streams.Complete();
-            await Task.WhenAny(serving, Task.Delay(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
+            await Task.WhenAny(serving, Task.Delay(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
             connection.Dispose();
         }
     }
