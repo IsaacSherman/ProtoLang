@@ -139,10 +139,15 @@ public class SchemaDeclarationTests
     {
         var schema = Load(DocumentedSchema);
 
-        var street = schema.Bundle.DeclarationOf(Field(Nested(Message(schema, "Customer"), "Address"), "street"));
+        var field = Field(Nested(Message(schema, "Customer"), "Address"), "street");
+        var street = schema.Bundle.DeclarationOf(field);
 
         Assert.Equal("street", Slice(schema.Text, street!.Site!.Name));
         Assert.Equal("The line a courier reads first.", street.Documentation.Leading);
+
+        // The identity the IR already carries for this field, so a caller holding one can ask either
+        // question of it without a translation step.
+        Assert.Equal(SymbolId.ForField(field), street.Id);
     }
 
     [Fact]
@@ -332,13 +337,20 @@ public class SchemaDeclarationTests
         Assert.Equal("Where receipts are sent.", email.Documentation.Leading);
     }
 
+    /// <summary>
+    /// No answer at all, which is the other thing a null can mean and the one a caller must be able
+    /// to tell from an answer holding nothing: this bundle has never heard of the file.
+    /// </summary>
     [Fact]
-    public void ADescriptorFromSomeOtherLoadIsNotAnswered()
+    public void ADescriptorFromAFileThisBundleDoesNotHoldIsNotAnswered()
     {
         var schema = Load(DocumentedSchema);
-        var other = Load(MappedSchema);
+        var elsewhere = Loader().LoadBundle(["fixtures.proto"], [TestPaths.FixtureProtoDirectory]);
 
-        Assert.Null(schema.Bundle.DeclarationOf(Message(other, "Ledger")));
+        var outer = Message(FileIn(elsewhere, "fixtures.proto"), "Outer");
+
+        Assert.NotNull(elsewhere.DeclarationOf(outer));
+        Assert.Null(schema.Bundle.DeclarationOf(outer));
     }
 
     /// <summary>

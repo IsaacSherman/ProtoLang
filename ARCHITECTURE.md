@@ -68,7 +68,13 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    closure, because the request cannot name a schema that is only reached through an import. The
    loader is uncached unless a caller supplies one, `protoc` runs under a timeout, and a failure keeps
    its report line by line as [`ProtocDiagnostic`](src/ProtoLang.Core/Binding/ProtocDiagnostic.cs)
-   rather than only as prose.
+   rather than only as prose. The source info the set carries is answered rather than merely kept:
+   `DescriptorBundle.DeclarationOf` turns a message, enum, field or enum value descriptor into a
+   [`SchemaDeclaration`](src/ProtoLang.Core/Symbols/SchemaDeclaration.cs) — the `.proto` it was
+   written in, the range of the declaration and of its name, and the comments around it — through a
+   per-file [`SchemaSourceIndex`](src/ProtoLang.Core/Binding/SchemaSourceIndex.cs) built on first ask
+   and kept on the bundle. That is what lets go-to-definition and hover cross the file boundary,
+   which is where most of what a ProtoLang file talks about lives.
 7. **Bind.** [`Binder.Bind`](src/ProtoLang.Core/Binding/Binder.cs) resolves names against the
    descriptors and produces typed IR. It does **not** throw on bad input: an unresolved name becomes
    `ErrorType` (`PL0037`) and binding continues, a name the parser never saw resolves to `ErrorType`
@@ -146,6 +152,7 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | What is here, and what holds it | `SyntaxLocation`, `IrLocation` | [Semantics/NodePath.cs](src/ProtoLang.Core/Semantics/NodePath.cs) |
 | Down through a tree | `SyntaxWalk`, `IrWalk` | [Semantics/SyntaxWalk.cs](src/ProtoLang.Core/Semantics/SyntaxWalk.cs) |
 | Where a declaration is | `DeclarationSite` | [Symbols/DeclarationSite.cs](src/ProtoLang.Core/Symbols/DeclarationSite.cs) |
+| Where a `.proto` declared it, and what it said | `SchemaDeclaration`, `SchemaSite`, `SchemaComments` | [Symbols/SchemaDeclaration.cs](src/ProtoLang.Core/Symbols/SchemaDeclaration.cs) |
 | Which symbol a reference means | `SymbolId` | [Symbols/SymbolId.cs](src/ProtoLang.Core/Symbols/SymbolId.cs) |
 | Where a symbol is used | `SymbolReference`, `ReferenceKind` | [Symbols/SymbolReference.cs](src/ProtoLang.Core/Symbols/SymbolReference.cs) |
 | What a name is in scope over | `ScopeEntry` | [Symbols/ScopeEntry.cs](src/ProtoLang.Core/Symbols/ScopeEntry.cs) |
@@ -236,7 +243,7 @@ One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized b
 `LexerTests`, `ParserTests`, `ParserResilienceTests` and `BinderResilienceTests` (fuzz),
 `SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
 `SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `ScopeQueryTests`,
-`DescriptorCacheTests`, `WorkspaceConfigurationTests`, `LanguageServerTests`, `SemanticTokenTests`,
+`DescriptorCacheTests`, `SchemaDeclarationTests`, `WorkspaceConfigurationTests`, `LanguageServerTests`, `SemanticTokenTests`,
 `TreeWalkTests`, `ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`,
 and the scaffolding and smoke suites.
 
@@ -285,5 +292,9 @@ reached `Compilation` twice: it now holds the loader it resolved rather than loc
 per keystroke, and it publishes the bundle on the result. #53 opened the server project and settled
 the configuration model in it before #42, #45 and #46 could each invent part of one; it reached Core
 only to give "are these two paths the same path?" a single home, which is what collapses the
-duplicate cache entries #48 left behind. Everything from here should be additive:
-new types, new projects. Rewriting the binder is the signal to stop and re-scope.
+duplicate cache entries #48 left behind. #42 built the server itself — lifecycle, document sync,
+diagnostics and lexical semantic tokens over a base protocol this repository owns — and reached Core
+only to have the lexer keep the comment spans it was already walking past. #41 closed the second
+wave by making the retained source info answerable, so a schema element's declaration and its doc
+comment are reachable from a descriptor. Everything from here should be additive: new types, new
+projects. Rewriting the binder is the signal to stop and re-scope.
