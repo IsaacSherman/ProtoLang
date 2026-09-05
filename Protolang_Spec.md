@@ -188,6 +188,18 @@ Normative Requirements:
 - Block comments are not nested.
 - An unterminated block comment is `PL0004`.
 
+Implementation Note:
+
+- Comments are not tokens and the parser never sees one, but where each of them was is preserved:
+  `Lexer.Comments` carries a range per comment, covering its delimiters, and a block comment's range
+  crosses lines where the comment does. An unterminated one is recorded to the end of the text as
+  well as reported.
+- That exists so that 6.5's classification comes from the same scan that decides what a comment is.
+  A host that recognized comments a second way -- a client-side grammar written in regular
+  expressions is the obvious one -- would disagree with this lexer the first time somebody wrote
+  `/* /* */`, and would then colour the rest of the file as a comment while the compiler went on
+  reporting errors inside it.
+
 ### 6.3 Identifiers
 
 The implemented rule is:
@@ -256,6 +268,44 @@ Open Question:
 
 - `case`, `enum`, `message`, and `switch` are reserved by the lexer but do not yet have source
   syntax.
+
+### 6.5 Source Classification
+
+**Decided: the compiler classifies source text, and publishes one fixed set of categories that a
+later refinement adds to rather than changes.**
+
+An editor colours ProtoLang from the compiler rather than from a pattern-matching grammar, so that
+what is coloured as a keyword is what the lexer resolves as a keyword. The categories are LSP's
+standard semantic token types; the set is fixed here because it is negotiated once per session and
+indexed by position, so inserting a category later renumbers every category after it.
+
+Normative Requirements:
+
+- The published category set is the standard LSP token type set, in its standard order, and the
+  standard modifier set with it. Every category is declared whether or not anything currently
+  produces it.
+- A keyword (6.4) is `keyword`, a string literal is `string`, an integer or floating-point literal is
+  `number`, and a comment (6.2) is `comment`.
+- `->`, `+`, `-`, `*`, `/`, `%`, `=`, `==`, `!=`, `!`, `<`, `<=`, `>`, `>=`, `&&` and `||` are
+  `operator`.
+- **Every identifier is `variable`, whatever it names.** Distinguishing a local from a parameter from
+  a field from a method is a semantic question, and classification runs over the token stream alone
+  so that a file which does not parse is still classified -- which is exactly when a reader needs it.
+  A classification that is right sometimes is worse than one that is consistently coarse, because a
+  wrong colour reads as a fact about the code.
+- Braces, parentheses, semicolons, commas, colons and the member dot are **not** classified. Nothing
+  is conveyed by colouring them, and leaving them out lets a client's own grammar keep whatever it
+  does with them.
+- Classification never fails. A file that does not lex cleanly is classified as far as the lexer got.
+
+Implementation Note:
+
+- The categories reserved and not yet produced -- `parameter`, `property`, `method`, `enumMember`,
+  `type` and the rest -- are what a semantic refinement will populate. Declaring them now is what
+  lets that ship without renegotiating capabilities or repainting open files.
+- A token may not cross a line in the published encoding, so a block comment is emitted as one token
+  per line it touches.
+- Columns count UTF-16 code units, matching `SourcePosition` and the protocol's default encoding.
 
 ## 7. Grammar and Syntax
 
@@ -835,6 +885,11 @@ Normative Requirements:
   path at all (`PL2103`), a named configuration file that does not exist (`PL2104`), and a named
   `protoc` that does not exist (`PL2105`). A setting ignored in silence leaves a user unable to tell
   a typo from a refusal from a defect.
+- **A named `protoc` that exists and still cannot be run stops the document**, as `PL2107`, an error.
+  It is deliberately not `PL2105`: that one is a warning and a fall-through, because the host can go
+  on to the next source, and here there is nowhere to fall through to. Falling back to a located
+  `protoc` instead would compile against an executable the settings do not name while the resolved
+  configuration went on reporting that the setting was in force.
 - **A setting that is present and blank states nothing.** An editor writes an unset string setting as
   the empty string rather than leaving it out, so blank is the ordinary shape of "no answer" and
   falls through to the next source without comment.
@@ -1819,6 +1874,58 @@ Open Questions:
 - Should diagnostic codes be part of the compatibility contract?
 - Warnings exist today, so which warnings are compatibility-stable and which remain advisory?
 
+### 26.1 Diagnostics in an Editor
+
+**Decided: a host publishes every part of a diagnostic, reports one with no location at the start of
+the document it belongs to, and puts a `protoc` failure both in the schema it names and on the import
+that reached it.**
+
+The template above is the command line's rendering. A host has the same information and a different
+surface, and the decisions it has to make -- what a severity maps to, where help text goes, what to
+do with a diagnostic that is nowhere -- are decisions about published output just as much.
+
+Normative Requirements:
+
+- **Severity is mapped, not invented.** The compiler has `Warning` and `Error`; a host publishes
+  exactly those two. Nothing is promoted to an informational or hint level, because that would be a
+  host asserting a distinction the language does not draw. Adding a third severity is a change to the
+  compiler.
+- **The code, the title, the message and the help text all survive.** Help is not dropped and not run
+  into the message where the client can show it separately: several diagnostics put the only
+  actionable instruction there. It is also carried structurally, so a later quick-fix feature reads
+  the string the compiler wrote rather than recovering it from prose.
+- **A diagnostic with no location is published at the very start of its document.** An unusable
+  include path, an ignored setting, a refused configuration file: none is anywhere in the source, and
+  all of them have to be seen. It is never converted from the 1-based scheme, which for a
+  `SourceSpan.None` would name line zero minus one.
+- **A diagnostic that does have a position is published against the file that position is in**, which
+  is not always the file being compiled. A `protolang.config.xml` reports a line and a column inside
+  itself, and a `protoc` failure reports a line and a column inside a `.proto`; published against the
+  source buffer instead, an error on line 4 of the configuration file becomes a squiggle on line 4 of
+  a source that says something else entirely, or past the end of a source shorter than it. Where the
+  named file cannot be resolved to a document, the diagnostic goes to the document being compiled at
+  its start rather than at that position: a range that is honestly wrong is worse than one that admits
+  it knows nothing, and the message names the file either way.
+- A configuration diagnostic with no position (10.4.1) is published against **every** open document,
+  because that is the extent of what it affects. The ones with positions belong to the configuration
+  file, and are published once however many documents that file governs.
+- **A `protoc` failure is published in the `.proto` it names, at the position it gave, and summarized
+  on the `import proto` declaration that reached that schema.** The import line is not optional: a
+  reader looking at a ProtoLang buffer whose schema is broken must not be shown an empty problem
+  list. Where the schema named is not the schema imported, the summary says so, because a squiggle on
+  one file name reporting an error in another is otherwise simply confusing.
+- A `protoc` message carries `protoc` as its source and **no** `PL` code. It has none in this
+  compiler's numbering and inventing one would be ProtoLang asserting a taxonomy for another tool's
+  output.
+- Where `protoc`'s output was parsed into positions, it **replaces** the `PL0003` that carries the
+  same text as prose rather than being published beside it. A `protoc` that could not be found at all
+  produces no such output, and `PL0003` -- which then names everywhere the compiler looked -- is
+  published unchanged.
+- **A file's diagnostics survive while any open document still reports them.** Two documents
+  importing one broken schema both report it, identical reports are published once, and closing one
+  of them does not withdraw the other's.
+- Diagnostics are cleared when a document closes, and when they stop applying.
+
 ## 27. Versioning and Compatibility
 
 ### 27.1 Language Versioning
@@ -2026,3 +2133,7 @@ Use this table to record decisions as the language stabilizes.
 | 2026-08-30 | Symbols | The IR carries declaration sites and stable symbol IDs for ProtoLang declarations, and descriptor-based IDs for schema symbols (22.2) | Editor features, occurrence highlighting, and caching need identities that survive a rebind of unchanged text and do not collapse same-named locals or fields from different scopes/messages | Draft |
 | 2026-09-01 | Descriptor input | A load returns the whole descriptor set with its source info and the file each schema came from, and may be cached against the located protoc, the ordered include paths, and the content of the transitive closure (21.1) | Building descriptors and dropping the set paid protoc for source info on every run and then discarded it, which is exactly what resolving a schema declaration or its doc comment needs. Keying a cache on the files a compilation named would be wrong in five ways at once -- a transitively imported schema, a reordered include list, a file appearing in a root that was empty, a deletion, and protoc itself changing -- so correctness is defined over the closure protoc reports rather than over the request | Draft |
 | 2026-09-02 | Host configuration | A host resolves configuration per document under one documented precedence -- folder, then workspace, then user settings, then `PROTOLANG_PROTOC`, then discovery -- may point at a `protolang.config.xml` but never restate what is in one, and reports every setting it is ignoring (10.4.1) | Configuration already had three independent sources before an editor was involved, and the workspace adds a fourth axis the command line never had; leaving it to each client would have produced two settings models and a server receiving both. A setting beats the environment because it is the project's answer rather than the machine's, and the one the user can see. Policy stays in the file because 10.4's guarantee -- that generated code means the same thing however it was built -- is precisely what an editor-settable overflow mode would break. Reporting an ignored setting rather than dropping it is the difference between a user finding their own typo and filing a defect: they cannot otherwise tell a typo from a refusal | Draft |
+| 2026-09-03 | Editor support | The language server speaks LSP over a base protocol this repository owns, with no framework between it and the wire | A framework supplies transport and routing and decides none of what this issue had to get right -- the token legend, the diagnostic mapping, the configuration pull, the staleness rule -- so the choice was between owning three hundred lines of framing and owning a dependency graph as well. The graph does not fit: the only maintained option last shipped in 2023 and brings MediatR, System.Reactive and the Microsoft.Extensions tree onto a project built with warnings as errors, where one NU warning on a transitive package fails the build. It is contained rather than pervasive, and swapping in a JSON-RPC library later would touch one file | Draft |
+| 2026-09-03 | Diagnostics | A protoc failure is published against the .proto protoc named, at the position it gave, and summarized on the import that reached that schema (26.1) | The import line alone was accepted as a beta floor only because publishing precisely needed protoc's standard error parsed into file, line and column, which the descriptor work has since done -- so the reason for settling had gone. Both, rather than either: an error reported only against the schema leaves a reader whose ProtoLang buffer has stopped working with an empty problem list, and an error reported only on the import puts a squiggle on one file name to describe a fault in another. Where the schema blamed is not the schema imported, the summary says so, because that indirection is confusing enough to be worth a sentence | Draft |
+| 2026-09-03 | Lexical structure | Comments are preserved by the lexer and classified by the compiler, not left to a client-side grammar (6.2, 6.5) | Two definitions of what a comment is disagree the first time somebody writes a block comment containing a block-comment opener: 6.2 says the first close wins, and a grammar written in regular expressions guesses the other way about as often as not, colouring the rest of the file as a comment while the compiler goes on reporting errors inside it. The lexer already walks past every comment and already reports the unterminated case, so recording the range costs one field and settles the question in the one place that has the answer. Doc comments will want the same data | Draft |
+| 2026-09-03 | Editor support | The published classification set is the whole standard token type and modifier set, with identifiers uniformly one category until a semantic model can refine them (6.5) | The legend is negotiated once per session and indexed by position, so a category added later renumbers every category after it and forces a capability renegotiation and a repaint. Declaring the whole set now costs nothing and lets identifier refinement ship as different numbers rather than different meanings. Identifiers stay uniform because classification runs over the token stream alone, which is what lets it answer for a file that does not parse -- and a classification that is right sometimes is worse than one that is consistently coarse, because a wrong colour reads as a fact about the code | Draft |

@@ -21,7 +21,7 @@ arithmetic behavior it exists to define.
 | [src/ProtoLang.Backend.CSharp](src/ProtoLang.Backend.CSharp) | C# emission, plus generated test projects. |
 | [src/ProtoLang.Backend.Cpp](src/ProtoLang.Backend.Cpp) | The same for C++. |
 | [src/ProtoLang.Cli](src/ProtoLang.Cli) | `protolangc`: argument parsing, driving a compilation, writing files. |
-| [src/ProtoLang.LanguageServer](src/ProtoLang.LanguageServer) | The editor host. Today: the workspace configuration model. #42 adds the LSP host over it. |
+| [src/ProtoLang.LanguageServer](src/ProtoLang.LanguageServer) | `protolang-server`: LSP over stdio, and the workspace configuration model under it. |
 | [tests/ProtoLang.Tests](tests/ProtoLang.Tests) | One xunit project covering all of it. |
 
 Dependencies run one way. Backends, the CLI and the language server reference Core; **Core
@@ -127,6 +127,11 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | A document, to an editor and to the compiler | `DocumentUri` | [Workspace/DocumentUri.cs](src/ProtoLang.LanguageServer/Workspace/DocumentUri.cs) |
 | What an editor may configure, and where it wins | `WorkspaceConfiguration`, `ProtoLangSettings` | [Workspace/WorkspaceConfiguration.cs](src/ProtoLang.LanguageServer/Workspace/WorkspaceConfiguration.cs) |
 | What one document compiles under | `DocumentConfiguration`, `ConfigurationSource` | [Workspace/DocumentConfiguration.cs](src/ProtoLang.LanguageServer/Workspace/DocumentConfiguration.cs) |
+| One JSON-RPC conversation | `JsonRpcConnection`, `MessageReader` | [Protocol/JsonRpcConnection.cs](src/ProtoLang.LanguageServer/Protocol/JsonRpcConnection.cs) |
+| The server itself | `LanguageServerHost` | [Hosting/LanguageServerHost.cs](src/ProtoLang.LanguageServer/Hosting/LanguageServerHost.cs) |
+| Who is told what is wrong with which file | `DiagnosticRouter`, `DiagnosticContribution` | [Hosting/DiagnosticRouter.cs](src/ProtoLang.LanguageServer/Hosting/DiagnosticRouter.cs) |
+| What the compiler tells an editor to colour | `SemanticTokenLegend`, `SemanticTokenEncoder` | [Hosting/SemanticTokenLegend.cs](src/ProtoLang.LanguageServer/Hosting/SemanticTokenLegend.cs) |
+| Where a comment was | `Comment` | [Syntax/Comment.cs](src/ProtoLang.Core/Syntax/Comment.cs) |
 | Written or not-yet-written names | `SyntaxName` | [Syntax/SyntaxName.cs](src/ProtoLang.Core/Syntax/SyntaxName.cs) |
 | What became of an import | `ImportResolution` | [ImportResolution.cs](src/ProtoLang.Core/ImportResolution.cs) |
 | What a descriptor load produced | `DescriptorBundle`, `SchemaFile` | [Binding/DescriptorBundle.cs](src/ProtoLang.Core/Binding/DescriptorBundle.cs) |
@@ -181,6 +186,43 @@ and may not restate what is in one — and **every setting that is not being use
 `DocumentUri` and `PathIdentity` are between them the only places a URI becomes a path and two paths
 are compared, which is what makes one file one document and one cache entry however it is spelled.
 
+### Serving an editor
+
+[`LanguageServerHost`](src/ProtoLang.LanguageServer/Hosting/LanguageServerHost.cs) is the whole
+server: `protolang-server`, LSP over stdin and stdout, driven by VS Code and Visual Studio alike.
+There is **no LSP framework**. Everything below
+[`JsonRpcConnection`](src/ProtoLang.LanguageServer/Protocol/JsonRpcConnection.cs) is transport —
+`Content-Length` framing, correlation, a writer gate — and nothing above it knows how a message is
+framed, so the decision is one file wide.
+
+Two rules in the connection are load-bearing and easy to undo. **Reading and handling are separate**:
+the read loop parses, completes responses and honours `$/cancelRequest`, and everything else goes to
+a queue one worker drains in order. That separation is what lets a handler ask the client a question
+— `workspace/configuration` is a request the *server* sends — without waiting for itself. And when
+the connection ends, outstanding work is cancelled **before** the dispatcher is awaited; the other
+order waits forever for a handler whose answer is never coming.
+
+The buffer the client sent is the source of truth and the file on disk is never read for an open
+document. Edits are applied incrementally, in order, each against the text the one before it
+produced. A compile is debounced and coalesced, carries the document version and the configuration
+generation it began under, and its result is **discarded rather than published** if either has moved
+— the most visible failure a server can have is an old compile putting a fixed error back on screen.
+Genuine cancellation, queue bounds and the numbers are #54 and #57; what is here is the version stamp
+and the discard.
+
+Diagnostics are published *per file* and produced *per compilation*, and the two stop lining up as
+soon as a `.proto` can be blamed, so
+[`DiagnosticRouter`](src/ProtoLang.LanguageServer/Hosting/DiagnosticRouter.cs) publishes the union of
+what every open document says about a file. Two buffers importing one broken schema both report it,
+identical reports collapse, and closing one does not withdraw the other's. Spec 26.1 has the rest:
+severities mapped rather than invented, help text kept as its own thing, a locationless diagnostic
+published at the start of its document, and a `protoc` failure landing both in the schema it names
+and on the import that reached it.
+
+Classification (spec 6.5) lexes and nothing more, so it answers for a file that does not parse. The
+legend is the whole standard token set, declared now because it is negotiated once and indexed by
+position; identifiers are uniformly `variable` until a semantic model can do better.
+
 ### Backends
 
 Per spec 23 a backend consumes only the typed IR, never the AST, and rejects what it cannot support
@@ -194,7 +236,7 @@ One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized b
 `LexerTests`, `ParserTests`, `ParserResilienceTests` and `BinderResilienceTests` (fuzz),
 `SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
 `SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `ScopeQueryTests`,
-`DescriptorCacheTests`, `WorkspaceConfigurationTests`,
+`DescriptorCacheTests`, `WorkspaceConfigurationTests`, `LanguageServerTests`, `SemanticTokenTests`,
 `TreeWalkTests`, `ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`,
 and the scaffolding and smoke suites.
 
@@ -206,6 +248,9 @@ and the scaffolding and smoke suites.
   generated projects. Needs `protoc`, the .NET SDK, and a C++ toolchain.
 - **Paths** — [TestPaths.cs](tests/ProtoLang.Tests/TestPaths.cs) finds the repository root and the
   fixture protos; use it rather than hand-rolling paths.
+- **The server is driven over the wire** — [LanguageServerClient.cs](tests/ProtoLang.Tests/LanguageServerClient.cs)
+  speaks framed JSON-RPC at a real host over a pair of in-memory streams, so the framing, the
+  lifecycle gate and the dispatch order are under test rather than bypassed.
 
 There is **no CI**. `dotnet test` locally is the gate.
 
