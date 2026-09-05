@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using Google.Protobuf.Reflection;
+using ProtoLang.Symbols;
 
 namespace ProtoLang.Binding;
 
@@ -41,6 +43,30 @@ public sealed class DescriptorBundle
     private readonly FileDescriptorSet _set;
     private readonly Dictionary<string, FileDescriptorProto> _protos;
     private readonly Dictionary<string, SchemaFile> _files;
+    private readonly Dictionary<string, FileDescriptor> _descriptors;
+
+    /// <summary>What each file's source info says, read on first ask and kept while it stays true.</summary>
+    /// <remarks>
+    /// <para>
+    /// The only mutable state here, and it is a memo: an entry is derived entirely from data this
+    /// bundle already holds and one file on disk, so building one twice produces the same answer and
+    /// building none changes nothing but the cost. Concurrent rather than locked because a cached
+    /// bundle is shared by every compile worker at once and this is a query path -- two workers asking
+    /// about one schema at the same moment should both be answered, not queued behind each other, and
+    /// the loser's copy costs one wasted walk.
+    /// </para>
+    /// <para>
+    /// Per file rather than per bundle, because the questions this answers -- where is this
+    /// declared, what does it say -- are asked about the schema under the cursor. A closure holding
+    /// <c>descriptor.proto</c> is not walked because something imported a timestamp.
+    /// </para>
+    /// <para>
+    /// <b>An entry is checked before it is reused, not merely on the way in.</b> The rest of a bundle
+    /// is fixed the moment it is built; this is the one part of it that is a statement about a file
+    /// that goes on being edited underneath. See <see cref="SchemaSourceIndex.IsCurrent"/>.
+    /// </para>
+    /// </remarks>
+    private readonly ConcurrentDictionary<string, SchemaSourceIndex> _sources = new(StringComparer.Ordinal);
 
     public DescriptorBundle(
         IReadOnlyList<FileDescriptor> descriptors,
@@ -55,7 +81,7 @@ public sealed class DescriptorBundle
         Closure = closure;
         _set = set;
 
-        // Last spelling wins in both, matching protoc: a descriptor set names each file once, and a
+        // Last spelling wins in each, matching protoc: a descriptor set names each file once, and a
         // duplicate could only come from a caller assembling one by hand.
         _protos = [];
         foreach (var proto in set.File)
@@ -67,6 +93,12 @@ public sealed class DescriptorBundle
         foreach (var file in closure)
         {
             _files[file.Name] = file;
+        }
+
+        _descriptors = [];
+        foreach (var descriptor in descriptors)
+        {
+            _descriptors[descriptor.Name] = descriptor;
         }
     }
 
@@ -127,4 +159,97 @@ public sealed class DescriptorBundle
     /// compiled-in descriptors.
     /// </summary>
     public string? PathFor(string name) => _files.GetValueOrDefault(name)?.Path;
+
+    /// <summary>
+    /// Where <paramref name="message"/> was declared and what was written about it, or null when this
+    /// bundle does not hold the file that declares it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// What <see cref="Semantics.SemanticModel.DeclarationOf"/> cannot answer, and says so: a field,
+    /// an enum constant, a message or an enum type is declared in a <c>.proto</c>, and the ProtoLang
+    /// source that uses it has no declaration to point at. Go to definition and hover both stop at
+    /// that boundary without this, which is where they are most wanted -- most of what a ProtoLang
+    /// file talks about is declared somewhere else.
+    /// </para>
+    /// <para>
+    /// <b>Null and an answer with nothing in it are different.</b> Null means this bundle knows
+    /// nothing of the file -- a descriptor from some other load. An answer whose
+    /// <see cref="SchemaDeclaration.Site"/> is null, or whose documentation is empty, means the file
+    /// is here and the information is not: a schema with no comments, a descriptor set built without
+    /// source info, a well-known type protoc resolved from its own compiled-in descriptors, a file
+    /// that could not be read, a file that has been edited since the descriptors were built. Each of
+    /// those is ordinary and none of them is an error.
+    /// </para>
+    /// <para>
+    /// The answer describes what <em>this</em> bundle holds. A descriptor from another load with the
+    /// same file name is answered from this bundle's tree, which is the only tree whose source info
+    /// is here to be read.
+    /// </para>
+    /// </remarks>
+    public SchemaDeclaration? DeclarationOf(MessageDescriptor message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+
+        return DeclarationIn(message.File.Name, SymbolId.ForType(message));
+    }
+
+    /// <inheritdoc cref="DeclarationOf(MessageDescriptor)"/>
+    public SchemaDeclaration? DeclarationOf(EnumDescriptor enumType)
+    {
+        ArgumentNullException.ThrowIfNull(enumType);
+
+        return DeclarationIn(enumType.File.Name, SymbolId.ForType(enumType));
+    }
+
+    /// <inheritdoc cref="DeclarationOf(MessageDescriptor)"/>
+    public SchemaDeclaration? DeclarationOf(FieldDescriptor field)
+    {
+        ArgumentNullException.ThrowIfNull(field);
+
+        return DeclarationIn(field.File.Name, SymbolId.ForField(field));
+    }
+
+    /// <inheritdoc cref="DeclarationOf(MessageDescriptor)"/>
+    public SchemaDeclaration? DeclarationOf(EnumValueDescriptor value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+
+        return DeclarationIn(value.File.Name, SymbolId.ForEnumValue(value));
+    }
+
+    private SchemaDeclaration? DeclarationIn(string schemaName, SymbolId symbol)
+        => SourceOf(schemaName)?.DeclarationOf(symbol);
+
+    /// <remarks>
+    /// Every part comes from this bundle: the built tree supplies the identities and the index of
+    /// each element within its parent, the unbuilt one supplies the source info those indices
+    /// address, and the closure entry says which file to measure the positions against and how to
+    /// tell whether it is still the file protoc read. Taking any of them from anywhere else would be
+    /// reading one file's source info against another file's shape.
+    /// </remarks>
+    private SchemaSourceIndex? SourceOf(string schemaName)
+    {
+        // Asked every time, not once: what is kept here is an answer about a file, and the file goes
+        // on changing after the answer is filed. See SchemaSourceIndex.IsCurrent.
+        if (_sources.TryGetValue(schemaName, out var kept) && kept.IsCurrent)
+        {
+            return kept;
+        }
+
+        if (!_descriptors.TryGetValue(schemaName, out var descriptor)
+            || !_protos.TryGetValue(schemaName, out var proto))
+        {
+            return null;
+        }
+
+        var index = SchemaSourceIndex.For(descriptor, proto, _files.GetValueOrDefault(schemaName));
+
+        // Replaces rather than adds, because the entry it replaces is one this just found wanting.
+        // Two threads arriving together compute the same answer from the same file, so whichever
+        // lands second is as good as the first.
+        _sources[schemaName] = index;
+
+        return index;
+    }
 }
