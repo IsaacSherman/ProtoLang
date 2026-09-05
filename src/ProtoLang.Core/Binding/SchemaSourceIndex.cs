@@ -40,8 +40,22 @@ internal sealed class SchemaSourceIndex
 {
     private readonly Dictionary<SymbolId, SchemaDeclaration> _declarations;
 
-    private SchemaSourceIndex(Dictionary<SymbolId, SchemaDeclaration> declarations)
-        => _declarations = declarations;
+    private SchemaSourceIndex(Dictionary<SymbolId, SchemaDeclaration> declarations, bool provisional)
+    {
+        _declarations = declarations;
+        IsProvisional = provisional;
+    }
+
+    /// <summary>Whether this answer could get better on its own, and so is not one to keep.</summary>
+    /// <remarks>
+    /// True when the closure says a file backs this schema and the text could not be used: it is
+    /// locked, or it has been edited since the descriptors were built. Both of those mend themselves
+    /// with nothing else changing -- the lock is released, the edit is undone -- and the second one
+    /// mends itself invisibly, because a schema restored to its original bytes hashes as it did and
+    /// the descriptor cache goes on serving the same bundle. Keeping the site-less answer would make
+    /// an undo permanent.
+    /// </remarks>
+    public bool IsProvisional { get; }
 
     /// <summary>Reads one file's source info into declarations.</summary>
     /// <param name="descriptor">The built tree, which supplies the identities and the path indices.</param>
@@ -52,11 +66,14 @@ internal sealed class SchemaSourceIndex
     /// </param>
     public static SchemaSourceIndex For(FileDescriptor descriptor, FileDescriptorProto proto, SchemaFile? file)
     {
-        var builder = new Builder(descriptor.Name, LocationsByPath(proto), SchemaText.Read(file));
+        var text = SchemaText.Read(file);
+        var builder = new Builder(descriptor.Name, LocationsByPath(proto), text);
 
         builder.AddFile(descriptor);
 
-        return new SchemaSourceIndex(builder.Declarations);
+        return new SchemaSourceIndex(
+            builder.Declarations,
+            provisional: text is null && file is { Path: not null, ContentHash: not null });
     }
 
     /// <summary>What is known about <paramref name="symbol"/>, or null when this file declares no such thing.</summary>
@@ -403,23 +420,32 @@ internal sealed class SchemaSourceIndex
         /// </summary>
         public SourcePosition? PositionAt(int line, int protocColumn)
         {
-            var column = line == 0 ? protocColumn - _markBytes : protocColumn;
+            // Where protoc's count stood at the start of this line, which is past the byte-order mark
+            // on the first one. Counting from there rather than subtracting it from the target is the
+            // difference between agreeing with protoc and nearly agreeing: a tab advances to the next
+            // multiple of eight of the absolute column, so moving the origin moves every tab stop on
+            // the line with it.
+            var origin = line == 0 ? _markBytes : 0;
 
-            if (line < 0 || line >= _map.LineCount || column < 0)
+            if (line < 0 || line >= _map.LineCount || protocColumn < origin)
             {
                 return null;
             }
 
             var start = _map.OffsetOf(line + 1, 1);
             var end = line + 1 < _map.LineCount ? _map.OffsetOf(line + 2, 1) : _text.Length;
+            var text = _text.AsSpan(start, end - start).TrimEnd(['\r', '\n']);
 
-            return _map.PositionOf(start + Utf16OffsetIn(_text.AsSpan(start, end - start).TrimEnd(['\r', '\n']), column));
+            return _map.PositionOf(start + Utf16OffsetIn(text, protocColumn, origin));
         }
 
         /// <inheritdoc cref="SchemaText"/>
-        private static int Utf16OffsetIn(ReadOnlySpan<char> line, int column)
+        /// <param name="line">The line's text, as this compiler holds it.</param>
+        /// <param name="column">The column protoc reported, in protoc's counting.</param>
+        /// <param name="origin">What protoc's count already stood at where this text begins.</param>
+        private static int Utf16OffsetIn(ReadOnlySpan<char> line, int column, int origin)
         {
-            var counted = 0;
+            var counted = origin;
             var index = 0;
 
             while (counted < column && index < line.Length)

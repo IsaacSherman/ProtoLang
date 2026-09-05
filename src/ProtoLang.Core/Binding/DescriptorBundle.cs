@@ -60,6 +60,11 @@ public sealed class DescriptorBundle
     /// declared, what does it say -- are asked about the schema under the cursor. A closure holding
     /// <c>descriptor.proto</c> is not walked because something imported a timestamp.
     /// </para>
+    /// <para>
+    /// An answer that was diminished by something outside this bundle -- a schema locked or edited
+    /// when it was read -- is not filed here at all, because it would outlive the condition that
+    /// diminished it. See <see cref="SchemaSourceIndex.IsProvisional"/>.
+    /// </para>
     /// </remarks>
     private readonly ConcurrentDictionary<string, SchemaSourceIndex> _sources = new(StringComparer.Ordinal);
 
@@ -225,14 +230,22 @@ public sealed class DescriptorBundle
     /// </remarks>
     private SchemaSourceIndex? SourceOf(string schemaName)
     {
+        if (_sources.TryGetValue(schemaName, out var kept))
+        {
+            return kept;
+        }
+
         if (!_descriptors.TryGetValue(schemaName, out var descriptor)
             || !_protos.TryGetValue(schemaName, out var proto))
         {
             return null;
         }
 
-        return _sources.GetOrAdd(
-            schemaName,
-            _ => SchemaSourceIndex.For(descriptor, proto, _files.GetValueOrDefault(schemaName)));
+        var index = SchemaSourceIndex.For(descriptor, proto, _files.GetValueOrDefault(schemaName));
+
+        // An index that could not read a file the closure describes is asked again next time; see
+        // SchemaSourceIndex.IsProvisional. The cost is one file read and one walk per query while a
+        // schema is out of step with the descriptors, which lasts until the next compilation.
+        return index.IsProvisional ? index : _sources.GetOrAdd(schemaName, index);
     }
 }

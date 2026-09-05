@@ -336,6 +336,28 @@ public class SchemaDeclarationTests
         }
     }
 
+    [Theory]
+    [InlineData("syntax = \"proto3\";\tmessage Customer { string email = 1; }\n")]
+    [InlineData("\tsyntax = \"proto3\"; message Customer { string email = 1; }\n")]
+    [InlineData("syntax = \"proto3\";\n\tmessage Customer { string email = 1; }\n")]
+    public void AUtf8BomPreservesTabStopsWhenLocatingDeclarations(string source)
+    {
+        var schema = Load(source, utf8Bom: true);
+        var lines = new LineMap(schema.Text);
+
+        foreach (var (name, declaration) in EverythingIn(schema))
+        {
+            Assert.NotNull(declaration);
+            Assert.NotNull(declaration.Site);
+            var span = declaration.Site.Name;
+            var offset = schema.Text.IndexOf(name, StringComparison.Ordinal);
+
+            Assert.Equal(name, Slice(schema.Text, span));
+            Assert.Equal(lines.PositionOf(offset), span.Start);
+            Assert.Equal(lines.PositionOf(offset + name.Length), span.End);
+        }
+    }
+
     // ------------------------------------------------------------------ what is missing
 
     [Theory]
@@ -462,6 +484,42 @@ public class SchemaDeclarationTests
         Assert.Same(schema.Bundle.DeclarationOf(customer), schema.Bundle.DeclarationOf(customer));
     }
 
+    [Fact]
+    public void UndoingASchemaEditRestoresSitesOnACachedBundle()
+    {
+        const string Source = "syntax = \"proto3\";\n// Customer documentation.\nmessage Customer { string email = 1; }\n";
+        var directory = TestPaths.CreateTempDirectory();
+        var path = Path.Combine(directory, SchemaName);
+        File.WriteAllText(path, Source);
+
+        var cache = new DescriptorCache();
+        var loader = Loader(cache);
+        var bundle = loader.LoadBundle([SchemaName], [directory]);
+        var message = Message(FileIn(bundle, SchemaName), "Customer");
+
+        // The first query happens while the source differs from the compiled descriptors.
+        File.WriteAllText(path, Source.Replace("message Customer", "/* edited */ message Customer", StringComparison.Ordinal));
+        var rejected = bundle.DeclarationOf(message);
+        Assert.NotNull(rejected);
+        Assert.Null(rejected.Site);
+        Assert.Equal("Customer documentation.", rejected.Documentation.Leading);
+
+        File.WriteAllText(path, Source);
+        var reloaded = loader.LoadBundle([SchemaName], [directory]);
+
+        // Undo restored the original bytes, so the descriptor cache can reuse the same bundle.
+        Assert.Same(bundle, reloaded);
+        Assert.Equal(1, cache.Statistics.Hits);
+        Assert.Equal(1, loader.ProtocInvocations);
+
+        var recovered = reloaded.DeclarationOf(Message(FileIn(reloaded, SchemaName), "Customer"));
+        Assert.NotNull(recovered);
+        Assert.NotNull(recovered.Site);
+        Assert.Equal("Customer", Slice(Source, recovered.Site.Name));
+        Assert.Equal("message Customer { string email = 1; }", Slice(Source, recovered.Site.Extent));
+        Assert.Equal("Customer documentation.", recovered.Documentation.Leading);
+    }
+
     /// <summary>
     /// No special case for <c>google/protobuf</c>. Where protoc supplies the schemas as files -- which
     /// the bundled one does -- they are answered like any other schema, comments included, and the
@@ -498,7 +556,7 @@ public class SchemaDeclarationTests
         return new LoadedSchema(Loader().LoadBundle([SchemaName], [directory]), File.ReadAllText(path));
     }
 
-    private static DescriptorLoader Loader()
+    private static DescriptorLoader Loader(DescriptorCache? cache = null)
     {
         var protoc = ProtocLocator.Locate();
         if (protoc is null)
@@ -506,7 +564,7 @@ public class SchemaDeclarationTests
             Assert.Skip("No protoc on PATH and none in the NuGet cache. Restore the solution first.");
         }
 
-        return new DescriptorLoader(protoc);
+        return new DescriptorLoader(protoc, new DescriptorLoaderOptions { Cache = cache });
     }
 
     private static string RequireBundledProtoc()
