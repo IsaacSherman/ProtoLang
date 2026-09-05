@@ -55,6 +55,14 @@ public sealed class DescriptorLoader
     /// <summary>How long a killed protoc is given to actually die before it stops being waited on.</summary>
     private const int GraceMilliseconds = 5_000;
 
+    /// <summary>How many undeletable descriptor sets are worth coming back to.</summary>
+    /// <remarks>
+    /// Generous for what it is for -- a handful of files whose handles a dying plugin has not
+    /// released yet -- and small enough that reaching it is a diagnosis rather than a queue. See
+    /// <see cref="Release"/>.
+    /// </remarks>
+    private const int MostAbandoned = 32;
+
     private readonly string _protocPath;
 
     /// <summary>Descriptor sets this loader wrote and has not yet managed to delete.</summary>
@@ -262,8 +270,7 @@ public sealed class DescriptorLoader
         {
             RunProtoc(request, descriptorSetPath, cancellationToken);
 
-            var bytes = File.ReadAllBytes(descriptorSetPath);
-            var set = FileDescriptorSet.Parser.ParseFrom(bytes);
+            var set = FileDescriptorSet.Parser.ParseFrom(ReadDescriptorSet(descriptorSetPath));
 
             // --include_imports emits dependencies before dependents, which is exactly the order
             // BuildFromByteStrings requires.
@@ -290,6 +297,32 @@ public sealed class DescriptorLoader
         finally
         {
             Release(descriptorSetPath);
+        }
+    }
+
+    /// <summary>Reads back what protoc was asked to write, or says why it could not be read.</summary>
+    /// <remarks>
+    /// A protoc that exited zero has said the descriptor set is there, and almost always it is. When
+    /// it is not, the file system says so with an <see cref="IOException"/>, and one thrown from here
+    /// leaves a method whose whole contract is to report a failed load rather than throw one:
+    /// <c>Compilation</c> catches <see cref="DescriptorLoadException"/> and nothing else, so it would
+    /// travel out of the pipeline as a crash on input, which is the one thing this compiler is built
+    /// never to do. Reachable since the temporary directory became the caller's to choose --
+    /// <see cref="Reserve"/> lets an unusable one through on the understanding that protoc will
+    /// complain, and this is what happens on the occasions it does not.
+    /// </remarks>
+    private static byte[] ReadDescriptorSet(string descriptorSetPath)
+    {
+        try
+        {
+            return File.ReadAllBytes(descriptorSetPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+            or ArgumentException or NotSupportedException)
+        {
+            throw new DescriptorLoadException(
+                $"protoc reported success but its descriptor set could not be read from "
+                    + $"'{descriptorSetPath}': {ex.Message}");
         }
     }
 
@@ -330,11 +363,16 @@ public sealed class DescriptorLoader
     /// whatever held the handle has let go.
     /// </para>
     /// <para>
-    /// Remembered only when something is actually there, which is what keeps the list of them from
-    /// being the leak it exists to prevent. A delete can also fail because the path was never
-    /// writable at all -- a temporary directory that turned out to be a file, a drive that is not
-    /// mapped -- and retrying that one every load for the rest of the session would be an entry that
-    /// can never come off.
+    /// Remembered only when something is actually there, and only up to
+    /// <see cref="MostAbandoned"/> of them. Neither condition is redundant. The first turns away a
+    /// path that was never writable in the first place -- an unmapped drive, a temporary directory
+    /// that turned out to be a file -- which would otherwise be retried every load for the rest of
+    /// the session and never come off. The second is for the case the first does not catch, and it
+    /// is the one that matters: when the directory itself refuses deletion, every load strands its
+    /// own descriptor set, each one really is there, and remembering all of them makes the list grow
+    /// once per compile and the sweep cost grow with it -- the unbounded thing this was supposed to
+    /// prevent, arrived at by the other road. Past the cap the answer is that this directory is
+    /// broken rather than momentarily busy, and retrying more of it helps nobody.
     /// </para>
     /// </remarks>
     private void Release(string descriptorSetPath)
@@ -346,7 +384,7 @@ public sealed class DescriptorLoader
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            if (Path.Exists(descriptorSetPath))
+            if (Path.Exists(descriptorSetPath) && _abandoned.Count < MostAbandoned)
             {
                 _abandoned[descriptorSetPath] = 0;
             }

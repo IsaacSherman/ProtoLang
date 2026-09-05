@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Reflection;
 using ProtoLang.Binding;
 using ProtoLang.Tests.Harness;
 using Xunit;
@@ -324,6 +326,84 @@ public class ProcessSupervisionTests
         }
     }
 
+    /// <summary>
+    /// The list of descriptor sets to come back to is bounded. Remembering one file whose handle a
+    /// dying plugin has not released is the point of it; remembering one per compile for the rest of
+    /// the session is the leak it was written to prevent, reached by another road.
+    /// </summary>
+    /// <remarks>
+    /// A directory that refuses every delete rather than one that refuses a single file, because
+    /// that is the shape that grows: each load strands a descriptor set of its own, each one really
+    /// is on disk, so the "only remember what is really there" guard admits all of them. The count
+    /// is read by reflection, the way <c>CompileSchedulerTests</c> reads the scheduler's pending
+    /// work: it is a bound on an internal, and a property published only so a test could see it
+    /// would be a worse answer than a test that reaches in.
+    /// </remarks>
+    [Fact]
+    public void TheDescriptorSetsToComeBackToAreBounded()
+    {
+        const int Loads = 60;
+
+        var directory = WriteSchema();
+        var temporary = TestPaths.CreateTempDirectory();
+        var loader = new DescriptorLoader(
+            StandInProtoc.Obstructive(),
+            new DescriptorLoaderOptions { TemporaryDirectory = temporary });
+
+        void Strand(int times)
+        {
+            for (var load = 0; load < times; load++)
+            {
+                Assert.Throws<DescriptorLoadException>(() => loader.LoadBundle(["leaf.proto"], [directory]));
+            }
+        }
+
+        try
+        {
+            Strand(Loads);
+            var afterOneSession = Remembered(loader);
+
+            Strand(Loads);
+
+            // Twice the loads, twice the files on disk, and the same number to come back to. Asserted
+            // as "it stopped growing" rather than against the cap itself, because the number is a
+            // judgement that may be revised and the property is what must not be.
+            Assert.Equal(Loads * 2, Directory.GetFileSystemEntries(temporary).Length);
+            Assert.Equal(afterOneSession, Remembered(loader));
+            Assert.InRange(afterOneSession, 1, Loads);
+        }
+        finally
+        {
+            StandInProtoc.Unlock(temporary);
+        }
+    }
+
+    /// <summary>
+    /// A protoc that says it succeeded and wrote nothing is reported, not thrown out of the
+    /// pipeline. Compilation catches a descriptor-load failure and nothing else, so an IO exception
+    /// escaping here becomes a crash on input rather than a diagnostic.
+    /// </summary>
+    [Fact]
+    public void ADescriptorSetThatCannotBeReadIsReportedRatherThanThrown()
+    {
+        var directory = WriteSchema();
+
+        // A temporary directory that is really a file, so nothing can be created inside it and the
+        // descriptor set protoc claims to have written is not there to read.
+        var temporary = Path.Combine(TestPaths.CreateTempDirectory(), "not-a-directory");
+        File.WriteAllText(temporary, string.Empty);
+
+        var loader = new DescriptorLoader(
+            StandInProtoc.Silent(),
+            new DescriptorLoaderOptions { TemporaryDirectory = temporary });
+
+        var failure = Assert.Throws<DescriptorLoadException>(
+            () => loader.LoadBundle(["leaf.proto"], [directory]));
+
+        Assert.Contains("could not be read", failure.Message);
+        Assert.Equal(DescriptorLoadFailureKind.Failed, failure.Kind);
+    }
+
     /// <summary>A temporary directory that is not there yet is made, not complained about.</summary>
     [Fact]
     public void ATemporaryDirectoryThatDoesNotExistYetIsCreated()
@@ -360,6 +440,15 @@ public class ProcessSupervisionTests
         }
 
         return protoc;
+    }
+
+    /// <summary>How many undeletable descriptor sets a loader is still meaning to come back to.</summary>
+    private static int Remembered(DescriptorLoader loader)
+    {
+        var field = typeof(DescriptorLoader).GetField("_abandoned", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("DescriptorLoader no longer keeps the sets it could not delete.");
+
+        return ((ConcurrentDictionary<string, byte>)field.GetValue(loader)!).Count;
     }
 
     /// <summary>Every process this suite's stand-in protocs are made of, by id.</summary>

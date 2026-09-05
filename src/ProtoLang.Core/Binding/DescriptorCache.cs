@@ -47,6 +47,17 @@ public readonly record struct DescriptorCacheStatistics(int Hits, int Misses, in
 /// belongs to this cache rather than to whoever asked first, and the keystroke that superseded that
 /// compile is about to want the very same schemas.
 /// </para>
+/// <para>
+/// <b>It costs a second thread per load, and that is the price rather than an oversight.</b> The
+/// load runs on the pool while its caller blocks waiting for it, where a <see cref="Lazy{T}"/> ran
+/// the load on the caller's own thread. Both are blocked threads, and at four concurrent compiles
+/// that is eight of them against a default minimum of one per processor, so a cold burst of edits
+/// can wait on the pool injecting threads rather than on protoc. There is no cheaper arrangement
+/// that keeps the property: a caller that ran the load itself could not abandon it, and the caller
+/// most likely to abandon is precisely the one that started it. The way out is an asynchronous
+/// pipeline rather than a cleverer wait, which is a great deal larger than this and is not what
+/// #54 is. #57 measures it before the concurrency limit is raised.
+/// </para>
 /// </remarks>
 public sealed class DescriptorCache
 {
@@ -141,17 +152,23 @@ public sealed class DescriptorCache
             DescriptorBundle bundle;
             try
             {
-                // WaitAsync rather than Wait: it leaves the load running when this caller gives up,
-                // and it surfaces a failed load as the exception the load threw rather than wrapped
-                // in an AggregateException that every caller would then have to unwrap.
-                bundle = node.Value.Bundle.WaitAsync(cancellationToken).GetAwaiter().GetResult();
+                bundle = Await(node.Value.Bundle, cancellationToken);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                // This caller gave up; the load did not. The entry is left exactly as it is, because
+                // it is still being filled and the next caller should find it rather than start a
+                // second protoc over the same schemas.
                 throw;
             }
             catch
             {
+                // Everything else is a load that failed, and a cancellation the load raised of its
+                // own accord is one of them however much it resembles the case above. Told apart by
+                // whose token fired rather than by the type, because the type is the same: a load
+                // that decided its own work no longer applied would otherwise leave a faulted entry
+                // that only the continuation clears, so the caller who retries a moment later is
+                // handed the same cancellation again instead of a fresh attempt.
                 Drop(node);
                 throw;
             }
@@ -173,8 +190,25 @@ public sealed class DescriptorCache
         }
 
         Interlocked.Increment(ref _misses);
-        return load();
+
+        // Uncached, because two passes have already found somebody else's entry stale, but not
+        // unsupervised: waited for exactly as every other load here is, so that a caller which asked
+        // to be able to leave can still leave. Run inline instead and the one path a caller reaches
+        // when the cache is thrashing is the one path that ignores its token -- a wait of up to
+        // protoc's whole budget with nothing able to end it.
+        return Await(Task.Run(load), cancellationToken);
     }
+
+    /// <summary>Waits for a load, without joining this caller's fate to it.</summary>
+    /// <remarks>
+    /// One home for the wait, because there are two places that do it and the difference between
+    /// them was a defect rather than a decision. <c>WaitAsync</c> rather than <c>Wait</c> on both
+    /// counts: it leaves the load running when this caller gives up, and it surfaces a failed load
+    /// as the exception the load threw rather than wrapped in an <see cref="AggregateException"/>
+    /// that every caller would then have to unwrap.
+    /// </remarks>
+    private static DescriptorBundle Await(Task<DescriptorBundle> load, CancellationToken cancellationToken)
+        => load.WaitAsync(cancellationToken).GetAwaiter().GetResult();
 
     private LinkedListNode<Entry> Rent(DescriptorRequest request, Func<DescriptorBundle> load, out bool wasPresent)
     {

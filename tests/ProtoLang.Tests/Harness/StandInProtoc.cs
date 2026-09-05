@@ -79,6 +79,19 @@ public static class StandInProtoc
                 "exit 1",
             ]);
 
+    /// <summary>A protoc that reports success and writes no descriptor set at all.</summary>
+    /// <remarks>
+    /// The case a real protoc reaches only when something outside it went wrong -- a descriptor set
+    /// aimed at a directory that is not there, a file removed between the write and the read. It is
+    /// worth having a fixture for because the loader believes an exit code of zero, and what it does
+    /// when that belief turns out to be misplaced is the difference between a diagnostic and a
+    /// crash.
+    /// </remarks>
+    public static string Silent()
+        => Write(
+            windows: ["@echo off", "exit /b 0"],
+            posix: ["#!/bin/sh", "exit 0"]);
+
     /// <summary>Undoes what <see cref="Obstructive"/> did, so the next delete can succeed.</summary>
     public static void Unlock(string temporaryDirectory)
     {
