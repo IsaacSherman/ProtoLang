@@ -366,10 +366,24 @@ public sealed class LanguageServerHost : IDisposable
     }
 
     /// <remarks>
+    /// <para>
     /// Lexes rather than compiles, so it answers for a file that does not parse and never waits on
     /// protoc -- which is what makes it safe to run on every request. An unopened document produces an
     /// empty result rather than an error: the client may have closed it between asking and being
     /// answered.
+    /// </para>
+    /// <para>
+    /// <b>It answers about the version it read, which is the rule every request type obeys.</b> The
+    /// store hands out an immutable <see cref="OpenDocument"/>, so the text this classifies cannot
+    /// change underneath it however many edits arrive while it runs, and the tokens it returns
+    /// describe one version of the buffer rather than a blend of two. Nothing is refused here because
+    /// nothing can be: the read and the answer are the same instant. A handler that has to leave the
+    /// document between them -- one that waits on a compile, which is what hover, completion and
+    /// go-to-definition will do -- must check the version it read against the store before answering,
+    /// and refuse with LSP's <c>ContentModified</c> rather than answer about text the user has
+    /// already replaced. The scheduler states the same rule for diagnostics, where it is
+    /// <c>IsStale</c>.
+    /// </para>
     /// </remarks>
     private object? Classify(SemanticTokensParams message)
     {

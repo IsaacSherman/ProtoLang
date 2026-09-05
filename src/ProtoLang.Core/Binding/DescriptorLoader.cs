@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using Google.Protobuf;
 using Google.Protobuf.Reflection;
@@ -35,6 +36,14 @@ public sealed class DescriptorLoadException : Exception
 
     /// <inheritdoc cref="Output"/>
     public string RawOutput { get; }
+
+    /// <inheritdoc cref="DescriptorLoadFailureKind"/>
+    /// <remarks>
+    /// Init-only with a default rather than a fourth constructor parameter, so that both existing
+    /// constructors keep their signatures and keep meaning what they always meant: a failure nobody
+    /// classified is one protoc reported.
+    /// </remarks>
+    public DescriptorLoadFailureKind Kind { get; init; }
 }
 
 /// <summary>
@@ -47,6 +56,10 @@ public sealed class DescriptorLoader
     private const int GraceMilliseconds = 5_000;
 
     private readonly string _protocPath;
+
+    /// <summary>Descriptor sets this loader wrote and has not yet managed to delete.</summary>
+    /// <remarks>A set; the value is unused. <see cref="Release"/> says why they are kept.</remarks>
+    private readonly ConcurrentDictionary<string, byte> _abandoned = new(StringComparer.Ordinal);
 
     private int _protocInvocations;
 
@@ -151,6 +164,33 @@ public sealed class DescriptorLoader
     public DescriptorBundle LoadBundle(
         IReadOnlyList<string> protoFiles,
         IReadOnlyList<string> includePaths)
+        => LoadBundle(protoFiles, includePaths, CancellationToken.None);
+
+    /// <inheritdoc cref="LoadBundle(IReadOnlyList{string}, IReadOnlyList{string})"/>
+    /// <param name="cancellationToken">
+    /// Abandons the <em>wait</em>, and stops protoc only when this caller is the only thing the load
+    /// exists for.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// The distinction is the whole of the cancellation story, and it is worth stating rather than
+    /// discovering. A cached load belongs to the cache, not to whoever asked first: the keystroke
+    /// that superseded this one is about to want the same schemas, and killing protoc would throw
+    /// away exactly the work its successor needs and then pay for it again. So a cancelled caller
+    /// stops waiting, releases whatever it was holding, and leaves the load to finish and populate
+    /// the entry. An uncached load has no such successor -- nothing else can ever reach it -- so
+    /// cancelling it stops protoc.
+    /// </para>
+    /// <para>
+    /// What bounds a cached load is therefore <see cref="DescriptorLoaderOptions.Timeout"/> alone,
+    /// which is why there is deliberately no way to say "wait forever".
+    /// </para>
+    /// </remarks>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
+    public DescriptorBundle LoadBundle(
+        IReadOnlyList<string> protoFiles,
+        IReadOnlyList<string> includePaths,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(protoFiles);
         ArgumentNullException.ThrowIfNull(includePaths);
@@ -166,9 +206,12 @@ public sealed class DescriptorLoader
         // claim to account for which executable ran while knowing nothing about it, so two loads
         // under two different protocs of the same name would share an entry -- and a cache that is
         // wrong is worth less than one that is absent.
+        //
+        // CancellationToken.None inside the cache, and the caller's token on the wait for it: the
+        // load that runs there outlives the caller that started it.
         return Options.Cache is { } cache && request.IdentifiesItsProtoc
-            ? cache.GetOrLoad(request, () => Invoke(request))
-            : Invoke(request);
+            ? cache.GetOrLoad(request, () => Invoke(request, CancellationToken.None), cancellationToken)
+            : Invoke(request, cancellationToken);
     }
 
     /// <summary>Everything this load is, in the one object that decides what protoc would produce.</summary>
@@ -209,13 +252,15 @@ public sealed class DescriptorLoader
             [.. protoFiles]);
     }
 
-    private DescriptorBundle Invoke(DescriptorRequest request)
+    private DescriptorBundle Invoke(DescriptorRequest request, CancellationToken cancellationToken)
     {
-        var descriptorSetPath = Path.Combine(Path.GetTempPath(), $"protolang-{Guid.NewGuid():N}.desc");
+        SweepAbandoned();
+
+        var descriptorSetPath = Reserve();
 
         try
         {
-            RunProtoc(request, descriptorSetPath);
+            RunProtoc(request, descriptorSetPath, cancellationToken);
 
             var bytes = File.ReadAllBytes(descriptorSetPath);
             var set = FileDescriptorSet.Parser.ParseFrom(bytes);
@@ -244,14 +289,80 @@ public sealed class DescriptorLoader
         }
         finally
         {
-            if (File.Exists(descriptorSetPath))
+            Release(descriptorSetPath);
+        }
+    }
+
+    /// <summary>A path for this run's descriptor set, in a directory that exists.</summary>
+    /// <remarks>
+    /// A directory that cannot be created is left to protoc to complain about. Its complaint names
+    /// the file it could not write and arrives through the same channel as every other protoc
+    /// failure; one thrown from here would be a different exception type escaping a method
+    /// documented to report rather than throw.
+    /// </remarks>
+    private string Reserve()
+    {
+        try
+        {
+            Directory.CreateDirectory(Options.TemporaryDirectory);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+            or ArgumentException or NotSupportedException)
+        {
+        }
+
+        return Path.Combine(Options.TemporaryDirectory, $"protolang-{Guid.NewGuid():N}.desc");
+    }
+
+    /// <summary>Deletes one run's descriptor set, or remembers to try again.</summary>
+    /// <remarks>
+    /// <para>
+    /// This runs in a <c>finally</c>, on the way out of a load that has usually already failed, and
+    /// the failure it is carrying is the one worth reporting. A delete that threw would replace
+    /// "protoc rejected your schema on line 12" with an <see cref="IOException"/> about a temp file
+    /// nobody asked about -- and the delete is exactly the one most likely to fail, because a protoc
+    /// that had to be killed can leave a plugin holding the handle for a moment longer than the
+    /// grace period allows.
+    /// </para>
+    /// <para>
+    /// Remembered rather than shrugged off, because a server runs for a working day. One undeletable
+    /// file is nothing; one per keystroke is a disk. The next load sweeps them, by which time
+    /// whatever held the handle has let go.
+    /// </para>
+    /// <para>
+    /// Remembered only when something is actually there, which is what keeps the list of them from
+    /// being the leak it exists to prevent. A delete can also fail because the path was never
+    /// writable at all -- a temporary directory that turned out to be a file, a drive that is not
+    /// mapped -- and retrying that one every load for the rest of the session would be an entry that
+    /// can never come off.
+    /// </para>
+    /// </remarks>
+    private void Release(string descriptorSetPath)
+    {
+        try
+        {
+            File.Delete(descriptorSetPath);
+            _abandoned.TryRemove(descriptorSetPath, out _);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            if (Path.Exists(descriptorSetPath))
             {
-                File.Delete(descriptorSetPath);
+                _abandoned[descriptorSetPath] = 0;
             }
         }
     }
 
-    private void RunProtoc(DescriptorRequest request, string descriptorSetPath)
+    /// <inheritdoc cref="Release"/>
+    private void SweepAbandoned()
+    {
+        foreach (var path in _abandoned.Keys)
+        {
+            Release(path);
+        }
+    }
+
+    private void RunProtoc(DescriptorRequest request, string descriptorSetPath, CancellationToken cancellationToken)
     {
         var startInfo = new ProcessStartInfo(_protocPath)
         {
@@ -305,18 +416,33 @@ public sealed class DescriptorLoader
         // that hangs without writing leaves both reads outstanding forever, so a budget applied to
         // them would never be reached. Starting the reads first is what keeps the pipes drained
         // while this wait runs.
-        if (!process.WaitForExit(Budget()))
+        using var expiry = Expiry();
+        using var supervision = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, expiry.Token);
+
+        try
+        {
+            process.WaitForExitAsync(supervision.Token).GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
         {
             Terminate(process);
 
             var abandoned = Drain(stderrTask);
             Drain(stdoutTask);
 
+            // The caller's own token is answered first. A load nobody wants any more is not a protoc
+            // that misbehaved, and reporting it as one would put a timeout in the log every time a
+            // user typed quickly.
+            cancellationToken.ThrowIfCancellationRequested();
+
             throw new DescriptorLoadException(
                 $"protoc did not finish within {Options.Timeout.TotalSeconds:0.###} seconds and was "
                 + $"stopped.{Environment.NewLine}{abandoned.Trim()}".TrimEnd(),
                 ProtocDiagnostic.Parse(abandoned),
-                abandoned);
+                abandoned)
+            {
+                Kind = DescriptorLoadFailureKind.TimedOut,
+            };
         }
 
         var stderr = stderrTask.GetAwaiter().GetResult();
@@ -331,18 +457,31 @@ public sealed class DescriptorLoader
         }
     }
 
+    /// <summary>A source that fires when protoc has had all the time it is going to get.</summary>
     /// <remarks>
     /// Clamped rather than validated. A budget of zero or less is a caller saying "do not wait", which
     /// is a legitimate thing to ask of a supervisor -- and clamping is what keeps it meaning that:
-    /// handed straight to <see cref="Process.WaitForExit(int)"/>, a negative millisecond count is
-    /// <see cref="System.Threading.Timeout.Infinite"/>, so the one state
+    /// handed straight to <see cref="CancellationTokenSource.CancelAfter(int)"/>, a negative
+    /// millisecond count is <see cref="System.Threading.Timeout.Infinite"/>, so the one state
     /// <see cref="DescriptorLoaderOptions"/> says must not exist would be reachable by asking for
-    /// less than none.
+    /// less than none. Zero is cancelled outright rather than scheduled for zero milliseconds, so
+    /// that "do not wait" is an answer rather than a race between a timer and a quick protoc.
     /// </remarks>
-    private int Budget()
-        => Options.Timeout <= TimeSpan.Zero
-            ? 0
-            : (int)Math.Min(Options.Timeout.TotalMilliseconds, int.MaxValue);
+    private CancellationTokenSource Expiry()
+    {
+        var expiry = new CancellationTokenSource();
+
+        if (Options.Timeout <= TimeSpan.Zero)
+        {
+            expiry.Cancel();
+        }
+        else
+        {
+            expiry.CancelAfter((int)Math.Min(Options.Timeout.TotalMilliseconds, int.MaxValue));
+        }
+
+        return expiry;
+    }
 
     /// <summary>Stops a protoc that outstayed its budget, and the children it started.</summary>
     /// <remarks>

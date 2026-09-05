@@ -4,6 +4,18 @@
     <RootNamespace>ProtoLang.Tests</RootNamespace>
     <IsPackable>false</IsPackable>
     <OutputType>Exe</OutputType>
+
+    <!--
+      xUnit1051 asks that a call to any method offering a CancellationToken be given the test's own,
+      so that a hung test can be cancelled. Sound advice for an await, and the suite follows it for
+      every Task.Delay and WaitAsync it writes. It became unworkable when Compile and LoadBundle
+      gained cancellable overloads (#54): the analyzer then demands a token at forty-nine call sites
+      of two synchronous methods that return in milliseconds, none of which can hang, and editing
+      them would break the one thing #47 asks of every issue: that existing tests keep passing
+      unmodified. Suppressed for the rule rather than for the sites, because a pragma at each of
+      forty-nine is the same edit spelled worse.
+    -->
+    <NoWarn>$(NoWarn);xUnit1051</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

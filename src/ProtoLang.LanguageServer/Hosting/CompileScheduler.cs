@@ -25,12 +25,27 @@ namespace ProtoLang.LanguageServer.Hosting;
 /// finish and put it back.
 /// </para>
 /// <para>
-/// <b>What is here and what is #54's.</b> Debounce, coalescing, the version stamp and the staleness
-/// rule are #42's own requirements and are implemented. Genuine cancellation of a compile already
-/// running, a bounded queue, and the numbers below -- the interval, the concurrency limit, protoc's
-/// timeout -- belong to #54 and #57, which measure rather than guess. A stale run here is discarded
-/// rather than stopped; that is stated plainly because it is exactly the kind of thing a later reader
-/// would otherwise assume was already handled.
+/// <b>What cancellation reaches, and what it only discards.</b> A superseded compile stops waiting
+/// and gives back the worker it was holding: the token cancels the debounce, the wait for a slot, and
+/// the wait on protoc. What it does not do is stop protoc, and that is deliberate rather than a gap.
+/// A descriptor load belongs to the shared cache rather than to whichever keystroke asked first, and
+/// the keystroke that superseded this one is about to want the same schemas -- so killing that load
+/// would throw away exactly the work its successor needs and then pay for it again. Everything after
+/// the load is milliseconds and simply runs to completion, and its answer is discarded. What bounds a
+/// protoc nobody is waiting for any more is its budget, which is why there is no way to switch that
+/// off.
+/// </para>
+/// <para>
+/// <b>How deep the queue goes.</b> One entry per document, and a new request replaces the entry the
+/// previous one left rather than joining it -- so the queue cannot outgrow the number of open
+/// documents however fast anybody types, and superseding is what "the queue is full" means here.
+/// Dropping anything else would be worse: every entry is the newest thing known about its document,
+/// and discarding one leaves that document showing squiggles for text it no longer contains, with
+/// nothing scheduled that would correct them.
+/// </para>
+/// <para>
+/// The numbers below -- the interval, the concurrency limit -- are still #57's, which measures rather
+/// than guesses.
 /// </para>
 /// </remarks>
 public sealed class CompileScheduler
@@ -47,7 +62,8 @@ public sealed class CompileScheduler
     /// <summary>How many documents may be compiling at once.</summary>
     /// <remarks>
     /// Each compile can start a protoc, so ten open files must not mean ten processes. Four is a
-    /// guess, and #54 owns the real bound.
+    /// guess; #57 pins it against measured latency, and <see cref="PeakInFlight"/> is what shows
+    /// whether whatever it is pinned to is being honoured.
     /// </remarks>
     public const int DefaultConcurrency = 4;
 
@@ -89,9 +105,56 @@ public sealed class CompileScheduler
     /// </remarks>
     public int Compilations => Volatile.Read(ref _compilations);
 
+    /// <summary>Documents whose scheduled compile is still live.</summary>
+    /// <remarks>
+    /// <para>
+    /// The queue depth, and the whole of it, because the queue is keyed by document. Published so
+    /// that "sustained editing does not grow the backlog" is a measurement rather than an argument
+    /// about a dictionary, and for the status report in #58, where a server that feels stuck should
+    /// be able to say whether it is holding work or merely idle.
+    /// </para>
+    /// <para>
+    /// Live means supersedable: a later request for that document would replace this one, and a
+    /// close would cancel it. It is deliberately not "how much work is running", because a compile
+    /// abandoned by a close leaves this the instant it is abandoned and may take a moment longer to
+    /// notice. <see cref="InFlight"/> is the other question, and the two are only equal when nothing
+    /// has been given up on.
+    /// </para>
+    /// </remarks>
+    public int Pending => _pending.Count;
+
+    /// <summary>Compiles that are past the gate and have not yet returned.</summary>
+    /// <remarks>
+    /// What is actually occupying a worker, including one whose answer is already known to be
+    /// unwanted. That gap is the whole subject of cancellation here: the number that matters is how
+    /// long a compile keeps a worker after it has been abandoned, and it cannot be measured from
+    /// <see cref="Pending"/>, which has already forgotten it.
+    /// </remarks>
+    public int InFlight => Volatile.Read(ref _inFlight);
+
+    /// <summary>The most compiles that have ever been past the gate at one moment.</summary>
+    /// <remarks>
+    /// A high-water mark rather than a current count, because the property worth testing is that the
+    /// limit was never exceeded, and a current count only ever shows that it is not being exceeded
+    /// right now. Ten documents edited at once is a burst that lasts milliseconds; a sample taken
+    /// afterwards would find nothing and pass.
+    /// </remarks>
+    public int PeakInFlight => Volatile.Read(ref _peakInFlight);
+
     private int _compilations;
+    private int _inFlight;
+    private int _peakInFlight;
 
     /// <summary>Recompiles one document once the typing settles.</summary>
+    /// <remarks>
+    /// The run is handed to the pool rather than started here, and that is not a preference. An
+    /// <c>await</c> on an interval of zero completes synchronously, and so does a wait on a
+    /// semaphore with a slot free -- so started inline, this method runs the whole compilation,
+    /// protoc and all, on whichever thread called it before it returns. The thread that calls it is
+    /// the one worker reading every notification the client sends, which would stop the server dead
+    /// for the length of a schema load. The default interval hides it, because a real delay does
+    /// yield; a shorter one, which is exactly what #57 might choose, would not.
+    /// </remarks>
     public void Schedule(DocumentUri document)
     {
         ArgumentNullException.ThrowIfNull(document);
@@ -100,7 +163,7 @@ public sealed class CompileScheduler
 
         _pending.AddOrUpdate(document.Key, cancellation, (_, previous) => Supersede(previous, cancellation));
 
-        _ = RunAsync(document, cancellation);
+        _ = Task.Run(() => RunAsync(document, cancellation), CancellationToken.None);
     }
 
     /// <summary>Recompiles everything, because something that affects every document changed.</summary>
@@ -160,15 +223,21 @@ public sealed class CompileScheduler
 
             try
             {
+                Enter();
+
                 await CompileAsync(document, token).ConfigureAwait(false);
             }
             finally
             {
+                Interlocked.Decrement(ref _inFlight);
                 _concurrency.Release();
             }
         }
         catch (OperationCanceledException)
         {
+            // Either a keystroke superseded this compile or the document closed. Both are ordinary,
+            // and both leave the descriptor load that was under way to finish into the cache.
+            _log.Trace($"Abandoned a compilation of '{document}' that was superseded before it finished.");
         }
         catch (Exception ex)
         {
@@ -188,8 +257,35 @@ public sealed class CompileScheduler
         }
     }
 
+    /// <summary>Records that one more compile is past the gate, and how high that has ever been.</summary>
+    /// <remarks>
+    /// Read back and raised in a loop rather than compared once, because two compiles entering
+    /// together can each read the old peak and each write a value the other has already beaten.
+    /// </remarks>
+    private void Enter()
+    {
+        var current = Interlocked.Increment(ref _inFlight);
+
+        var peak = Volatile.Read(ref _peakInFlight);
+        while (current > peak)
+        {
+            var seen = Interlocked.CompareExchange(ref _peakInFlight, current, peak);
+            if (seen == peak)
+            {
+                return;
+            }
+
+            peak = seen;
+        }
+    }
+
     private async Task CompileAsync(DocumentUri uri, CancellationToken cancellationToken)
     {
+        // Asked before the work rather than only after it. A compile that waited for a slot behind
+        // three others has usually been superseded by the time it gets one, and running it anyway
+        // spends a protoc on text nobody is looking at.
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (_documents.Find(uri) is not { } document)
         {
             return;
@@ -201,7 +297,7 @@ public sealed class CompileScheduler
         var settings = configuration.Resolve(uri);
         var mapper = _mapper();
 
-        var contribution = Diagnose(document, settings, mapper);
+        var contribution = Diagnose(document, settings, mapper, cancellationToken);
 
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -235,7 +331,8 @@ public sealed class CompileScheduler
     private DiagnosticContribution Diagnose(
         OpenDocument document,
         DocumentConfiguration settings,
-        DiagnosticMapper mapper)
+        DiagnosticMapper mapper,
+        CancellationToken cancellationToken)
     {
         var uri = document.Uri;
 
@@ -274,7 +371,9 @@ public sealed class CompileScheduler
         }
 
         var compilation = new Compilation(document.ToSource(settings.Folder?.Path), options!);
-        var result = compilation.Compile();
+        var result = compilation.Compile(cancellationToken);
+
+        ReportExpiry(result, uri, compilation.Loader);
 
         // The roots protoc's own error messages are resolved against: what the compilation searched,
         // then what the loader adds of its own. Taken from the compilation that ran rather than rebuilt,
@@ -287,6 +386,26 @@ public sealed class CompileScheduler
             uri,
             settings,
             mapper);
+    }
+
+    /// <summary>Says in the log that protoc was stopped, and which protoc it was.</summary>
+    /// <remarks>
+    /// The user already sees <c>PL0083</c> on the import line, which is the half of this that belongs
+    /// on their screen. The half that belongs in a log is the executable, because the diagnostic
+    /// cannot carry it without naming a path in every message and the first question a support
+    /// request has to answer is which protoc was in effect. #58 reads the same fact from the same
+    /// place.
+    /// </remarks>
+    private void ReportExpiry(CompilationResult result, DocumentUri uri, DescriptorLoader? loader)
+    {
+        if (result.SchemaFailure is not { Kind: DescriptorLoadFailureKind.TimedOut })
+        {
+            return;
+        }
+
+        _log.Warning(
+            $"protoc was stopped for outrunning its budget while compiling '{uri}'"
+                + $"{(loader is null ? string.Empty : $", running '{loader.ProtocPath}'")}.");
     }
 
     /// <summary>
