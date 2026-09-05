@@ -33,11 +33,19 @@ public readonly record struct DescriptorCacheStatistics(int Hits, int Misses, in
 /// invalidate an entry that never named it.
 /// </para>
 /// <para>
-/// Single-flight, through a <see cref="Lazy{T}"/> inserted under the lock and forced outside it. Two
-/// compilations racing to populate one entry is the normal case in an editor -- a keystroke arrives
-/// while the previous one is still loading -- and running protoc twice for it would waste exactly the
-/// work this type exists to avoid. Holding the lock across the load instead would serialize every
-/// unrelated load behind it.
+/// Single-flight, through a <see cref="Task{T}"/> started under the lock and waited on outside it.
+/// Two compilations racing to populate one entry is the normal case in an editor -- a keystroke
+/// arrives while the previous one is still loading -- and running protoc twice for it would waste
+/// exactly the work this type exists to avoid. Holding the lock across the load instead would
+/// serialize every unrelated load behind it.
+/// </para>
+/// <para>
+/// A task rather than a <see cref="Lazy{T}"/>, and the difference is the whole of #54's cancellation
+/// story. A caller blocked inside <c>Lazy.Value</c> cannot leave, so a compile the user has already
+/// superseded goes on holding a worker until protoc is done with it. A caller waiting on a task can
+/// abandon the wait and leave the load running -- which is what should happen, because the load
+/// belongs to this cache rather than to whoever asked first, and the keystroke that superseded that
+/// compile is about to want the very same schemas.
 /// </para>
 /// </remarks>
 public sealed class DescriptorCache
@@ -110,6 +118,18 @@ public sealed class DescriptorCache
     /// can do to someone who has just fixed their mistake.
     /// </remarks>
     public DescriptorBundle GetOrLoad(DescriptorRequest request, Func<DescriptorBundle> load)
+        => GetOrLoad(request, load, CancellationToken.None);
+
+    /// <inheritdoc cref="GetOrLoad(DescriptorRequest, Func{DescriptorBundle})"/>
+    /// <param name="cancellationToken">
+    /// Abandons this caller's wait. The load itself runs on, because it is this cache's and not this
+    /// caller's; see the type's remarks.
+    /// </param>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
+    public DescriptorBundle GetOrLoad(
+        DescriptorRequest request,
+        Func<DescriptorBundle> load,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(load);
@@ -121,7 +141,14 @@ public sealed class DescriptorCache
             DescriptorBundle bundle;
             try
             {
-                bundle = node.Value.Bundle.Value;
+                // WaitAsync rather than Wait: it leaves the load running when this caller gives up,
+                // and it surfaces a failed load as the exception the load threw rather than wrapped
+                // in an AggregateException that every caller would then have to unwrap.
+                bundle = node.Value.Bundle.WaitAsync(cancellationToken).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch
             {
@@ -161,16 +188,36 @@ public sealed class DescriptorCache
                 return existing;
             }
 
-            var created = _order.AddLast(
-                new Entry(request, new Lazy<DescriptorBundle>(load, LazyThreadSafetyMode.ExecutionAndPublication)));
+            var created = _order.AddLast(new Entry(request, Task.Run(load)));
 
             _entries[request] = created;
+            Discard(created);
             Evict();
 
             wasPresent = false;
             return created;
         }
     }
+
+    /// <summary>Drops an entry whose load failed, whoever is left to notice.</summary>
+    /// <remarks>
+    /// A failed load is not cached -- fixing the broken <c>.proto</c> and compiling again must reach
+    /// protoc rather than the error. The caller that was waiting drops it too, and did so alone until
+    /// callers could leave: a load whose every waiter has cancelled would otherwise fault into an
+    /// entry nobody is watching, and stay there answering the same stale error to everyone who came
+    /// afterwards. Observing the exception here is also what keeps an abandoned failure from
+    /// surfacing later as an unobserved task exception.
+    /// </remarks>
+    private void Discard(LinkedListNode<Entry> node)
+        => node.Value.Bundle.ContinueWith(
+            load =>
+            {
+                _ = load.Exception;
+                Drop(node);
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
 
     /// <remarks>
     /// The node identifies the entry, not the request: by the time a stale or failed load is dropped,
@@ -222,7 +269,7 @@ public sealed class DescriptorCache
         {
             var next = node.Next;
 
-            if (node.Value.Bundle.IsValueCreated)
+            if (node.Value.Bundle.IsCompleted)
             {
                 _entries.Remove(node.Value.Request);
                 _order.Remove(node);
@@ -233,5 +280,5 @@ public sealed class DescriptorCache
         }
     }
 
-    private sealed record Entry(DescriptorRequest Request, Lazy<DescriptorBundle> Bundle);
+    private sealed record Entry(DescriptorRequest Request, Task<DescriptorBundle> Bundle);
 }

@@ -42,4 +42,19 @@ public sealed record DescriptorLoaderOptions
 
     /// <inheritdoc cref="DefaultTimeout"/>
     public TimeSpan Timeout { get; init; } = DefaultTimeout;
+
+    /// <summary>Where the descriptor set protoc writes is put while it is being read back.</summary>
+    /// <remarks>
+    /// <para>
+    /// The system temp directory unless a caller says otherwise, which is where these files have
+    /// always gone. What a caller gains by naming its own is a directory it can look inside: "this
+    /// session leaked no temp files" is an exact question about a directory this loader owns, and an
+    /// unanswerable one about a directory every process on the machine writes to.
+    /// </para>
+    /// <para>
+    /// Created if it is not there, and never emptied. A loader deletes the files it wrote and
+    /// nothing else, because a directory a caller named may hold things a caller cares about.
+    /// </para>
+    /// </remarks>
+    public string TemporaryDirectory { get; init; } = Path.GetTempPath();
 }
