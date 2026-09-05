@@ -503,16 +503,16 @@ public class DescriptorCacheTests
 
     /// <summary>
     /// A compiler an editor calls on every keystroke may not have a state in which it waits forever.
-    /// A budget of nothing reaches the same kill path a real overrun does, without a fixture process
-    /// to babysit.
+    /// The stand-in protoc will not be finished for a minute, so the budget expiring is the only way
+    /// the wait can end.
     /// </summary>
     [Fact]
     public void AProtocThatOutlivesItsBudgetIsStoppedAndReported()
     {
         var directory = WriteSchemas();
         var loader = new DescriptorLoader(
-            RequireProtoc(),
-            new DescriptorLoaderOptions { Timeout = TimeSpan.Zero });
+            WriteSleepingProtoc(),
+            new DescriptorLoaderOptions { Timeout = TimeSpan.FromMilliseconds(250) });
 
         var failure = Assert.Throws<DescriptorLoadException>(
             () => loader.LoadBundle(["root.proto"], [directory]));
@@ -846,6 +846,48 @@ public class DescriptorCacheTests
         }
 
         return protoc;
+    }
+
+    /// <summary>A stand-in protoc that sleeps instead of compiling, whatever it is handed.</summary>
+    /// <remarks>
+    /// <para>
+    /// The budget was previously exercised by giving a real protoc none of it, which is a race rather
+    /// than a guarantee: nothing stops a protoc from starting and finishing before the supervisor
+    /// looks at the clock, and on a machine busy running the rest of this suite one run in four did
+    /// exactly that and loaded successfully. A child that will not be finished for a minute leaves
+    /// expiry as the only way a wait of milliseconds can end, however the scheduler behaves.
+    /// </para>
+    /// <para>
+    /// A minute rather than forever, because it is also the leash: a kill that somehow failed would
+    /// otherwise strand a process on the machine rather than on one test. Written on the spot rather
+    /// than checked in as a binary, so the suite still asks nothing of the machine it did not already
+    /// ask, and it sleeps in a child of its own, which puts the kill on the process tree a real
+    /// protoc spawning a plugin would need.
+    /// </para>
+    /// </remarks>
+    private static string WriteSleepingProtoc()
+    {
+        var directory = TestPaths.CreateTempDirectory();
+
+        if (OperatingSystem.IsWindows())
+        {
+            // ping rather than timeout.exe, which refuses to run at all when input is redirected --
+            // and what the test host hands this process for stdin is not ours to choose.
+            var batch = Path.Combine(directory, "protoc.cmd");
+            File.WriteAllLines(batch, ["@echo off", "ping -n 60 127.0.0.1 > nul"]);
+
+            return batch;
+        }
+
+        var script = Path.Combine(directory, "protoc");
+        // Not exec: the shell stays to hold the sleep as a child, so the kill has a tree to walk here
+        // too rather than only under cmd on Windows.
+        File.WriteAllLines(script, ["#!/bin/sh", "sleep 60"]);
+        File.SetUnixFileMode(
+            script,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        return script;
     }
 
     /// <summary>A second protoc install, at a path of its own, that really runs.</summary>

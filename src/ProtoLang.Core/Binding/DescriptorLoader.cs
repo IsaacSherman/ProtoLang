@@ -333,8 +333,11 @@ public sealed class DescriptorLoader
 
     /// <remarks>
     /// Clamped rather than validated. A budget of zero or less is a caller saying "do not wait", which
-    /// is a legitimate thing to ask of a supervisor and the only way to exercise this path in a test
-    /// without a fixture process to babysit.
+    /// is a legitimate thing to ask of a supervisor -- and clamping is what keeps it meaning that:
+    /// handed straight to <see cref="Process.WaitForExit(int)"/>, a negative millisecond count is
+    /// <see cref="System.Threading.Timeout.Infinite"/>, so the one state
+    /// <see cref="DescriptorLoaderOptions"/> says must not exist would be reachable by asking for
+    /// less than none.
     /// </remarks>
     private int Budget()
         => Options.Timeout <= TimeSpan.Zero
