@@ -1436,6 +1436,22 @@ Implementation Note:
   paths, and the content of every file in the transitive closure -- not against the files the
   compilation named, which do not determine the result. Caching is never observable: a cached load
   produces what a cold load would have produced, and a load that failed is not cached at all.
+- **Every load is bounded in time, and there is no way to ask for an unbounded one.** A compiler an
+  editor calls on every keystroke may not have a state in which one invocation stops it answering.
+  A `protoc` that outstays its budget is stopped, along with the plugins it started, and the load
+  fails; the descriptor set it was writing is deleted, and a delete that cannot be done now is done
+  by the next load rather than abandoned.
+- **A load stopped by its budget is reported apart from a schema `protoc` rejected**, as `PL0083`
+  rather than `PL0003`, and the distinction survives to a host as the failure's kind. They are
+  different things to act on: one names a line the author can go and correct, and the other says
+  nothing whatever about the schema, which may be perfectly good. Reported under one code, the
+  second reads as the first.
+- **A load outlives the caller that asked for it.** A caller may abandon its wait -- an editor
+  supersedes work constantly -- and abandoning it stops `protoc` only where that caller was the only
+  thing the load existed for. A load reached through a cache belongs to the cache: the request that
+  superseded this one usually wants the same schemas, so stopping it would discard exactly the work
+  its successor needs. What bounds such a load is its budget, which is the other reason there is no
+  way to switch that off.
 
 Open Questions:
 
@@ -1950,6 +1966,17 @@ Normative Requirements:
   importing one broken schema both report it, identical reports are published once, and closing one
   of them does not withdraw the other's.
 - Diagnostics are cleared when a document closes, and when they stop applying.
+- **An answer describes the version of the buffer it was computed against, and is never published
+  for a version the buffer has moved past.** This is the rule a host is strictest about, because
+  breaking it is the most visible failure it can have: the user corrects an error, watches the
+  squiggle vanish, and then watches an older compilation finish and put it back. It holds for every
+  kind of answer and not only for diagnostics -- a hover or a completion computed against text the
+  user has already replaced is describing something nobody is looking at -- so a request that can
+  answer only about a superseded version is refused as such rather than answered. A stale
+  computation is discarded silently; a refusal is only for a request that is owed a reply.
+- **Closing a document withdraws what it published and abandons what is outstanding for it.** Work
+  already under way may finish, since some of it is shared and cannot be recalled, but nothing it
+  produces is published.
 
 ## 27. Versioning and Compatibility
 
@@ -2166,3 +2193,6 @@ Use this table to record decisions as the language stabilizes.
 | 2026-09-04 | Descriptor input | Well-known types are answered like any other schema, with no special case for `google/protobuf` (21.1) | Declining would have had to suppress an answer the compiler genuinely has: under a `protoc` that ships the schemas as files, `Timestamp` has a location and the best documentation in the protobuf ecosystem, and hover on it would otherwise behave differently from hover on the user's own messages for no reason the user can see. The case a special rule was meant to cover -- being sent into a package cache -- is already covered by the general one, because a `protoc` that resolves those schemas from its own compiled-in descriptors reports no file and therefore no location | Draft |
 | 2026-09-04 | Descriptor input | A declaration's range is offered only against the exact bytes `protoc` compiled, checked by the hash the closure already records; comments do not depend on the file and survive an edit (21.1) | The file is read when the first question about a schema is asked, which can be long after `protoc` read it -- an editor saving a comment into a `.proto` between the compile and the hover is the ordinary case, not the exotic one. A stale location does not announce itself, because both line and column clamp: it resolves to a plausible range over the wrong characters, or to an empty one, and the reader is told nothing. Declining is the only answer that is never wrong, and the cost of it is bounded: the check is repeated on every question rather than remembered from the first, so an answer already given stops being given when the file moves under it and comes back when the file does, both on the bundle that has been serving them, and the same edit invalidates the descriptor cache anyway | Draft |
 | 2026-09-04 | Descriptor input | Positions recovered from source info are converted into the compiler's coordinates rather than reported as `protoc` counts them (21.1) | `protoc`'s tokenizer advances its column by one per byte, jumps a tab to the next multiple of eight, and counts a byte-order mark as three characters of the first line, so on a tab-indented schema every column it reports is several columns right of the character it means, and on a line holding non-ASCII text everything after that text is shifted. A range built from those numbers selects the wrong characters, which reads as broken rather than as approximate. Replaying that counting over the line is a dozen lines and exactly testable, and the file has to be read regardless, because a span carries an offset as well as a line and a column and neither can be derived from the other without the text | Draft |
+| 2026-09-05 | Editor support | Cancelling a compilation abandons the wait on `protoc`; it stops `protoc` only where no cache holds the load, and everything after the load is discarded rather than interrupted (21.1) | Threading a token through every phase would put a new failure mode into a compiler the editor work is meant to leave alone, and would buy nothing: lexing, parsing, binding and lowering are milliseconds on a file a person is typing into, and the wait on `protoc` is the only step that can outlast a keystroke. Killing a cached load is worse than useless -- the keystroke that superseded this one is about to ask for the same schemas, so the kill discards exactly the work its successor needs and then pays for it again -- while an uncached load has no successor that could ever reach it. What a cancelled compilation gets is the thing that matters, which is that it stops holding a worker | Draft |
+| 2026-09-05 | Diagnostics | A `protoc` stopped by its budget is `PL0083`, not the `PL0003` a rejected schema gets (21.1, 26) | The message always said what had happened and the code did not, so anything reading codes -- a build log filter, a status report, a user scanning a problem list -- saw a schema error. The two call for opposite responses: one names a line to go and correct, and the other says nothing at all about the schema, which may be entirely valid and merely large, or handed to a plugin that never exits. A kind on the failure as well as a code, so a host can count expiries without matching on the wording of a sentence | Draft |
+| 2026-09-05 | Editor support | A host's compile queue holds one entry per document, and a new request for a document supersedes the entry the last one left (26.1) | The queue cannot then outgrow the number of open documents however fast anybody types, which is the bound, and superseding is what a full queue does. Dropping anything else would be worse than queueing it: every entry is the newest thing known about its document, so discarding one leaves that document showing squiggles for text it no longer contains and nothing scheduled that would ever correct them | Draft |

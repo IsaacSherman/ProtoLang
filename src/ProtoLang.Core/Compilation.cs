@@ -265,7 +265,31 @@ public sealed class Compilation
             .FirstOrDefault(directory => directory is not null);
 
     /// <summary>Compiles the sources to typed IR.</summary>
-    public CompilationResult Compile() => Compile(new DiagnosticBag());
+    public CompilationResult Compile() => Compile(new DiagnosticBag(), CancellationToken.None);
+
+    /// <inheritdoc cref="Compile()"/>
+    /// <param name="cancellationToken">Abandons the compilation when nobody wants its answer.</param>
+    /// <remarks>
+    /// <para>
+    /// Cancellation reaches one place, and that is deliberate: the wait on protoc, which is the only
+    /// step here that can take longer than a keystroke. Lexing, parsing, binding and lowering are
+    /// milliseconds on a file a person is typing into, so checking a token between them would buy an
+    /// editor nothing and would put a new failure mode through every phase of a compiler the epic
+    /// asks to leave alone. What a cancelled compile gets is the thing that matters -- it stops
+    /// waiting and releases the worker it was holding -- and what it does not get is a protoc that
+    /// stops; see <see cref="DescriptorLoader.LoadBundle(IReadOnlyList{string}, IReadOnlyList{string}, CancellationToken)"/>
+    /// for why finishing that load is the right outcome rather than a leak.
+    /// </para>
+    /// <para>
+    /// This throws rather than reporting, which is the opposite of everything else here. A
+    /// cancellation is not something wrong with the input; it is this caller withdrawing the
+    /// question, and a <see cref="CompilationResult"/> describing it would be an answer to a question
+    /// nobody is still asking.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
+    public CompilationResult Compile(CancellationToken cancellationToken)
+        => Compile(new DiagnosticBag(), cancellationToken);
 
     /// <summary>
     /// Compiles a single ProtoLang file to typed IR, reading it from disk.
@@ -312,7 +336,7 @@ public sealed class Compilation
                     Loader = loader,
                     Config = settled,
                 })
-            .Compile(diagnostics);
+            .Compile(diagnostics, CancellationToken.None);
     }
 
     /// <summary>
@@ -388,8 +412,44 @@ public sealed class Compilation
     public static IReadOnlyList<string> GetSearchPaths(string sourcePath, IReadOnlyList<string> includePaths)
         => BuildSearchPaths([SourceIdentity.FromPath(sourcePath)], includePaths, out _);
 
-    private CompilationResult Compile(DiagnosticBag diagnostics)
+    /// <summary>Reports a failed descriptor load, under the code that says which way it failed.</summary>
+    /// <remarks>
+    /// One home for the choice, consulted by both places a load can fail, because a rule written out
+    /// twice is one that eventually disagrees with itself about which code an expiry gets.
+    /// <para>
+    /// The distinction is worth a code rather than a sentence inside <c>PL0003</c>'s message. A
+    /// schema protoc read and rejected names a line the author can go and look at; a protoc that
+    /// never finished reading names nothing wrong with the schema at all, and may well have been
+    /// handed a perfectly good one. Filed under the same code the second reads as the first, and a
+    /// reader spends their afternoon hunting for a fault in a file that has none.
+    /// </para>
+    /// </remarks>
+    private static void ReportSchemaFailure(
+        DiagnosticBag diagnostics,
+        DescriptorLoadException failure,
+        SourceSpan span)
     {
+        if (failure.Kind is DescriptorLoadFailureKind.TimedOut)
+        {
+            diagnostics.Error(
+                "PL0083",
+                "protoc did not finish",
+                failure.Message,
+                span,
+                "The schemas may be perfectly good. A very large import closure on a machine that "
+                    + "has not read those files before can genuinely need longer, while a protoc "
+                    + "that never finishes at all is usually a plugin of its own that is not "
+                    + "exiting. Check which protoc is in effect and what it is configured to run.");
+            return;
+        }
+
+        diagnostics.Error("PL0003", "protobuf schema could not be loaded", failure.Message, span);
+    }
+
+    private CompilationResult Compile(DiagnosticBag diagnostics, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
         var config = Options.Config ?? ResolveConfig(ConfigDirectory, diagnostics);
         if (config is null)
         {
@@ -453,11 +513,7 @@ public sealed class Compilation
         }
         catch (DescriptorLoadException ex)
         {
-            diagnostics.Error(
-                "PL0003",
-                "protobuf schema could not be loaded",
-                ex.Message,
-                unit.Imports[0].Span);
+            ReportSchemaFailure(diagnostics, ex, unit.Imports[0].Span);
             return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, [])
             {
                 SchemaFailure = SchemaLoadFailure.From(ex),
@@ -503,15 +559,11 @@ public sealed class Compilation
         DescriptorBundle schema;
         try
         {
-            schema = loader.LoadBundle(protoFiles, SearchPaths);
+            schema = loader.LoadBundle(protoFiles, SearchPaths, cancellationToken);
         }
         catch (DescriptorLoadException ex)
         {
-            diagnostics.Error(
-                "PL0003",
-                "protobuf schema could not be loaded",
-                ex.Message,
-                unit.Imports.Count > 0 ? unit.Imports[0].Span : unit.Span);
+            ReportSchemaFailure(diagnostics, ex, unit.Imports.Count > 0 ? unit.Imports[0].Span : unit.Span);
 
             // The imports, not an empty list: every one of them resolved -- the gate above refuses
             // to reach protoc otherwise -- and what failed is protoc's reading of schemas this

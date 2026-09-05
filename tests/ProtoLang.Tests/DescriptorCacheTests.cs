@@ -502,6 +502,33 @@ public class DescriptorCacheTests
     }
 
     /// <summary>
+    /// A caller abandoning its wait is not the only way a load can be cancelled: a load may discover
+    /// that its own work is no longer applicable. That cancellation is a failed entry, not an answer
+    /// to preserve for the next caller.
+    /// </summary>
+    [Fact]
+    public void ALoadThatCancelsItselfIsRetried()
+    {
+        var cache = new DescriptorCache();
+        var attempts = 0;
+
+        DescriptorBundle Load()
+        {
+            if (Interlocked.Increment(ref attempts) == 1)
+            {
+                throw new OperationCanceledException();
+            }
+
+            return EmptyBundle();
+        }
+
+        Assert.ThrowsAny<OperationCanceledException>(() => cache.GetOrLoad(Request(), Load));
+
+        Assert.NotNull(cache.GetOrLoad(Request(), Load));
+        Assert.Equal(2, Volatile.Read(ref attempts));
+    }
+
+    /// <summary>
     /// A compiler an editor calls on every keystroke may not have a state in which it waits forever.
     /// The stand-in protoc will not be finished for a minute, so the budget expiring is the only way
     /// the wait can end.

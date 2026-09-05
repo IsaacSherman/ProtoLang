@@ -66,9 +66,14 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    [`DescriptorRequest`](src/ProtoLang.Core/Binding/DescriptorRequest.cs) — which `protoc`, which
    roots in which order, which files — and re-checked against a content hash of every file in the
    closure, because the request cannot name a schema that is only reached through an import. The
-   loader is uncached unless a caller supplies one, `protoc` runs under a timeout, and a failure keeps
-   its report line by line as [`ProtocDiagnostic`](src/ProtoLang.Core/Binding/ProtocDiagnostic.cs)
-   rather than only as prose. The source info the set carries is answered rather than merely kept:
+   loader is uncached unless a caller supplies one, `protoc` runs under a timeout — reported as
+   `PL0083` and as a kind on the failure, so an expiry is not mistaken for a schema error — and a
+   failure keeps its report line by line as
+   [`ProtocDiagnostic`](src/ProtoLang.Core/Binding/ProtocDiagnostic.cs) rather than only as prose.
+   A cached entry holds the load as a `Task` rather than a `Lazy`, which is what lets a caller
+   abandon its wait: `LoadBundle` and `Compile` take a `CancellationToken` that stops the *waiting*,
+   and stops `protoc` itself only for a load no cache holds, because a cached load belongs to the
+   cache and its successor usually wants exactly it. The source info the set carries is answered rather than merely kept:
    `DescriptorBundle.DeclarationOf` turns a message, enum, field or enum value descriptor into a
    [`SchemaDeclaration`](src/ProtoLang.Core/Symbols/SchemaDeclaration.cs) — the `.proto` it was
    written in, the range of the declaration and of its name, and the comments around it — through a
@@ -143,6 +148,8 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | What a descriptor load produced | `DescriptorBundle`, `SchemaFile` | [Binding/DescriptorBundle.cs](src/ProtoLang.Core/Binding/DescriptorBundle.cs) |
 | What decides a load, and keys it | `DescriptorRequest` | [Binding/DescriptorRequest.cs](src/ProtoLang.Core/Binding/DescriptorRequest.cs) |
 | Whether a load can be reused | `DescriptorCache`, `SchemaClosure` | [Binding/DescriptorCache.cs](src/ProtoLang.Core/Binding/DescriptorCache.cs) |
+| Which way a load failed | `DescriptorLoadFailureKind`, `SchemaLoadFailure` | [Binding/DescriptorLoadFailureKind.cs](src/ProtoLang.Core/Binding/DescriptorLoadFailureKind.cs) |
+| When a document is compiled, and whether the answer still counts | `CompileScheduler` | [Hosting/CompileScheduler.cs](src/ProtoLang.LanguageServer/Hosting/CompileScheduler.cs) |
 | What `protoc` said, and about where | `ProtocDiagnostic`, `SchemaLoadFailure` | [Binding/ProtocDiagnostic.cs](src/ProtoLang.Core/Binding/ProtocDiagnostic.cs), [SchemaLoadFailure.cs](src/ProtoLang.Core/SchemaLoadFailure.cs) |
 | Offset ↔ line/column | `LineMap` | [Diagnostics/LineMap.cs](src/ProtoLang.Core/Diagnostics/LineMap.cs) |
 | Messages | `Diagnostic`, `DiagnosticBag` | [Diagnostics/Diagnostic.cs](src/ProtoLang.Core/Diagnostics/Diagnostic.cs) |
@@ -214,8 +221,15 @@ document. Edits are applied incrementally, in order, each against the text the o
 produced. A compile is debounced and coalesced, carries the document version and the configuration
 generation it began under, and its result is **discarded rather than published** if either has moved
 — the most visible failure a server can have is an old compile putting a fixed error back on screen.
-Genuine cancellation, queue bounds and the numbers are #54 and #57; what is here is the version stamp
-and the discard.
+The rule is not only about diagnostics: every answer describes the version it read, and a request
+that could only answer about a superseded one refuses instead.
+
+Cancellation reaches the one step that can outlast a keystroke. A superseded or closed document's
+compile stops waiting on `protoc` and gives its worker back at once; everything after the load is
+milliseconds and simply finishes into the discard. The queue holds one entry per document and a new
+request supersedes the last, so it cannot outgrow the number of open documents, and `Pending`,
+`InFlight` and `PeakInFlight` publish the backlog, what is running and the high-water mark. The
+interval and the concurrency limit are still #57's to pin.
 
 Diagnostics are published *per file* and produced *per compilation*, and the two stop lining up as
 soon as a `.proto` can be blamed, so
@@ -243,7 +257,8 @@ One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized b
 `LexerTests`, `ParserTests`, `ParserResilienceTests` and `BinderResilienceTests` (fuzz),
 `SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
 `SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `ScopeQueryTests`,
-`DescriptorCacheTests`, `SchemaDeclarationTests`, `WorkspaceConfigurationTests`, `LanguageServerTests`, `SemanticTokenTests`,
+`DescriptorCacheTests`, `SchemaDeclarationTests`, `ProcessSupervisionTests`, `CompileSupervisionTests`,
+`WorkspaceConfigurationTests`, `LanguageServerTests`, `SemanticTokenTests`,
 `TreeWalkTests`, `ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`,
 and the scaffolding and smoke suites.
 
@@ -296,5 +311,7 @@ duplicate cache entries #48 left behind. #42 built the server itself — lifecyc
 diagnostics and lexical semantic tokens over a base protocol this repository owns — and reached Core
 only to have the lexer keep the comment spans it was already walking past. #41 closed the second
 wave by making the retained source info answerable, so a schema element's declaration and its doc
-comment are reachable from a descriptor. Everything from here should be additive: new types, new
-projects. Rewriting the binder is the signal to stop and re-scope.
+comment are reachable from a descriptor. #54 made abandoned work stop costing anything: a
+cancellable wait on `protoc`, an expiry that says it is one, a stated queue bound, and counters that
+turn "no leak over a working day" into a soak test. Everything from here should be additive: new
+types, new projects. Rewriting the binder is the signal to stop and re-scope.

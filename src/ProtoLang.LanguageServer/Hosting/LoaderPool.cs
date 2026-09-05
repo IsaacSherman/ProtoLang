@@ -53,6 +53,18 @@ public sealed class LoaderPool(ServerLog log)
     /// </remarks>
     public DescriptorCache Cache { get; } = new();
 
+    /// <summary>Everything else every loader in this pool is built with.</summary>
+    /// <remarks>
+    /// The supervision settings were written into <see cref="TryGet"/> and could not be reached from
+    /// outside it, which meant the server ran on the loader's defaults and had no way to say
+    /// otherwise -- not the budget protoc gets, and not where its scratch files go. #57 pins the
+    /// first against measurement and needs somewhere to pin it to; a session that wants to prove it
+    /// leaked nothing needs the second. The cache is not among them: there is one for the whole
+    /// server, and a pool serving loaders that each cached somewhere else would be the bug this type
+    /// exists to prevent.
+    /// </remarks>
+    public DescriptorLoaderOptions Options { get; init; } = new();
+
     /// <summary>
     /// The loader for <paramref name="protocPath"/>, or the reason there cannot be one.
     /// </summary>
@@ -72,7 +84,7 @@ public sealed class LoaderPool(ServerLog log)
 
         try
         {
-            var options = new DescriptorLoaderOptions { Cache = Cache };
+            var options = Options with { Cache = Cache };
 
             loader = protocPath is null
                 ? DescriptorLoader.CreateDefault(options)

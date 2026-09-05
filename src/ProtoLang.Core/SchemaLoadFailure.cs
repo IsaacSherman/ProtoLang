@@ -29,11 +29,18 @@ namespace ProtoLang;
 /// <param name="RawOutput">Its standard error exactly as it arrived, for a status report to quote.</param>
 public sealed record SchemaLoadFailure(IReadOnlyList<ProtocDiagnostic> Output, string RawOutput)
 {
+    /// <inheritdoc cref="DescriptorLoadFailureKind"/>
+    /// <remarks>
+    /// Init-only rather than a third positional member, so the two-argument construction every
+    /// existing caller writes keeps compiling and keeps meaning a failure protoc reported.
+    /// </remarks>
+    public DescriptorLoadFailureKind Kind { get; init; }
+
     /// <summary>What the pipeline caught, kept rather than flattened.</summary>
     public static SchemaLoadFailure From(DescriptorLoadException exception)
     {
         ArgumentNullException.ThrowIfNull(exception);
 
-        return new SchemaLoadFailure(exception.Output, exception.RawOutput);
+        return new SchemaLoadFailure(exception.Output, exception.RawOutput) { Kind = exception.Kind };
     }
 }
