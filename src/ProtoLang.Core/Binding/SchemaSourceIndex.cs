@@ -133,9 +133,11 @@ internal sealed class SchemaSourceIndex
 
         public const int FileMessageType = 4;
         public const int FileEnumType = 5;
+        public const int FileExtension = 7;
         public const int MessageField = 2;
         public const int MessageNestedType = 3;
         public const int MessageEnumType = 4;
+        public const int MessageExtension = 6;
         public const int EnumValue = 2;
     }
 
@@ -163,6 +165,8 @@ internal sealed class SchemaSourceIndex
             {
                 AddEnum(file.EnumTypes[index], [ProtoField.FileEnumType, index]);
             }
+
+            AddExtensions(file.Extensions, [], ProtoField.FileExtension);
         }
 
         private void AddMessage(MessageDescriptor message, int[] path)
@@ -183,6 +187,28 @@ internal sealed class SchemaSourceIndex
             for (var index = 0; index < message.EnumTypes.Count; index++)
             {
                 AddEnum(message.EnumTypes[index], [.. path, ProtoField.MessageEnumType, index]);
+            }
+
+            AddExtensions(message.Extensions, path, ProtoField.MessageExtension);
+        }
+
+        /// <summary>The fields an <c>extend</c> block declares, which are declared here and belong elsewhere.</summary>
+        /// <remarks>
+        /// An extension is a <c>FieldDescriptor</c> like any other and is asked about the same way, so
+        /// leaving them out of the walk made every question about one answer null -- not "no location
+        /// recorded" but "no such thing", which is the answer reserved for a file this bundle has
+        /// never heard of. They are listed apart from the fields because the proto tree lists them
+        /// apart: an extension of a message written at file scope is a child of the <em>file</em>,
+        /// numbered in its own sequence, and its position in that sequence is the path element. The
+        /// collection is in declaration order despite its name, which its own documentation says.
+        /// </remarks>
+        private void AddExtensions(ExtensionCollection extensions, int[] path, int fieldNumber)
+        {
+            var declared = extensions.UnorderedExtensions;
+
+            for (var index = 0; index < declared.Count; index++)
+            {
+                Add(SymbolId.ForField(declared[index]), [.. path, fieldNumber, index]);
             }
         }
 
@@ -350,8 +376,22 @@ internal sealed class SchemaSourceIndex
 
         private static readonly byte[] Utf8ByteOrderMark = [0xEF, 0xBB, 0xBF];
 
-        private readonly string _text;
         private readonly LineMap _map;
+
+        /// <summary>The file's bytes, mark removed, which is what protoc's columns are counted in.</summary>
+        private readonly byte[] _bytes;
+
+        /// <summary>
+        /// Where each line begins in <see cref="_bytes"/>, which <see cref="LineMap"/> cannot say
+        /// because it indexes characters.
+        /// </summary>
+        /// <remarks>
+        /// The two agree on how many lines there are and which is which: <c>\n</c> is one byte in
+        /// UTF-8 and cannot occur inside the encoding of any other character, so a line break is a
+        /// line break in either unit. Only the offsets within a line differ, which is exactly what
+        /// this is here to convert.
+        /// </remarks>
+        private readonly int[] _byteLineStarts;
 
         /// <summary>
         /// How many bytes of the file this text does not begin with, which is three for a schema
@@ -367,12 +407,23 @@ internal sealed class SchemaSourceIndex
         /// </remarks>
         private readonly int _markBytes;
 
-        private SchemaText(string path, string text, int markBytes)
+        private SchemaText(string path, byte[] bytes, int markBytes)
         {
             Path = path;
-            _text = text;
+            _bytes = bytes;
             _markBytes = markBytes;
-            _map = new LineMap(text);
+            _map = new LineMap(Encoding.UTF8.GetString(bytes));
+
+            List<int> starts = [0];
+            for (var index = 0; index < bytes.Length; index++)
+            {
+                if (bytes[index] == (byte)'\n')
+                {
+                    starts.Add(index + 1);
+                }
+            }
+
+            _byteLineStarts = [.. starts];
         }
 
         /// <summary>
@@ -414,7 +465,7 @@ internal sealed class SchemaSourceIndex
 
             var mark = bytes.AsSpan().StartsWith(Utf8ByteOrderMark) ? Utf8ByteOrderMark.Length : 0;
 
-            return new SchemaText(path, Encoding.UTF8.GetString(bytes.AsSpan(mark)), mark);
+            return new SchemaText(path, bytes[mark..], mark);
         }
 
         /// <summary>
@@ -453,8 +504,14 @@ internal sealed class SchemaSourceIndex
 
         /// <summary>
         /// Where a 0-based line and a column counted protoc's way is in this text, or null when the
-        /// text has no such line.
+        /// file has no such place.
         /// </summary>
+        /// <remarks>
+        /// Null rather than the nearest thing, and that distinction is the whole guard against a
+        /// fabricated site: a column past the end of its line means the location does not describe
+        /// this file, and clamping it to the line ending would answer a question that has no answer
+        /// with a range that looks like one.
+        /// </remarks>
         public SourcePosition? PositionAt(int line, int protocColumn)
         {
             // Where protoc's count stood at the start of this line, which is past the byte-order mark
@@ -469,48 +526,64 @@ internal sealed class SchemaSourceIndex
                 return null;
             }
 
-            var start = _map.OffsetOf(line + 1, 1);
-            var end = line + 1 < _map.LineCount ? _map.OffsetOf(line + 2, 1) : _text.Length;
-            var text = _text.AsSpan(start, end - start).TrimEnd(['\r', '\n']);
+            var bytes = BytesOfLine(line);
 
-            return _map.PositionOf(start + Utf16OffsetIn(text, protocColumn, origin));
+            if (ByteOffsetIn(bytes, protocColumn, origin) is not { } consumed)
+            {
+                return null;
+            }
+
+            // The bytes were decoded to make the text, so decoding the part of the line protoc walked
+            // past says how many of that text's characters it walked past -- whatever the decoder did
+            // with a byte sequence it could not read.
+            var characters = Encoding.UTF8.GetString(bytes[..consumed]).Length;
+
+            return _map.PositionOf(_map.OffsetOf(line + 1, 1) + characters);
         }
 
-        /// <inheritdoc cref="SchemaText"/>
-        /// <param name="line">The line's text, as this compiler holds it.</param>
-        /// <param name="column">The column protoc reported, in protoc's counting.</param>
-        /// <param name="origin">What protoc's count already stood at where this text begins.</param>
-        private static int Utf16OffsetIn(ReadOnlySpan<char> line, int column, int origin)
+        /// <summary>One line's bytes, without the line ending that follows them.</summary>
+        private ReadOnlySpan<byte> BytesOfLine(int line)
+        {
+            var start = _byteLineStarts[line];
+            var end = line + 1 < _byteLineStarts.Length ? _byteLineStarts[line + 1] : _bytes.Length;
+
+            return _bytes.AsSpan(start, end - start).TrimEnd("\r\n"u8);
+        }
+
+        /// <summary>
+        /// How far into the line protoc had read when its column reached <paramref name="column"/>,
+        /// or null when the line ends before it gets there.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Counted over the bytes rather than over the decoded characters, which is not a detail:
+        /// protoc reads bytes and does not check that they decode. A comment holding a byte no
+        /// decoder can read is a schema protoc accepts, and the text this compiler holds then has a
+        /// replacement character where that byte was -- one character standing for one byte, but
+        /// three bytes long if it is measured back. Deriving the count from the decoded text
+        /// therefore drifts by two per bad byte, and the sites after it on that line land on the
+        /// wrong characters. The bytes are the thing protoc counted, so the bytes are what this
+        /// counts.
+        /// </para>
+        /// <para>
+        /// Overshooting is allowed and stopping short is not. A column can land inside a tab, since
+        /// one tab covers up to eight of them, and the answer there is the position after the tab. A
+        /// column past the end of the line cannot be reached at all, and there is nothing there to
+        /// point at.
+        /// </para>
+        /// </remarks>
+        private static int? ByteOffsetIn(ReadOnlySpan<byte> line, int column, int origin)
         {
             var counted = origin;
             var index = 0;
 
             while (counted < column && index < line.Length)
             {
-                if (line[index] == '\t')
-                {
-                    counted += TabWidth - (counted % TabWidth);
-                    index++;
-                    continue;
-                }
-
-                var pair = char.IsHighSurrogate(line[index])
-                    && index + 1 < line.Length
-                    && char.IsLowSurrogate(line[index + 1]);
-
-                counted += pair ? 4 : Utf8LengthOf(line[index]);
-                index += pair ? 2 : 1;
+                counted += line[index] == (byte)'\t' ? TabWidth - (counted % TabWidth) : 1;
+                index++;
             }
 
-            return index;
+            return counted < column ? null : index;
         }
-
-        /// <summary>How many bytes one character costs protoc, which counts them rather than characters.</summary>
-        private static int Utf8LengthOf(char value) => value switch
-        {
-            < (char)0x80 => 1,
-            < (char)0x800 => 2,
-            _ => 3,
-        };
     }
 }

@@ -1402,13 +1402,14 @@ Implementation Note:
   info is where a schema's declaration sites and doc comments live, so discarding it meant paying
   `protoc` to produce the one thing the compiler then threw away.
 - That source info is answered, not merely kept. Given a message, enum, field, or enum value
-  descriptor reachable from a compilation, the compiler reports the schema that declares it, the
+  descriptor reachable from a compilation -- a field an `extend` block declares included, since it
+  is a field like any other -- the compiler reports the schema that declares it, the
   range of the whole declaration, the range of the declared name inside it, and the leading,
   trailing, and detached comments written about it with the comment markers already removed.
   Missing information is ordinary rather than an error: a schema with no comments, a descriptor set
   built without source info, a file that cannot be read, a file whose bytes have changed since the
-  descriptors were built, and a schema `protoc` resolved from descriptors compiled into itself all
-  give an answer with nothing in it -- which is a different answer from none at all, none meaning the
+  descriptors were built, a recorded location naming a place the file does not have, and a schema
+  `protoc` resolved from descriptors compiled into itself all give an answer with nothing in it -- which is a different answer from none at all, none meaning the
   compilation does not hold that file. A range is reported only against the exact bytes `protoc`
   compiled, because a range is measured against text and a range measured against the wrong text
   points confidently at the wrong characters; the answer follows the file rather than being settled
@@ -1419,6 +1420,8 @@ Implementation Note:
   compiler's own -- 1-based lines and columns counting UTF-16 code units -- rather than the byte
   counts `protoc` reports, whose columns advance by the width of a character in bytes, jump a tab to
   the next multiple of eight, and count a byte-order mark as three characters of the first line.
+  The conversion is made against the file's bytes rather than against its decoded text, so a schema
+  `protoc` accepted but no decoder can fully read is located correctly all the same.
 - Well-known schemas are answered by that same rule and no other. `google/protobuf/timestamp.proto`
   is a schema like any other; what differs between installations is whether a file backs it at all,
   since `protoc` resolves those schemas from descriptors compiled into the binary from version 33

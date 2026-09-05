@@ -185,6 +185,47 @@ public class SchemaDeclarationTests
             $"'{none.Site.Path}' is not the file the compilation read");
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ExtensionFieldsHaveDeclarationSitesAndDocumentation(bool nested)
+    {
+        const string Extension = "// Extension documentation.\noptional string annotation = 100;";
+        var block = "extend Customer {\n" + Extension + "\n}";
+        var schema = Load("syntax = \"proto2\";\nmessage Customer { extensions 100 to max; }\n"
+            + (nested ? "message Metadata {\n" + block + "\n}" : block));
+        var file = FileIn(schema.Bundle, SchemaName);
+        var extensions = nested ? Message(schema, "Metadata").Extensions : file.Extensions;
+        var field = Assert.Single(extensions.UnorderedExtensions);
+
+        Assert.True(field.IsExtension);
+        var declaration = schema.Bundle.DeclarationOf(field);
+
+        Assert.NotNull(declaration);
+        Assert.Equal(SymbolId.ForField(field), declaration.Id);
+        Assert.Equal("Extension documentation.", declaration.Documentation.Leading);
+        Assert.NotNull(declaration.Site);
+        Assert.Equal("annotation", Slice(schema.Text, declaration.Site.Name));
+        Assert.Equal("optional string annotation = 100;", Slice(schema.Text, declaration.Site.Extent));
+    }
+
+    [Fact]
+    public void AProto2GroupNamesItsWrittenDeclarationForBothDescriptors()
+    {
+        var schema = Load("syntax = \"proto2\";\nmessage Customer {\n"
+            + "// Group documentation.\noptional group Details = 1 { optional string email = 2; }\n}");
+        var customer = Message(schema, "Customer");
+        var field = Field(customer, "details");
+        var group = Nested(customer, "Details");
+
+        foreach (var declaration in new[] { schema.Bundle.DeclarationOf(field), schema.Bundle.DeclarationOf(group) })
+        {
+            Assert.NotNull(declaration);
+            Assert.NotNull(declaration.Site);
+            Assert.Equal("Details", Slice(schema.Text, declaration.Site.Name));
+        }
+    }
+
     // ------------------------------------------------------------------ comments
 
     [Fact]
@@ -358,6 +399,32 @@ public class SchemaDeclarationTests
         }
     }
 
+    [Theory]
+    [InlineData(0xE8)]
+    [InlineData(0xFF)]
+    public void InvalidUtf8InACommentCannotProduceAMisalignedSite(byte invalidByte)
+    {
+        var directory = TestPaths.CreateTempDirectory();
+        var path = Path.Combine(directory, SchemaName);
+        byte[] bytes = [
+            .. Encoding.UTF8.GetBytes("syntax = \"proto3\";\nmessage /* caf"),
+            invalidByte,
+            .. Encoding.UTF8.GetBytes(" */ Customer { string email = 1; }\n")
+        ];
+        File.WriteAllBytes(path, bytes);
+        var bundle = Loader().LoadBundle([SchemaName], [directory]);
+        var message = Message(FileIn(bundle, SchemaName), "Customer");
+        var declaration = bundle.DeclarationOf(message);
+
+        Assert.NotNull(declaration);
+        // Either decline undecodable text or preserve its byte-to-character mapping. Re-encoding
+        // a replacement character as three bytes must not shift a one-byte input error's columns.
+        if (declaration.Site is { } site)
+        {
+            Assert.Equal("Customer", Slice(File.ReadAllText(path), site.Name));
+        }
+    }
+
     // ------------------------------------------------------------------ what is missing
 
     [Theory]
@@ -447,6 +514,30 @@ public class SchemaDeclarationTests
         Assert.NotNull(customer);
         Assert.Null(customer.Site);
         Assert.True(customer.Documentation.IsEmpty, "there is no source info to have read a comment from");
+    }
+
+    [Theory]
+    [InlineData(1000, 1008)]
+    [InlineData(0, 1008)]
+    public void ASourceInfoExtentBeyondTheLineHasNoSite(int startColumn, int endColumn)
+    {
+        var schema = Load("syntax = \"proto3\";\n// Customer documentation.\nmessage Customer {}\n");
+        var set = schema.Bundle.CloneSet();
+        var proto = Assert.Single(set.File);
+        // External descriptor sets can carry invalid coordinates even when the file hash matches.
+        var location = proto.SourceCodeInfo.Location.Single(item => item.Path.SequenceEqual(new[] { 4, 0 }));
+        location.Span.Clear();
+        location.Span.Add(new[] { 2, startColumn, endColumn });
+        var bundle = new DescriptorBundle(
+            FileDescriptor.BuildFromByteStrings(set.File.Select(file => file.ToByteString()).ToList()),
+            set,
+            schema.Bundle.Closure);
+
+        var declaration = bundle.DeclarationOf(Message(FileIn(bundle, SchemaName), "Customer"));
+
+        Assert.NotNull(declaration);
+        Assert.Equal("Customer documentation.", declaration.Documentation.Leading);
+        Assert.Null(declaration.Site);
     }
 
     /// <summary>
