@@ -226,6 +226,50 @@ public class SchemaDeclarationTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void InterleavedExtensionsKeepTheirOwnSitesAndComments(bool nested)
+    {
+        const string Extensions = """
+            extend Customer {
+              // Customer note.
+              optional string customer_note = 102;
+            }
+            extend Order {
+              // Order note.
+              optional string order_note = 100;
+            }
+            extend Customer {
+              // Customer tag.
+              optional string customer_tag = 100;
+            }
+            """;
+        var schema = Load("syntax = \"proto2\";\n"
+            + "message Customer { extensions 100 to max; }\n"
+            + "message Order { extensions 100 to max; }\n"
+            + (nested ? "message Metadata {\n" + Extensions + "\n}" : Extensions));
+        var fields = (nested ? Message(schema, "Metadata").Extensions : FileIn(schema.Bundle, SchemaName).Extensions)
+            .UnorderedExtensions;
+        var comments = new Dictionary<string, string>
+        {
+            ["customer_note"] = "Customer note.",
+            ["order_note"] = "Order note.",
+            ["customer_tag"] = "Customer tag.",
+        };
+
+        Assert.Equal(comments.Count, fields.Count);
+        foreach (var field in fields)
+        {
+            var declaration = schema.Bundle.DeclarationOf(field);
+            Assert.NotNull(declaration);
+            Assert.NotNull(declaration.Site);
+            Assert.Equal(field.Name, Slice(schema.Text, declaration.Site.Name));
+            Assert.Equal($"optional string {field.Name} = {field.FieldNumber};", Slice(schema.Text, declaration.Site.Extent));
+            Assert.Equal(comments[field.Name], declaration.Documentation.Leading);
+        }
+    }
+
     // ------------------------------------------------------------------ comments
 
     [Fact]
@@ -422,6 +466,26 @@ public class SchemaDeclarationTests
         if (declaration.Site is { } site)
         {
             Assert.Equal("Customer", Slice(File.ReadAllText(path), site.Name));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MultibyteTextTabsAndCrlfPreserveDeclarationCoordinates(bool utf8Bom)
+    {
+        var schema = Load("syntax = \"proto3\";\tmessage /* \u00e8 \u4e2d \ud83d\ude00\t */ Customer {\r\n"
+            + "\t/* \ud83d\ude00 \u00e8\t */ string email = 1;\r\n}\r\n", utf8Bom);
+        var lines = new LineMap(schema.Text);
+
+        foreach (var (name, declaration) in EverythingIn(schema))
+        {
+            Assert.NotNull(declaration);
+            Assert.NotNull(declaration.Site);
+            var offset = schema.Text.IndexOf(name, StringComparison.Ordinal);
+            Assert.Equal(name, Slice(schema.Text, declaration.Site.Name));
+            Assert.Equal(lines.PositionOf(offset), declaration.Site.Name.Start);
+            Assert.Equal(lines.PositionOf(offset + name.Length), declaration.Site.Name.End);
         }
     }
 

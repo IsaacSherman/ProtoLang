@@ -7,25 +7,32 @@ using Xunit;
 
 namespace ProtoLang.Tests;
 
+[Collection("Timing-sensitive regressions")]
 public class JsonRpcConnectionTests
 {
+    // These are liveness assertions, not latency benchmarks. Completion signals settle ordering;
+    // this deadline only prevents a broken cancellation path from hanging the test runner.
+    private static readonly TimeSpan ProgressBudget = TimeSpan.FromSeconds(30);
+
     [Fact]
     public async Task CancelRequestReachesARequestHandlerThatIsAlreadyRunning()
     {
         await using var streams = new ConnectionHarness();
 
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var connection = new JsonRpcConnection(streams.ToServer, streams.FromServer, new ServerLog { Mirror = TextWriter.Null });
-        var serving = connection.RunAsync(TestContext.Current.CancellationToken);
+        var releaseHandler = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var connection = new JsonRpcConnection(streams.ToServer, streams.FromServer, new ServerLog { Mirror = TextWriter.Null });
 
         connection.OnRequest(
             "test/slow",
             async (_, cancellationToken) =>
             {
                 started.SetResult();
-                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                await releaseHandler.Task.WaitAsync(cancellationToken);
                 return null;
             });
+
+        var serving = connection.RunAsync(TestContext.Current.CancellationToken);
 
         try
         {
@@ -38,7 +45,7 @@ public class JsonRpcConnectionTests
                     },
                     TestContext.Current.CancellationToken);
 
-            await started.Task.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+            await started.Task.WaitAsync(ProgressBudget, TestContext.Current.CancellationToken);
 
             await streams.ClientWriter.WriteAsync(
                     new
@@ -50,16 +57,13 @@ public class JsonRpcConnectionTests
                     TestContext.Current.CancellationToken);
 
             var response = await ReadAsync(streams.ClientReader)
-                .WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+                .WaitAsync(ProgressBudget, TestContext.Current.CancellationToken);
 
             Assert.Equal(ErrorCodes.RequestCancelled, response.Error?.Code);
         }
         finally
         {
-            connection.Stop();
-            streams.Complete();
-            await Task.WhenAny(serving, Task.Delay(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
-            connection.Dispose();
+            await StopAndDrain(connection, streams, serving, releaseHandler);
         }
     }
 
@@ -86,6 +90,7 @@ public class JsonRpcConnectionTests
 
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseHandler = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         connection.OnRequest(
             "test/slow",
@@ -95,7 +100,7 @@ public class JsonRpcConnectionTests
 
                 try
                 {
-                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    await releaseHandler.Task.WaitAsync(cancellationToken);
                 }
                 catch (OperationCanceledException)
                 {
@@ -108,21 +113,28 @@ public class JsonRpcConnectionTests
 
         var serving = connection.RunAsync(TestContext.Current.CancellationToken);
 
-        await streams.ClientWriter.WriteAsync(
-                new
-                {
-                    jsonrpc = "2.0",
-                    id = 1,
-                    method = "test/slow",
-                },
-                TestContext.Current.CancellationToken);
+        try
+        {
+            await streams.ClientWriter.WriteAsync(
+                    new
+                    {
+                        jsonrpc = "2.0",
+                        id = 1,
+                        method = "test/slow",
+                    },
+                    TestContext.Current.CancellationToken);
 
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            await started.Task.WaitAsync(ProgressBudget, TestContext.Current.CancellationToken);
 
-        streams.Complete();
+            streams.Complete();
 
-        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        await serving.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            await cancelled.Task.WaitAsync(ProgressBudget, TestContext.Current.CancellationToken);
+            await serving.WaitAsync(ProgressBudget, TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            await StopAndDrain(connection, streams, serving, releaseHandler);
+        }
     }
 
     /// <summary>
@@ -172,58 +184,76 @@ public class JsonRpcConnectionTests
                 new ServerLog { Mirror = TextWriter.Null });
 
             var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseHandler = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             connection.OnRequest(
                 "test/slow",
                 async (_, cancellationToken) =>
                 {
                     started.TrySetResult();
-                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    await releaseHandler.Task.WaitAsync(cancellationToken);
                     return null;
                 });
 
             var serving = connection.RunAsync(TestContext.Current.CancellationToken);
 
-            // One of these runs and the rest queue behind it, but every one of them has a cancellation
-            // source registered the moment it is read -- so the sweep has a hundred entries to walk.
-            for (var id = 1; id <= 100; id++)
+            try
             {
-                await streams.ClientWriter.WriteAsync(
-                        new
-                        {
-                            jsonrpc = "2.0",
-                            id,
-                            method = "test/slow",
-                        },
-                        TestContext.Current.CancellationToken);
-            }
+                // One runs and the rest queue behind it, registering cancellation sources as read.
+                for (var id = 1; id <= 100; id++)
+                {
+                    await streams.ClientWriter.WriteAsync(
+                            new
+                            {
+                                jsonrpc = "2.0",
+                                id,
+                                method = "test/slow",
+                            },
+                            TestContext.Current.CancellationToken);
+                }
 
-            await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+                await started.Task.WaitAsync(ProgressBudget, TestContext.Current.CancellationToken);
 
-            // Not decoration: see the remarks. These are what give the dispatcher time to retire a
-            // request while shutdown is still working through what is outstanding.
-            var asking = new List<Task>();
-            for (var ask = 0; ask < 5000; ask++)
-            {
-                asking.Add(connection.RequestAsync<object>("test/ask", null, CancellationToken.None));
-            }
+                // Keep the original stress workload: pending requests widen the retirement race.
+                var asking = new List<Task>();
+                for (var ask = 0; ask < 5000; ask++)
+                {
+                    asking.Add(connection.RequestAsync<object>("test/ask", null, CancellationToken.None));
+                }
 
-            streams.Complete();
+                streams.Complete();
 
-            // The assertion is that this returns rather than throws.
-            await serving.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+                // The assertion is that this returns rather than throws.
+                await serving.WaitAsync(ProgressBudget, TestContext.Current.CancellationToken);
 
-            foreach (var ask in asking)
-            {
                 try
                 {
-                    await ask;
+                    await Task.WhenAll(asking).WaitAsync(ProgressBudget, TestContext.Current.CancellationToken);
                 }
                 catch (OperationCanceledException)
                 {
+                    Assert.All(asking, ask => Assert.True(ask.IsCanceled));
                 }
             }
+            finally
+            {
+                await StopAndDrain(connection, streams, serving, releaseHandler);
+            }
         }
+    }
+
+    private static async Task StopAndDrain(
+        JsonRpcConnection connection,
+        ConnectionHarness streams,
+        Task serving,
+        TaskCompletionSource releaseHandler)
+    {
+        connection.Stop();
+        streams.Complete();
+        // Only cleanup releases this gate. A broken request-token link must fail the assertion
+        // above, but must not leave its handler running after the connection has been disposed.
+        releaseHandler.TrySetResult();
+        await serving.WaitAsync(ProgressBudget, CancellationToken.None);
     }
 
     private static async Task<IncomingMessage> ReadAsync(MessageReader reader)
