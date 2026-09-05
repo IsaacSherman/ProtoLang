@@ -39,23 +39,43 @@ namespace ProtoLang.Binding;
 internal sealed class SchemaSourceIndex
 {
     private readonly Dictionary<SymbolId, SchemaDeclaration> _declarations;
+    private readonly SchemaFile? _file;
+    private readonly bool _measured;
 
-    private SchemaSourceIndex(Dictionary<SymbolId, SchemaDeclaration> declarations, bool provisional)
+    private SchemaSourceIndex(
+        Dictionary<SymbolId, SchemaDeclaration> declarations,
+        SchemaFile? file,
+        bool measured)
     {
         _declarations = declarations;
-        IsProvisional = provisional;
+        _file = file;
+        _measured = measured;
     }
 
-    /// <summary>Whether this answer could get better on its own, and so is not one to keep.</summary>
+    /// <summary>Whether this answer still describes what is on disk, and so may be reused.</summary>
     /// <remarks>
-    /// True when the closure says a file backs this schema and the text could not be used: it is
-    /// locked, or it has been edited since the descriptors were built. Both of those mend themselves
-    /// with nothing else changing -- the lock is released, the edit is undone -- and the second one
-    /// mends itself invisibly, because a schema restored to its original bytes hashes as it did and
-    /// the descriptor cache goes on serving the same bundle. Keeping the site-less answer would make
-    /// an undo permanent.
+    /// <para>
+    /// An index is good while its file is in the state it was read in: measured against bytes that
+    /// are still there, or -- because the file was locked, deleted, or edited -- not measured, and
+    /// still not measurable. Anything else and the answer has to be built again, in whichever
+    /// direction the file moved.
+    /// </para>
+    /// <para>
+    /// Both directions are real and neither announces itself. A schema edited after somebody has
+    /// hovered over it would otherwise keep offering the range it had before the edit, which is the
+    /// error the check was added to prevent, merely deferred until after the first question. A schema
+    /// restored to its original bytes hashes as it did, so the descriptor cache goes on serving the
+    /// same bundle, and a remembered site-less answer would make an undo permanent.
+    /// </para>
+    /// <para>
+    /// The cost is a read and a hash of one <c>.proto</c> per question asked of it. That is bounded
+    /// by the size of a schema and paid only by editor queries -- no compilation asks -- and it is the
+    /// only honest answer available: a range is a claim about the bytes of a file, and the only way
+    /// to know whether it still holds is to look. #57 owns the budget if a caller ever asks this of
+    /// hundreds of descriptors at once.
+    /// </para>
     /// </remarks>
-    public bool IsProvisional { get; }
+    public bool IsCurrent => _measured == SchemaText.StillHolds(_file);
 
     /// <summary>Reads one file's source info into declarations.</summary>
     /// <param name="descriptor">The built tree, which supplies the identities and the path indices.</param>
@@ -71,9 +91,7 @@ internal sealed class SchemaSourceIndex
 
         builder.AddFile(descriptor);
 
-        return new SchemaSourceIndex(
-            builder.Declarations,
-            provisional: text is null && file is { Path: not null, ContentHash: not null });
+        return new SchemaSourceIndex(builder.Declarations, file, measured: text is not null);
     }
 
     /// <summary>What is known about <paramref name="symbol"/>, or null when this file declares no such thing.</summary>
@@ -389,11 +407,37 @@ internal sealed class SchemaSourceIndex
         /// </remarks>
         public static SchemaText? Read(SchemaFile? file)
         {
-            if (file is not { Path: { } path, ContentHash: { } hash })
+            if (file is not { Path: { } path, ContentHash: { } hash } || CompiledBytesOf(path, hash) is not { } bytes)
             {
                 return null;
             }
 
+            var mark = bytes.AsSpan().StartsWith(Utf8ByteOrderMark) ? Utf8ByteOrderMark.Length : 0;
+
+            return new SchemaText(path, Encoding.UTF8.GetString(bytes.AsSpan(mark)), mark);
+        }
+
+        /// <summary>
+        /// Whether the file <paramref name="file"/> describes is still holding the bytes it was
+        /// described with -- the same question <see cref="Read"/> asks, without paying to decode the
+        /// answer.
+        /// </summary>
+        /// <remarks>
+        /// This is how an index that has already been built decides whether it is still true, so it
+        /// runs on every question rather than once. Reading the file is the whole of it: there is no
+        /// cheaper signal that is also correct, and the cheap ones are wrong in the direction that
+        /// matters -- <see cref="SchemaClosure"/> gives the reasons a timestamp cannot be believed.
+        /// </remarks>
+        public static bool StillHolds(SchemaFile? file)
+            => file is { Path: { } path, ContentHash: { } hash } && CompiledBytesOf(path, hash) is not null;
+
+        /// <summary>The file's bytes if they are the ones the closure recorded, and null otherwise.</summary>
+        /// <remarks>
+        /// Unreadable and changed are one answer here on purpose: neither can be measured against, and
+        /// a caller that told them apart would only be choosing which kind of nothing to report.
+        /// </remarks>
+        private static byte[]? CompiledBytesOf(string path, string hash)
+        {
             byte[] bytes;
             try
             {
@@ -404,14 +448,7 @@ internal sealed class SchemaSourceIndex
                 return null;
             }
 
-            if (!string.Equals(SchemaClosure.HashOf(bytes), hash, StringComparison.Ordinal))
-            {
-                return null;
-            }
-
-            var mark = bytes.AsSpan().StartsWith(Utf8ByteOrderMark) ? Utf8ByteOrderMark.Length : 0;
-
-            return new SchemaText(path, Encoding.UTF8.GetString(bytes.AsSpan(mark)), mark);
+            return string.Equals(SchemaClosure.HashOf(bytes), hash, StringComparison.Ordinal) ? bytes : null;
         }
 
         /// <summary>

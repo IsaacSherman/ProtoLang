@@ -382,6 +382,44 @@ public class SchemaDeclarationTests
         Assert.Null(customer.Site);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void APreviouslyLocatedSchemaLosesItsSiteWhenItsFileChanges(bool deleteFile)
+    {
+        const string Source = "syntax = \"proto3\";\n// Customer documentation.\nmessage Customer { string email = 1; }\n";
+        var schema = Load(Source);
+        var message = Message(schema, "Customer");
+        var path = schema.Bundle.PathFor(SchemaName);
+        Assert.NotNull(path);
+
+        var original = schema.Bundle.DeclarationOf(message);
+        Assert.NotNull(original);
+        Assert.NotNull(original.Site);
+        Assert.Equal("Customer", Slice(Source, original.Site.Name));
+
+        // Warm the per-file index before changing the file, unlike the first-query regression.
+        if (deleteFile)
+        {
+            File.Delete(path);
+        }
+        else
+        {
+            File.WriteAllText(path, Source.Replace("message Customer", "/* edited */ message Customer", StringComparison.Ordinal));
+        }
+
+        var unavailable = schema.Bundle.DeclarationOf(message);
+        Assert.NotNull(unavailable);
+        Assert.Equal("Customer documentation.", unavailable.Documentation.Leading);
+        Assert.Null(unavailable.Site);
+
+        File.WriteAllText(path, Source);
+        var restored = schema.Bundle.DeclarationOf(message);
+        Assert.NotNull(restored);
+        Assert.NotNull(restored.Site);
+        Assert.Equal("Customer", Slice(Source, restored.Site.Name));
+    }
+
     /// <summary>
     /// A bundle whose source info was never asked for. The file is still known, so the answer is a
     /// declaration with nothing in it rather than no declaration at all -- the two mean different

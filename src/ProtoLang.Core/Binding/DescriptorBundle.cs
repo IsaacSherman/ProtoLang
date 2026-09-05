@@ -45,15 +45,15 @@ public sealed class DescriptorBundle
     private readonly Dictionary<string, SchemaFile> _files;
     private readonly Dictionary<string, FileDescriptor> _descriptors;
 
-    /// <summary>What each file's source info says, read on first ask and kept.</summary>
+    /// <summary>What each file's source info says, read on first ask and kept while it stays true.</summary>
     /// <remarks>
     /// <para>
     /// The only mutable state here, and it is a memo: an entry is derived entirely from data this
-    /// bundle already holds, so building one twice produces two equal answers and building none
-    /// changes nothing but the cost. Concurrent rather than locked because a cached bundle is shared
-    /// by every compile worker at once and this is a query path -- two workers asking about one
-    /// schema at the same moment should both be answered, not queued behind each other, and the
-    /// loser's copy costs one wasted walk.
+    /// bundle already holds and one file on disk, so building one twice produces the same answer and
+    /// building none changes nothing but the cost. Concurrent rather than locked because a cached
+    /// bundle is shared by every compile worker at once and this is a query path -- two workers asking
+    /// about one schema at the same moment should both be answered, not queued behind each other, and
+    /// the loser's copy costs one wasted walk.
     /// </para>
     /// <para>
     /// Per file rather than per bundle, because the questions this answers -- where is this
@@ -61,9 +61,9 @@ public sealed class DescriptorBundle
     /// <c>descriptor.proto</c> is not walked because something imported a timestamp.
     /// </para>
     /// <para>
-    /// An answer that was diminished by something outside this bundle -- a schema locked or edited
-    /// when it was read -- is not filed here at all, because it would outlive the condition that
-    /// diminished it. See <see cref="SchemaSourceIndex.IsProvisional"/>.
+    /// <b>An entry is checked before it is reused, not merely on the way in.</b> The rest of a bundle
+    /// is fixed the moment it is built; this is the one part of it that is a statement about a file
+    /// that goes on being edited underneath. See <see cref="SchemaSourceIndex.IsCurrent"/>.
     /// </para>
     /// </remarks>
     private readonly ConcurrentDictionary<string, SchemaSourceIndex> _sources = new(StringComparer.Ordinal);
@@ -230,7 +230,9 @@ public sealed class DescriptorBundle
     /// </remarks>
     private SchemaSourceIndex? SourceOf(string schemaName)
     {
-        if (_sources.TryGetValue(schemaName, out var kept))
+        // Asked every time, not once: what is kept here is an answer about a file, and the file goes
+        // on changing after the answer is filed. See SchemaSourceIndex.IsCurrent.
+        if (_sources.TryGetValue(schemaName, out var kept) && kept.IsCurrent)
         {
             return kept;
         }
@@ -243,9 +245,11 @@ public sealed class DescriptorBundle
 
         var index = SchemaSourceIndex.For(descriptor, proto, _files.GetValueOrDefault(schemaName));
 
-        // An index that could not read a file the closure describes is asked again next time; see
-        // SchemaSourceIndex.IsProvisional. The cost is one file read and one walk per query while a
-        // schema is out of step with the descriptors, which lasts until the next compilation.
-        return index.IsProvisional ? index : _sources.GetOrAdd(schemaName, index);
+        // Replaces rather than adds, because the entry it replaces is one this just found wanting.
+        // Two threads arriving together compute the same answer from the same file, so whichever
+        // lands second is as good as the first.
+        _sources[schemaName] = index;
+
+        return index;
     }
 }
