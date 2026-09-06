@@ -61,10 +61,12 @@ later.
 
 ### 2. Branch
 
-Off `epics/language-server`, never off `main`.
+Off `epics/language-server-2`, never off `main`. The first epic branch was merged and closed once
+its wave landed; each wave gets a fresh one, so `main` sees one pull request rather than one per
+issue.
 
 ```bash
-git checkout epics/language-server && git pull && git checkout -b issue-36-bind-through-parse-errors
+git checkout epics/language-server-2 && git pull && git checkout -b issue-36-bind-through-parse-errors
 ```
 
 Naming: `issue-<number>-<short-slug>`.
@@ -107,7 +109,7 @@ generated code, rendered diagnostics — **prove it did not** rather than assert
 throwaway worktree at the base commit makes that a two-command check:
 
 ```bash
-git worktree add /tmp/base epics/language-server
+git worktree add /tmp/base epics/language-server-2
 ```
 
 Run the CLI on the same input from both trees and `diff` the results. Remove the worktree afterwards.
@@ -143,13 +145,13 @@ Separate commit or commits. No squashing before the PR; the review history is wo
 ### 11. Open the PR
 
 ```bash
-gh pr create --base epics/language-server --title "..." --body-file pr-body.md
+gh pr create --base epics/language-server-2 --title "..." --body-file pr-body.md
 ```
 
-Base is always `epics/language-server`. The body carries `## Why`, `## What`, `## Compatibility`, and
-`## Tests`, and states plainly what did not move and how that was verified. `## What` says which spec
-sections moved — or, if the change reached the language and the spec deliberately stayed put, says
-that and why, so the omission reads as a decision.
+Base is always the current epic branch, `epics/language-server-2`. The body carries `## Why`,
+`## What`, `## Compatibility`, and `## Tests`, and states plainly what did not move and how that was
+verified. `## What` says which spec sections moved — or, if the change reached the language and the 
+spec deliberately stayed put, says that and why, so the omission reads as a decision.
 
 ### 12. Clear context and repeat
 

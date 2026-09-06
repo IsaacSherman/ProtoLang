@@ -12,6 +12,16 @@ public class LexerTests
         return new Lexer(text, "test.protolang", diagnostics).Tokenize();
     }
 
+    private static IReadOnlyList<Comment> Comments(string text, out DiagnosticBag diagnostics)
+    {
+        diagnostics = new DiagnosticBag();
+
+        var lexer = new Lexer(text, "test.protolang", diagnostics);
+        lexer.Tokenize();
+
+        return lexer.Comments;
+    }
+
     [Fact]
     public void RecognizesKeywordsAndIdentifiers()
     {
@@ -297,5 +307,117 @@ public class LexerTests
 
         // The bookkeeping survived to the end of the file: the last statement really is on line 3.
         Assert.Equal(3, tokens.Last(token => token.Kind != TokenKind.EndOfFile).Span.Line);
+    }
+
+    // ------------------------------------------------------- where a comment says it is
+
+    /// <summary>
+    /// The same consistency sweep the tokens get, for the ranges a host colors (spec 6.5). A comment
+    /// is not a token, so nothing else in the compiler would notice if these drifted.
+    /// </summary>
+    [Fact]
+    public void EveryCommentSpanCoversExactlyTheCommentItCameFrom()
+    {
+        const string Text =
+            """
+            // leading
+            import proto "invoice.proto"; // trailing
+
+            /* a block
+               comment */
+            extend InvoiceItem { /* inline */ }
+            """;
+
+        var comments = Comments(Text, out var diagnostics);
+        var lines = new LineMap(Text);
+
+        Assert.Empty(diagnostics);
+        Assert.Equal(4, comments.Count);
+        Assert.All(
+            comments,
+            comment =>
+            {
+                var text = Text.Substring(comment.Span.Start.Offset, comment.Span.Length);
+
+                Assert.StartsWith(comment.IsBlock ? "/*" : "//", text, StringComparison.Ordinal);
+                Assert.Equal(comment.Span.Start, lines.PositionOf(comment.Span.Start.Offset));
+                Assert.Equal(comment.Span.End, lines.PositionOf(comment.Span.End.Offset));
+            });
+
+        // In the order they were written, which is the order a host has to encode them in.
+        Assert.Equal(
+            comments.Select(comment => comment.Span.Start.Offset).Order(),
+            comments.Select(comment => comment.Span.Start.Offset));
+    }
+
+    [Fact]
+    public void ALineCommentEndsBeforeTheNewlineThatEndsIt()
+    {
+        const string Text = "// note\nfn";
+
+        var comments = Comments(Text, out var diagnostics);
+
+        Assert.Empty(diagnostics);
+        var comment = Assert.Single(comments);
+
+        Assert.False(comment.IsBlock, "'//' is the line form");
+        Assert.Equal(Text.IndexOf('\n'), comment.Span.End.Offset);
+        Assert.Equal(1, comment.Span.End.Line);
+    }
+
+    [Fact]
+    public void ABlockCommentSpansEveryLineItCrosses()
+    {
+        const string Text = "/* one\ntwo\nthree */ fn";
+
+        var comments = Comments(Text, out var diagnostics);
+
+        Assert.Empty(diagnostics);
+        var comment = Assert.Single(comments);
+
+        Assert.True(comment.IsBlock, "'/* ... */' is the block form");
+        Assert.Equal(1, comment.Span.Start.Line);
+        Assert.Equal(3, comment.Span.End.Line);
+        Assert.Equal(Text.IndexOf(" fn", StringComparison.Ordinal), comment.Span.End.Offset);
+    }
+
+    /// <summary>
+    /// Spec 6.2: block comments do not nest, so the first <c>*/</c> closes whatever is open, and
+    /// what follows it is code.
+    /// </summary>
+    /// <remarks>
+    /// This is the disagreement recording comments in the lexer exists to prevent. A grammar written
+    /// in regular expressions guesses the other way about as often as not, and when it does it colors
+    /// the whole rest of the file as a comment while the compiler goes on reporting errors in it.
+    /// </remarks>
+    [Fact]
+    public void ABlockCommentClosesAtTheFirstDelimiterBecauseTheyDoNotNest()
+    {
+        const string Text = "/* outer /* inner */ fn";
+
+        var tokens = Tokenize(Text, out _);
+        var comments = Comments(Text, out var diagnostics);
+
+        Assert.Empty(diagnostics);
+        var comment = Assert.Single(comments);
+
+        Assert.Equal(Text.IndexOf("*/", StringComparison.Ordinal) + 2, comment.Span.End.Offset);
+        Assert.Equal([TokenKind.Fn, TokenKind.EndOfFile], tokens.Select(token => token.Kind));
+    }
+
+    [Fact]
+    public void AnUnterminatedBlockCommentIsRecordedToTheEndOfTheText()
+    {
+        const string Text = "fn /* never closed";
+
+        var comments = Comments(Text, out var diagnostics);
+        var comment = Assert.Single(comments);
+
+        // Reported and recorded both. The text really is a comment as far as the lexer ever got, and
+        // a host that stopped coloring at the broken delimiter would show the rest of the file as
+        // code that the compiler is not in fact reading.
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Code == "PL0004");
+        Assert.Equal(Text.IndexOf("/*", StringComparison.Ordinal), comment.Span.Start.Offset);
+        Assert.Equal(Text.Length, comment.Span.End.Offset);
     }
 }

@@ -10,7 +10,7 @@ Behavior is defined once and generated per target, and it has to mean the same t
 
 ## The solution
 
-`ProtoLang.slnx`, five projects, `net10.0`. Settings are central in
+`ProtoLang.slnx`, six projects, `net10.0`. Settings are central in
 [Directory.Build.props](Directory.Build.props): nullable enabled, implicit usings, **warnings as
 errors**, and `CheckForOverflowUnderflow=false` on purpose — the compiler must never inherit the
 arithmetic behavior it exists to define.
@@ -21,11 +21,12 @@ arithmetic behavior it exists to define.
 | [src/ProtoLang.Backend.CSharp](src/ProtoLang.Backend.CSharp) | C# emission, plus generated test projects. |
 | [src/ProtoLang.Backend.Cpp](src/ProtoLang.Backend.Cpp) | The same for C++. |
 | [src/ProtoLang.Cli](src/ProtoLang.Cli) | `protolangc`: argument parsing, driving a compilation, writing files. |
+| [src/ProtoLang.LanguageServer](src/ProtoLang.LanguageServer) | `protolang-server`: LSP over stdio, and the workspace configuration model under it. |
 | [tests/ProtoLang.Tests](tests/ProtoLang.Tests) | One xunit project covering all of it. |
 
-Dependencies run one way. Backends and the CLI reference Core; **Core references nothing in the
-repo**. That is what lets a language server consume the compiler without dragging the CLI along, and
-it is worth preserving.
+Dependencies run one way. Backends, the CLI and the language server reference Core; **Core
+references nothing in the repo**. That is what lets a language server consume the compiler without
+dragging the CLI along, and it is worth preserving.
 
 ## The pipeline
 
@@ -38,7 +39,10 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    place the compiler reads ProtoLang source from disk.
 2. **Policy.** The nearest `protolang.config.xml` at or above the source directory
    ([`ProjectConfig.Discover`/`Load`](src/ProtoLang.Core/Config/ProjectConfig.cs)). A config that
-   exists and cannot be read **stops** the compilation rather than falling back to defaults.
+   exists and cannot be read **stops** the compilation rather than falling back to defaults. A host
+   serving an editor settles this per document instead, through
+   [`WorkspaceConfiguration`](src/ProtoLang.LanguageServer/Workspace/WorkspaceConfiguration.cs) — see
+   *Configuration* below.
 3. **Lex.** [`Lexer.Tokenize`](src/ProtoLang.Core/Syntax/Lexer.cs) → `List<Token>`. No token spans
    more than one line.
 4. **Parse.** [`Parser.ParseCompilationUnit`](src/ProtoLang.Core/Syntax/Parser.cs) → the AST in
@@ -53,8 +57,29 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    [`ImportResolution`](src/ProtoLang.Core/ImportResolution.cs) — resolved, not found, or never
    written — and the whole list is published on the result. Then
    [`DescriptorLoader`](src/ProtoLang.Core/Binding/DescriptorLoader.cs) shells out to `protoc`
-   (located by [`ProtocLocator`](src/ProtoLang.Core/Binding/ProtocLocator.cs)) and returns
-   `FileDescriptor`s. The `FileDescriptorSet` is currently discarded — #48 must stop doing that.
+   (located by [`ProtocLocator`](src/ProtoLang.Core/Binding/ProtocLocator.cs)) and returns a
+   [`DescriptorBundle`](src/ProtoLang.Core/Binding/DescriptorBundle.cs): the built `FileDescriptor`s,
+   the `FileDescriptorSet` they came from with its `--include_source_info` source info, and the file
+   each schema in the transitive closure was read from. `Load` still returns the descriptor list
+   alone, so no existing caller moved. A [`DescriptorCache`](src/ProtoLang.Core/Binding/DescriptorCache.cs)
+   on the loader's options keeps bundles, keyed by a
+   [`DescriptorRequest`](src/ProtoLang.Core/Binding/DescriptorRequest.cs) — which `protoc`, which
+   roots in which order, which files — and re-checked against a content hash of every file in the
+   closure, because the request cannot name a schema that is only reached through an import. The
+   loader is uncached unless a caller supplies one, `protoc` runs under a timeout — reported as
+   `PL0083` and as a kind on the failure, so an expiry is not mistaken for a schema error — and a
+   failure keeps its report line by line as
+   [`ProtocDiagnostic`](src/ProtoLang.Core/Binding/ProtocDiagnostic.cs) rather than only as prose.
+   A cached entry holds the load as a `Task` rather than a `Lazy`, which is what lets a caller
+   abandon its wait: `LoadBundle` and `Compile` take a `CancellationToken` that stops the *waiting*,
+   and stops `protoc` itself only for a load no cache holds, because a cached load belongs to the
+   cache and its successor usually wants exactly it. The source info the set carries is answered rather than merely kept:
+   `DescriptorBundle.DeclarationOf` turns a message, enum, field or enum value descriptor into a
+   [`SchemaDeclaration`](src/ProtoLang.Core/Symbols/SchemaDeclaration.cs) — the `.proto` it was
+   written in, the range of the declaration and of its name, and the comments around it — through a
+   per-file [`SchemaSourceIndex`](src/ProtoLang.Core/Binding/SchemaSourceIndex.cs) built on first ask
+   and kept on the bundle. That is what lets go-to-definition and hover cross the file boundary,
+   which is where most of what a ProtoLang file talks about lives.
 7. **Bind.** [`Binder.Bind`](src/ProtoLang.Core/Binding/Binder.cs) resolves names against the
    descriptors and produces typed IR. It does **not** throw on bad input: an unresolved name becomes
    `ErrorType` (`PL0037`) and binding continues, a name the parser never saw resolves to `ErrorType`
@@ -75,8 +100,10 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    collides with an enclosing one are all still in the IR and all resolve nothing, and the tree does
    not say so.
 8. **Result.** `CompilationResult` carries the IR *even when the file did not parse*, the syntax
-   tree, the descriptors, the import outcomes, the diagnostics, the settled config, and the search
-   paths that were used. `Module` is null only when the compilation stopped before the binder: an
+   tree, the descriptors, the whole `Schema` bundle they came from, the import outcomes, the
+   diagnostics, the settled config, and the search paths that were used. When the schemas could not
+   be loaded it carries `SchemaFailure` instead — `protoc`'s own report, line by line with positions,
+   beside the `PL0003` that renders it as prose. `Module` is null only when the compilation stopped before the binder: an
    unreadable config, an unusable include path, or a schema that could not be found or loaded.
    **`Module` is the partial one. Emit from `EmittableModule`**, which is null unless the
    compilation produced a whole program.
@@ -107,8 +134,23 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | Concern | Type | File |
 |---|---|---|
 | Location | `SourceSpan`, `SourcePosition` | [Diagnostics/SourceSpan.cs](src/ProtoLang.Core/Diagnostics/SourceSpan.cs) |
+| Whether two paths are one path | `PathIdentity` | [PathIdentity.cs](src/ProtoLang.Core/PathIdentity.cs) |
+| A document, to an editor and to the compiler | `DocumentUri` | [Workspace/DocumentUri.cs](src/ProtoLang.LanguageServer/Workspace/DocumentUri.cs) |
+| What an editor may configure, and where it wins | `WorkspaceConfiguration`, `ProtoLangSettings` | [Workspace/WorkspaceConfiguration.cs](src/ProtoLang.LanguageServer/Workspace/WorkspaceConfiguration.cs) |
+| What one document compiles under | `DocumentConfiguration`, `ConfigurationSource` | [Workspace/DocumentConfiguration.cs](src/ProtoLang.LanguageServer/Workspace/DocumentConfiguration.cs) |
+| One JSON-RPC conversation | `JsonRpcConnection`, `MessageReader` | [Protocol/JsonRpcConnection.cs](src/ProtoLang.LanguageServer/Protocol/JsonRpcConnection.cs) |
+| The server itself | `LanguageServerHost` | [Hosting/LanguageServerHost.cs](src/ProtoLang.LanguageServer/Hosting/LanguageServerHost.cs) |
+| Who is told what is wrong with which file | `DiagnosticRouter`, `DiagnosticContribution` | [Hosting/DiagnosticRouter.cs](src/ProtoLang.LanguageServer/Hosting/DiagnosticRouter.cs) |
+| What the compiler tells an editor to colour | `SemanticTokenLegend`, `SemanticTokenEncoder` | [Hosting/SemanticTokenLegend.cs](src/ProtoLang.LanguageServer/Hosting/SemanticTokenLegend.cs) |
+| Where a comment was | `Comment` | [Syntax/Comment.cs](src/ProtoLang.Core/Syntax/Comment.cs) |
 | Written or not-yet-written names | `SyntaxName` | [Syntax/SyntaxName.cs](src/ProtoLang.Core/Syntax/SyntaxName.cs) |
 | What became of an import | `ImportResolution` | [ImportResolution.cs](src/ProtoLang.Core/ImportResolution.cs) |
+| What a descriptor load produced | `DescriptorBundle`, `SchemaFile` | [Binding/DescriptorBundle.cs](src/ProtoLang.Core/Binding/DescriptorBundle.cs) |
+| What decides a load, and keys it | `DescriptorRequest` | [Binding/DescriptorRequest.cs](src/ProtoLang.Core/Binding/DescriptorRequest.cs) |
+| Whether a load can be reused | `DescriptorCache`, `SchemaClosure` | [Binding/DescriptorCache.cs](src/ProtoLang.Core/Binding/DescriptorCache.cs) |
+| Which way a load failed | `DescriptorLoadFailureKind`, `SchemaLoadFailure` | [Binding/DescriptorLoadFailureKind.cs](src/ProtoLang.Core/Binding/DescriptorLoadFailureKind.cs) |
+| When a document is compiled, and whether the answer still counts | `CompileScheduler` | [Hosting/CompileScheduler.cs](src/ProtoLang.LanguageServer/Hosting/CompileScheduler.cs) |
+| What `protoc` said, and about where | `ProtocDiagnostic`, `SchemaLoadFailure` | [Binding/ProtocDiagnostic.cs](src/ProtoLang.Core/Binding/ProtocDiagnostic.cs), [SchemaLoadFailure.cs](src/ProtoLang.Core/SchemaLoadFailure.cs) |
 | Offset ↔ line/column | `LineMap` | [Diagnostics/LineMap.cs](src/ProtoLang.Core/Diagnostics/LineMap.cs) |
 | Messages | `Diagnostic`, `DiagnosticBag` | [Diagnostics/Diagnostic.cs](src/ProtoLang.Core/Diagnostics/Diagnostic.cs) |
 | Type system | `PlType` and friends | [Types/PlType.cs](src/ProtoLang.Core/Types/PlType.cs) |
@@ -117,6 +159,7 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | What is here, and what holds it | `SyntaxLocation`, `IrLocation` | [Semantics/NodePath.cs](src/ProtoLang.Core/Semantics/NodePath.cs) |
 | Down through a tree | `SyntaxWalk`, `IrWalk` | [Semantics/SyntaxWalk.cs](src/ProtoLang.Core/Semantics/SyntaxWalk.cs) |
 | Where a declaration is | `DeclarationSite` | [Symbols/DeclarationSite.cs](src/ProtoLang.Core/Symbols/DeclarationSite.cs) |
+| Where a `.proto` declared it, and what it said | `SchemaDeclaration`, `SchemaSite`, `SchemaComments` | [Symbols/SchemaDeclaration.cs](src/ProtoLang.Core/Symbols/SchemaDeclaration.cs) |
 | Which symbol a reference means | `SymbolId` | [Symbols/SymbolId.cs](src/ProtoLang.Core/Symbols/SymbolId.cs) |
 | Where a symbol is used | `SymbolReference`, `ReferenceKind` | [Symbols/SymbolReference.cs](src/ProtoLang.Core/Symbols/SymbolReference.cs) |
 | What a name is in scope over | `ScopeEntry` | [Symbols/ScopeEntry.cs](src/ProtoLang.Core/Symbols/ScopeEntry.cs) |
@@ -145,6 +188,62 @@ divide-by-zero, unset-message reads. Discovery walks up from the source director
 `.editorconfig` does. A command-line flag that contradicts an explicit setting is **refused** unless
 `--override-config` is passed — generated code has to mean the same thing however it was built.
 
+An editor adds an axis the command line never had: one process, many documents, one or more
+workspace folders, each able to state settings of its own. Spec 10.4.1 settles that in the server
+and `WorkspaceConfiguration.Resolve` is the only place it is applied. Configuration is resolved
+**per document**, in the order folder → workspace → user setting → `PROTOLANG_PROTOC` → discovery.
+Language policy stays out of settings entirely — a host may name a different `protolang.config.xml`
+and may not restate what is in one — and **every setting that is not being used is reported**
+(`PL2101`–`PL2105`), because a user who cannot tell a typo from a refusal has nothing to go on. A
+`protolang.config.xml` that is found and cannot be read stops the document and is named as *refused*
+(`PL2106`), rather than being reported as having supplied the defaults it did not supply.
+`DocumentUri` and `PathIdentity` are between them the only places a URI becomes a path and two paths
+are compared, which is what makes one file one document and one cache entry however it is spelled.
+
+### Serving an editor
+
+[`LanguageServerHost`](src/ProtoLang.LanguageServer/Hosting/LanguageServerHost.cs) is the whole
+server: `protolang-server`, LSP over stdin and stdout, driven by VS Code and Visual Studio alike.
+There is **no LSP framework**. Everything below
+[`JsonRpcConnection`](src/ProtoLang.LanguageServer/Protocol/JsonRpcConnection.cs) is transport —
+`Content-Length` framing, correlation, a writer gate — and nothing above it knows how a message is
+framed, so the decision is one file wide.
+
+Two rules in the connection are load-bearing and easy to undo. **Reading and handling are separate**:
+the read loop parses, completes responses and honours `$/cancelRequest`, and everything else goes to
+a queue one worker drains in order. That separation is what lets a handler ask the client a question
+— `workspace/configuration` is a request the *server* sends — without waiting for itself. And when
+the connection ends, outstanding work is cancelled **before** the dispatcher is awaited; the other
+order waits forever for a handler whose answer is never coming.
+
+The buffer the client sent is the source of truth and the file on disk is never read for an open
+document. Edits are applied incrementally, in order, each against the text the one before it
+produced. A compile is debounced and coalesced, carries the document version and the configuration
+generation it began under, and its result is **discarded rather than published** if either has moved
+— the most visible failure a server can have is an old compile putting a fixed error back on screen.
+The rule is not only about diagnostics: every answer describes the version it read, and a request
+that could only answer about a superseded one refuses instead.
+
+Cancellation reaches the one step that can outlast a keystroke. A superseded or closed document's
+compile stops waiting on `protoc` and gives its worker back at once; everything after the load is
+milliseconds and simply finishes into the discard. The queue holds one entry per document and a new
+request supersedes the last, so it cannot outgrow the number of open documents, and `Pending`,
+`InFlight` and `PeakInFlight` publish the backlog, what is running and the high-water mark. The
+interval and the concurrency limit are still #57's to pin.
+
+Diagnostics are published *per file* and produced *per compilation*, and the two stop lining up as
+soon as a `.proto` can be blamed, so
+[`DiagnosticRouter`](src/ProtoLang.LanguageServer/Hosting/DiagnosticRouter.cs) publishes the union of
+what every open document says about a file. Two buffers importing one broken schema both report it,
+identical reports collapse, and closing one does not withdraw the other's. Spec 26.1 has the rest:
+severities mapped rather than invented, help text kept as its own thing, a locationless diagnostic
+published at the start of its document, and a `protoc` failure landing both in the schema it names
+and on the import that reached it.
+
+Classification (spec 6.5) lexes and nothing more, so it answers for a file that does not parse. The
+legend is the whole standard token set, declared now because it is negotiated once and indexed by
+position; identifiers are uniformly `variable` until a semantic model can do better.
+
 ### Backends
 
 Per spec 23 a backend consumes only the typed IR, never the AST, and rejects what it cannot support
@@ -158,6 +257,8 @@ One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized b
 `LexerTests`, `ParserTests`, `ParserResilienceTests` and `BinderResilienceTests` (fuzz),
 `SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
 `SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `ScopeQueryTests`,
+`DescriptorCacheTests`, `SchemaDeclarationTests`, `ProcessSupervisionTests`, `CompileSupervisionTests`,
+`WorkspaceConfigurationTests`, `LanguageServerTests`, `SemanticTokenTests`,
 `TreeWalkTests`, `ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`,
 and the scaffolding and smoke suites.
 
@@ -169,6 +270,9 @@ and the scaffolding and smoke suites.
   generated projects. Needs `protoc`, the .NET SDK, and a C++ toolchain.
 - **Paths** — [TestPaths.cs](tests/ProtoLang.Tests/TestPaths.cs) finds the repository root and the
   fixture protos; use it rather than hand-rolling paths.
+- **The server is driven over the wire** — [LanguageServerClient.cs](tests/ProtoLang.Tests/LanguageServerClient.cs)
+  speaks framed JSON-RPC at a real host over a pair of in-memory streams, so the framing, the
+  lifecycle gate and the dispatch order are under test rather than bypassed.
 
 There is **no CI**. `dotnet test` locally is the gate.
 
@@ -198,5 +302,16 @@ recording line at each of the fifteen points the binder resolves a name, and tur
 file, and the reason `EmitStatement` now asks the expression emitter for the target it used to spell
 itself. #49 gave `Scope` an extent and a recording line on each of the three branches where a
 declaration is accepted, so that what the binder knew about visibility outlives the descent that
-knew it. Everything from here should be additive: new types, new projects. Rewriting the binder is
-the signal to stop and re-scope.
+knew it. #48 made the descriptor load cacheable and stopped it discarding the descriptor set, which
+reached `Compilation` twice: it now holds the loader it resolved rather than locating `protoc` again
+per keystroke, and it publishes the bundle on the result. #53 opened the server project and settled
+the configuration model in it before #42, #45 and #46 could each invent part of one; it reached Core
+only to give "are these two paths the same path?" a single home, which is what collapses the
+duplicate cache entries #48 left behind. #42 built the server itself — lifecycle, document sync,
+diagnostics and lexical semantic tokens over a base protocol this repository owns — and reached Core
+only to have the lexer keep the comment spans it was already walking past. #41 closed the second
+wave by making the retained source info answerable, so a schema element's declaration and its doc
+comment are reachable from a descriptor. #54 made abandoned work stop costing anything: a
+cancellable wait on `protoc`, an expiry that says it is one, a stated queue bound, and counters that
+turn "no leak over a working day" into a soak test. Everything from here should be additive: new
+types, new projects. Rewriting the binder is the signal to stop and re-scope.

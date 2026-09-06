@@ -333,6 +333,19 @@ public sealed record ProjectConfig(
 
     private static readonly string[] KnownSections = ["Arithmetic", "Presence"];
 
+    /// <summary>Every setting this file may state, as <c>Section/Setting</c>.</summary>
+    /// <remarks>
+    /// Published so that a host which accepts configuration of its own can tell a policy setting from
+    /// a setting it does not recognize, and refuse the first by name -- "that one is stated in
+    /// <c>protolang.config.xml</c>" is a useful thing to be told, and "unknown setting" is not.
+    /// Derived from the same two lists the loader validates against rather than written out again,
+    /// because a second list is one that eventually accepts a setting the file rejects.
+    /// </remarks>
+    public static IReadOnlyList<string> Keys { get; } =
+    [
+        .. KnownSections.SelectMany(section => KnownSettings(section).Select(setting => $"{section}/{setting}")),
+    ];
+
     private static string[] KnownSettings(string section) => section switch
     {
         "Arithmetic" => ["Overflow", "Conversion", "DivideByZero"],

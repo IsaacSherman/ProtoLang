@@ -197,8 +197,10 @@ public sealed class SemanticModel
     /// <remarks>
     /// Null for anything the schema declares -- a field, an enum constant, a message or enum type --
     /// because its declaration is in a <c>.proto</c> this compiler does not own. That is a boundary
-    /// rather than a shortfall: ProtoLang reports uses of a schema member and does not edit it. #41
-    /// is what will answer with a location in the <c>.proto</c> itself.
+    /// rather than a shortfall: ProtoLang reports uses of a schema member and does not edit it. The
+    /// declaration on the other side of it is <see cref="Binding.DescriptorBundle"/>'s
+    /// <c>DeclarationOf</c>, reached through <see cref="CompilationResult.Schema"/>, which answers
+    /// with a range in the <c>.proto</c> and the comment written above it.
     /// </remarks>
     public DeclarationSite? DeclarationOf(SymbolId symbol)
         => _references.Value?.DeclarationOf(symbol);

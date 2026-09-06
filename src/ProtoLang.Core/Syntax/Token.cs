@@ -48,7 +48,17 @@ public static class TokenKindExtensions
         [TokenKind.EndOfFile] = "end of file",
     };
 
+    private static readonly HashSet<TokenKind> KeywordKinds = [.. Lexer.Keywords.Values];
+
     /// <summary>Human-readable spelling used in "expected X" diagnostics.</summary>
     public static string Describe(this TokenKind kind)
         => DisplayText.TryGetValue(kind, out var text) ? text : kind.ToString().ToLowerInvariant();
+
+    /// <summary>Whether this kind is one of spec 6.4's reserved words.</summary>
+    /// <remarks>
+    /// Read from <see cref="Lexer.Keywords"/> rather than restated, so a keyword added to the language
+    /// is a keyword everywhere at once. Asked by a host colouring source (spec 6.5), where the
+    /// alternative is a hand-maintained list that quietly stops matching the lexer.
+    /// </remarks>
+    public static bool IsKeyword(this TokenKind kind) => KeywordKinds.Contains(kind);
 }

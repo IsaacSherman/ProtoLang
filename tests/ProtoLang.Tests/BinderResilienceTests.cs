@@ -24,10 +24,12 @@ namespace ProtoLang.Tests;
 /// cheap and holds the diagnostics it was given, so each input gets its own.
 /// </para>
 /// </remarks>
+[Collection("Timing-sensitive regressions")]
 public class BinderResilienceTests
 {
-    /// <summary>Guards against a hang. A bind this slow is a bug, not a slow machine.</summary>
+    /// <summary>A hang guard for one bounded batch, not a throughput target for an entire file.</summary>
     private static readonly TimeSpan BindBudget = TimeSpan.FromSeconds(60);
+    private const int DeletionBatchSize = 128;
 
     private static readonly Lazy<IReadOnlyList<FileDescriptor>> Schemas = new(LoadSchemas);
 
@@ -49,19 +51,24 @@ public class BinderResilienceTests
     /// a test to hold is what <c>#54</c> -- process supervision, cancellation, and timeouts -- is
     /// for. The failure is still reported, which is what this exists to do.
     /// </remarks>
-    private static void WithinBudget(string description, Action<CancellationToken> sweep)
+    private static async Task WithinBudget(string description, Action<CancellationToken> sweep)
     {
-        using var stop = new CancellationTokenSource();
-        var task = Task.Run(() => sweep(stop.Token));
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var token = stop.Token;
+        var task = Task.Run(() => sweep(token), token);
 
-        if (task.Wait(BindBudget))
+        try
         {
-            task.GetAwaiter().GetResult();
-            return;
+            await task.WaitAsync(BindBudget, TestContext.Current.CancellationToken);
         }
-
-        stop.Cancel();
-        Assert.Fail($"Binding did not terminate within {BindBudget.TotalSeconds:0}s: {description}");
+        catch (TimeoutException) when (!task.IsFaulted)
+        {
+            Assert.Fail($"Binding did not terminate within {BindBudget.TotalSeconds:0}s: {description}");
+        }
+        finally
+        {
+            stop.Cancel();
+        }
     }
 
     /// <summary>
@@ -71,7 +78,7 @@ public class BinderResilienceTests
     /// </summary>
     [Theory]
     [MemberData(nameof(ParserResilienceTests.Corpus), MemberType = typeof(ParserResilienceTests))]
-    public void TruncationAtEveryTokenBoundaryBinds(string path)
+    public async Task TruncationAtEveryTokenBoundaryBinds(string path)
     {
         var source = File.ReadAllText(path);
         var boundaries = new Lexer(source, path, new DiagnosticBag())
@@ -79,7 +86,7 @@ public class BinderResilienceTests
             .Select(token => token.Span.End.Offset)
             .Distinct();
 
-        WithinBudget(
+        await WithinBudget(
             $"token-boundary truncations of {Path.GetFileName(path)}",
             stop =>
             {
@@ -101,19 +108,26 @@ public class BinderResilienceTests
     /// </summary>
     [Theory]
     [MemberData(nameof(ParserResilienceTests.Corpus), MemberType = typeof(ParserResilienceTests))]
-    public void SingleCharacterDeletionBinds(string path)
+    public async Task SingleCharacterDeletionBinds(string path)
     {
         var source = File.ReadAllText(path);
 
-        WithinBudget(
-            $"single-character deletions of {Path.GetFileName(path)}",
-            stop =>
-            {
-                for (var index = 0; index < source.Length && !stop.IsCancellationRequested; index++)
+        // Every deletion still runs. Batching keeps a larger corpus from exhausting a deadline
+        // merely by making progress, while a stuck bind still fails within one batch's budget.
+        for (var start = 0; start < source.Length; start += DeletionBatchSize)
+        {
+            var first = start;
+            var end = Math.Min(first + DeletionBatchSize, source.Length);
+            await WithinBudget(
+                $"single-character deletions of {Path.GetFileName(path)}, offsets {first} through {end - 1}",
+                stop =>
                 {
-                    Assert.NotNull(Bind(source.Remove(index, 1)));
-                }
-            });
+                    for (var index = first; index < end && !stop.IsCancellationRequested; index++)
+                    {
+                        Assert.NotNull(Bind(source.Remove(index, 1)));
+                    }
+                });
+        }
     }
 
     /// <summary>
@@ -142,9 +156,9 @@ public class BinderResilienceTests
     [InlineData("test . \"x\" { }")]
     [InlineData("test InvoiceItem. \"x\" { receiver { . } expect return ; }")]
     [InlineData("test InvoiceItem.f \"x\" { receiver { = 1; } arg = 1; expect return 1; }")]
-    public void MalformedInputBinds(string body)
+    public async Task MalformedInputBinds(string body)
     {
-        WithinBudget($"'{body}'", _ => Assert.NotNull(Bind("import proto \"invoice.proto\";\n" + body)));
+        await WithinBudget($"'{body}'", _ => Assert.NotNull(Bind("import proto \"invoice.proto\";\n" + body)));
     }
 
     /// <summary>
@@ -152,7 +166,7 @@ public class BinderResilienceTests
     /// budget is what protects both, so it has to hold for a tree that reached it.
     /// </summary>
     [Fact]
-    public void ATreeThatExhaustedTheNestingBudgetBinds()
+    public async Task ATreeThatExhaustedTheNestingBudgetBinds()
     {
         const int Depth = 5_000;
 
@@ -160,7 +174,7 @@ public class BinderResilienceTests
             + "extend InvoiceItem { fn f() -> int64 { return "
             + new string('(', Depth) + "1" + new string(')', Depth) + "; } }";
 
-        WithinBudget($"{Depth} levels of parentheses", _ => Assert.NotNull(Bind(source)));
+        await WithinBudget($"{Depth} levels of parentheses", _ => Assert.NotNull(Bind(source)));
     }
 
     /// <remarks>

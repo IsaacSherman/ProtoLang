@@ -72,6 +72,52 @@ public sealed record CompilationResult(
     /// cannot be forgotten the way an ordering convention can.
     /// </remarks>
     public IrModule? EmittableModule => Success ? Module : null;
+
+    /// <summary>
+    /// The whole of what the descriptor load produced, or null when this compilation never got that
+    /// far.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Init-only and beside the positional members rather than among them, so that the constructor
+    /// keeps the shape every existing caller builds and destructures it by. <see cref="Descriptors"/>
+    /// is the same list this bundle's <see cref="DescriptorBundle.Descriptors"/> holds -- literally
+    /// the same instance -- and stays where it is because it is what the binder and the backends have
+    /// always been handed.
+    /// </para>
+    /// <para>
+    /// What the bundle adds is everything protoc produced that a descriptor list cannot express: the
+    /// <c>SourceCodeInfo</c> that says where in a <c>.proto</c> a message is declared and what comment
+    /// sits above it, and the map from each schema name to the file it was read from. #41 turns those
+    /// into go-to-definition and hover; carrying them here means it finds them on a compilation
+    /// instead of having to run protoc a second time to recover what the first run already had.
+    /// </para>
+    /// </remarks>
+    public DescriptorBundle? Schema { get; init; }
+
+    /// <summary>
+    /// What protoc said when the schemas could not be loaded, or null when that is not what stopped
+    /// this compilation.
+    /// </summary>
+    /// <remarks>
+    /// The structured half of the <c>PL0003</c> in <see cref="Diagnostics"/>. Never both null and
+    /// PL0003-free: one accompanies the other, and each answers a different reader. See
+    /// <see cref="SchemaLoadFailure"/>.
+    /// </remarks>
+    public SchemaLoadFailure? SchemaFailure { get; init; }
+
+    /// <summary>
+    /// What protoc reported about the schemas, one entry per line it wrote, empty when it reported
+    /// nothing or was never reached.
+    /// </summary>
+    /// <remarks>
+    /// The same list as <c>SchemaFailure.Output</c>, one hop nearer, because publishing protoc's
+    /// errors against the <c>.proto</c> is the thing this data exists for and a client should not
+    /// have to null-check its way to it. Ask <see cref="SchemaFailure"/> instead when the question is
+    /// whether a schema load failed at all -- protoc that was never found reports nothing here, and
+    /// an empty list is not the same answer as no failure.
+    /// </remarks>
+    public IReadOnlyList<ProtocDiagnostic> ProtocOutput => SchemaFailure?.Output ?? [];
 }
 
 /// <summary>Everything a compilation needs that is not source text.</summary>
@@ -161,6 +207,28 @@ public sealed class Compilation
     public CompilationOptions Options { get; }
 
     /// <summary>
+    /// The loader this compilation used, once it has needed one: the caller's when
+    /// <see cref="CompilationOptions.Loader"/> supplied one, and the one located on demand otherwise.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Held rather than rebuilt, for the same reason the object holds its sources: it outlives a
+    /// single run. Locating protoc probes PATH and then the NuGet caches, and discovering the implicit
+    /// include paths stats the directories beside it -- work that produced the same answer on the
+    /// previous keystroke and will produce it again on the next.
+    /// </para>
+    /// <para>
+    /// Published because a loader is where a descriptor cache lives, and "did that compilation
+    /// actually run protoc?" has to be answerable from the compilation that ran. A caller that
+    /// reached for <see cref="CompilationOptions.Loader"/> instead would find null in exactly the case
+    /// it cares about -- the loader this compilation built for itself. Null before the first compile
+    /// that needed one, and after one where protoc could not be found at all, which is reported as
+    /// PL0003 rather than thrown.
+    /// </para>
+    /// </remarks>
+    public DescriptorLoader? Loader { get; private set; }
+
+    /// <summary>
     /// The directories an <c>import proto</c> path is resolved against, in order: the caller's
     /// include paths, then the directory each source belongs to.
     /// </summary>
@@ -197,7 +265,31 @@ public sealed class Compilation
             .FirstOrDefault(directory => directory is not null);
 
     /// <summary>Compiles the sources to typed IR.</summary>
-    public CompilationResult Compile() => Compile(new DiagnosticBag());
+    public CompilationResult Compile() => Compile(new DiagnosticBag(), CancellationToken.None);
+
+    /// <inheritdoc cref="Compile()"/>
+    /// <param name="cancellationToken">Abandons the compilation when nobody wants its answer.</param>
+    /// <remarks>
+    /// <para>
+    /// Cancellation reaches one place, and that is deliberate: the wait on protoc, which is the only
+    /// step here that can take longer than a keystroke. Lexing, parsing, binding and lowering are
+    /// milliseconds on a file a person is typing into, so checking a token between them would buy an
+    /// editor nothing and would put a new failure mode through every phase of a compiler the epic
+    /// asks to leave alone. What a cancelled compile gets is the thing that matters -- it stops
+    /// waiting and releases the worker it was holding -- and what it does not get is a protoc that
+    /// stops; see <see cref="DescriptorLoader.LoadBundle(IReadOnlyList{string}, IReadOnlyList{string}, CancellationToken)"/>
+    /// for why finishing that load is the right outcome rather than a leak.
+    /// </para>
+    /// <para>
+    /// This throws rather than reporting, which is the opposite of everything else here. A
+    /// cancellation is not something wrong with the input; it is this caller withdrawing the
+    /// question, and a <see cref="CompilationResult"/> describing it would be an answer to a question
+    /// nobody is still asking.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
+    public CompilationResult Compile(CancellationToken cancellationToken)
+        => Compile(new DiagnosticBag(), cancellationToken);
 
     /// <summary>
     /// Compiles a single ProtoLang file to typed IR, reading it from disk.
@@ -244,7 +336,7 @@ public sealed class Compilation
                     Loader = loader,
                     Config = settled,
                 })
-            .Compile(diagnostics);
+            .Compile(diagnostics, CancellationToken.None);
     }
 
     /// <summary>
@@ -284,14 +376,30 @@ public sealed class Compilation
     /// that states nothing.
     /// </returns>
     public static ProjectConfig? ResolveConfig(string? startDirectory, DiagnosticBag diagnostics)
+        => ResolveConfig(startDirectory, diagnostics, out _);
+
+    /// <inheritdoc cref="ResolveConfig(string?, DiagnosticBag)"/>
+    /// <param name="consulted">
+    /// The configuration file that was found, whether or not it could be read, and null when the
+    /// search found none.
+    /// </param>
+    /// <remarks>
+    /// Published because a null return says only that policy could not be settled, and a caller that
+    /// has to explain that to somebody needs to name the file. Rediscovering it outside this method
+    /// would be a second statement of the search rule, and the two would eventually disagree about
+    /// which file the compilation actually read.
+    /// </remarks>
+    public static ProjectConfig? ResolveConfig(string? startDirectory, DiagnosticBag diagnostics, out string? consulted)
     {
+        consulted = null;
+
         if (string.IsNullOrEmpty(startDirectory))
         {
             return ProjectConfig.Default;
         }
 
-        var discovered = ProjectConfig.Discover(startDirectory);
-        return discovered is null ? ProjectConfig.Default : ProjectConfig.Load(discovered, diagnostics);
+        consulted = ProjectConfig.Discover(startDirectory);
+        return consulted is null ? ProjectConfig.Default : ProjectConfig.Load(consulted, diagnostics);
     }
 
     /// <inheritdoc cref="SearchPaths"/>
@@ -304,8 +412,44 @@ public sealed class Compilation
     public static IReadOnlyList<string> GetSearchPaths(string sourcePath, IReadOnlyList<string> includePaths)
         => BuildSearchPaths([SourceIdentity.FromPath(sourcePath)], includePaths, out _);
 
-    private CompilationResult Compile(DiagnosticBag diagnostics)
+    /// <summary>Reports a failed descriptor load, under the code that says which way it failed.</summary>
+    /// <remarks>
+    /// One home for the choice, consulted by both places a load can fail, because a rule written out
+    /// twice is one that eventually disagrees with itself about which code an expiry gets.
+    /// <para>
+    /// The distinction is worth a code rather than a sentence inside <c>PL0003</c>'s message. A
+    /// schema protoc read and rejected names a line the author can go and look at; a protoc that
+    /// never finished reading names nothing wrong with the schema at all, and may well have been
+    /// handed a perfectly good one. Filed under the same code the second reads as the first, and a
+    /// reader spends their afternoon hunting for a fault in a file that has none.
+    /// </para>
+    /// </remarks>
+    private static void ReportSchemaFailure(
+        DiagnosticBag diagnostics,
+        DescriptorLoadException failure,
+        SourceSpan span)
     {
+        if (failure.Kind is DescriptorLoadFailureKind.TimedOut)
+        {
+            diagnostics.Error(
+                "PL0083",
+                "protoc did not finish",
+                failure.Message,
+                span,
+                "The schemas may be perfectly good. A very large import closure on a machine that "
+                    + "has not read those files before can genuinely need longer, while a protoc "
+                    + "that never finishes at all is usually a plugin of its own that is not "
+                    + "exiting. Check which protoc is in effect and what it is configured to run.");
+            return;
+        }
+
+        diagnostics.Error("PL0003", "protobuf schema could not be loaded", failure.Message, span);
+    }
+
+    private CompilationResult Compile(DiagnosticBag diagnostics, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
         var config = Options.Config ?? ResolveConfig(ConfigDirectory, diagnostics);
         if (config is null)
         {
@@ -362,20 +506,21 @@ public sealed class Compilation
         // directories the caller never named: protoc's own bundled well-known schemas. An
         // 'import proto "google/protobuf/timestamp.proto"' resolves for protoc but exists nowhere
         // under the user's proto roots, so checking it against those alone would reject it.
-        var loader = Options.Loader;
+        var loader = Options.Loader ?? Loader;
         try
         {
             loader ??= DescriptorLoader.CreateDefault();
         }
         catch (DescriptorLoadException ex)
         {
-            diagnostics.Error(
-                "PL0003",
-                "protobuf schema could not be loaded",
-                ex.Message,
-                unit.Imports[0].Span);
-            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, []);
+            ReportSchemaFailure(diagnostics, ex, unit.Imports[0].Span);
+            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, [])
+            {
+                SchemaFailure = SchemaLoadFailure.From(ex),
+            };
         }
+
+        Loader = loader;
 
         var resolvePaths = new List<string>(SearchPaths);
         resolvePaths.AddRange(loader.ImplicitIncludePaths);
@@ -411,28 +556,32 @@ public sealed class Compilation
         // for.
         var protoFiles = imports.ConvertAll(import => import.Path);
 
-        IReadOnlyList<FileDescriptor> descriptors;
+        DescriptorBundle schema;
         try
         {
-            descriptors = loader.Load(protoFiles, SearchPaths);
+            schema = loader.LoadBundle(protoFiles, SearchPaths, cancellationToken);
         }
         catch (DescriptorLoadException ex)
         {
-            diagnostics.Error(
-                "PL0003",
-                "protobuf schema could not be loaded",
-                ex.Message,
-                unit.Imports.Count > 0 ? unit.Imports[0].Span : unit.Span);
+            ReportSchemaFailure(diagnostics, ex, unit.Imports.Count > 0 ? unit.Imports[0].Span : unit.Span);
 
             // The imports, not an empty list: every one of them resolved -- the gate above refuses
             // to reach protoc otherwise -- and what failed is protoc's reading of schemas this
             // compilation had already found. An empty list here would say the imports were never
             // looked at, and would throw away the file-to-declaration mapping that is exactly what
             // an editor wants to report against and what a cache wants to key on.
-            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, imports);
+            //
+            // And what protoc itself said, kept as the lines it wrote. This is the failure an editor
+            // most wants to be specific about -- the schema is right there in the workspace, and the
+            // error names a line of it -- so flattening it into the PL0003 message and nothing else
+            // would leave the client with a sentence to re-parse.
+            return new CompilationResult(null, unit, [], diagnostics, config, SearchPaths, imports)
+            {
+                SchemaFailure = SchemaLoadFailure.From(ex),
+            };
         }
 
-        var module = new Binder(descriptors, diagnostics, new NumericPolicy(config), config, source.Identity)
+        var module = new Binder(schema.Descriptors, diagnostics, new NumericPolicy(config), config, source.Identity)
             .Bind(unit);
 
         // Carried out whether or not anything went wrong, because a module built from a broken tree
@@ -440,7 +589,10 @@ public sealed class Compilation
         // for a finished compilation: Success wants an empty diagnostic bag as well as a module, so
         // every existing caller -- the CLI and every backend -- still sees the same false it always
         // did and never reaches this.
-        return new CompilationResult(module, unit, descriptors, diagnostics, config, SearchPaths, imports);
+        return new CompilationResult(module, unit, schema.Descriptors, diagnostics, config, SearchPaths, imports)
+        {
+            Schema = schema,
+        };
     }
 
     /// <summary>
@@ -502,9 +654,12 @@ public sealed class Compilation
 
         return searchPaths;
 
+        // The first spelling of a directory is the one kept, so what a caller passed is what gets
+        // printed and handed to protoc. Only the question of whether it is already here is asked
+        // through PathIdentity.
         void Add(string path)
         {
-            if (!searchPaths.Contains(path, StringComparer.OrdinalIgnoreCase))
+            if (!searchPaths.Contains(path, PathIdentity.Comparer))
             {
                 searchPaths.Add(path);
             }
@@ -527,15 +682,8 @@ public sealed class Compilation
             return new ImportResolution(import, ImportOutcome.Unwritten, null, searchPaths);
         }
 
-        foreach (var searchPath in searchPaths)
-        {
-            var candidate = Path.Combine(searchPath, import.Path);
-            if (File.Exists(candidate))
-            {
-                return new ImportResolution(import, ImportOutcome.Resolved, candidate, searchPaths);
-            }
-        }
-
-        return new ImportResolution(import, ImportOutcome.NotFound, null, searchPaths);
+        return SchemaLookup.Find(import.Path, searchPaths) is { } found
+            ? new ImportResolution(import, ImportOutcome.Resolved, found, searchPaths)
+            : new ImportResolution(import, ImportOutcome.NotFound, null, searchPaths);
     }
 }

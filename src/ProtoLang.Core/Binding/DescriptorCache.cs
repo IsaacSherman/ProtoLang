@@ -1,0 +1,318 @@
+namespace ProtoLang.Binding;
+
+/// <summary>What a cache has done since it was created.</summary>
+/// <remarks>
+/// Published because the acceptance criterion for caching is "this compilation did not invoke
+/// protoc", and a property nobody can observe is a property nobody can test. #58 reports these in the
+/// language server's status command, where the question is the same one asked from a support request
+/// instead of from a test.
+/// </remarks>
+/// <param name="Hits">Loads answered from an entry that was still valid.</param>
+/// <param name="Misses">Loads that had to run protoc.</param>
+/// <param name="Invalidations">Entries found and then dropped because their files had changed.</param>
+/// <param name="Evictions">Entries dropped to stay within capacity.</param>
+public readonly record struct DescriptorCacheStatistics(int Hits, int Misses, int Invalidations, int Evictions);
+
+/// <summary>
+/// Keeps descriptor loads, so that a second compilation over unchanged schemas does not shell out to
+/// protoc again.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Caller-owned and never process-global. A test, the CLI and a language server each hold their own,
+/// so a test starts from empty by constructing one and no test can be reached by another's entries.
+/// Handed to a <see cref="DescriptorLoader"/> through <see cref="DescriptorLoaderOptions"/>; a loader
+/// without one behaves exactly as the loader always has.
+/// </para>
+/// <para>
+/// A hit is not merely a matching request. The request covers the arguments -- which protoc, which
+/// roots in which order, which files -- and the bundle's <see cref="DescriptorBundle.Closure"/>
+/// covers the files themselves, which cannot be part of a request because until protoc has run nobody
+/// knows what the closure contains. So a lookup matches the request, then re-checks the closure, and
+/// treats a changed closure as a miss. That is what makes a change to a transitively imported schema
+/// invalidate an entry that never named it.
+/// </para>
+/// <para>
+/// Single-flight, through a <see cref="Task{T}"/> started under the lock and waited on outside it.
+/// Two compilations racing to populate one entry is the normal case in an editor -- a keystroke
+/// arrives while the previous one is still loading -- and running protoc twice for it would waste
+/// exactly the work this type exists to avoid. Holding the lock across the load instead would
+/// serialize every unrelated load behind it.
+/// </para>
+/// <para>
+/// A task rather than a <see cref="Lazy{T}"/>, and the difference is the whole of #54's cancellation
+/// story. A caller blocked inside <c>Lazy.Value</c> cannot leave, so a compile the user has already
+/// superseded goes on holding a worker until protoc is done with it. A caller waiting on a task can
+/// abandon the wait and leave the load running -- which is what should happen, because the load
+/// belongs to this cache rather than to whoever asked first, and the keystroke that superseded that
+/// compile is about to want the very same schemas.
+/// </para>
+/// <para>
+/// <b>It costs a second thread per load, and that is the price rather than an oversight.</b> The
+/// load runs on the pool while its caller blocks waiting for it, where a <see cref="Lazy{T}"/> ran
+/// the load on the caller's own thread. Both are blocked threads, and at four concurrent compiles
+/// that is eight of them against a default minimum of one per processor, so a cold burst of edits
+/// can wait on the pool injecting threads rather than on protoc. There is no cheaper arrangement
+/// that keeps the property: a caller that ran the load itself could not abandon it, and the caller
+/// most likely to abandon is precisely the one that started it. The way out is an asynchronous
+/// pipeline rather than a cleverer wait, which is a great deal larger than this and is not what
+/// #54 is. #57 measures it before the concurrency limit is raised.
+/// </para>
+/// </remarks>
+public sealed class DescriptorCache
+{
+    /// <remarks>
+    /// Enough for the schemas of a handful of files open at once. #57 pins the real number against
+    /// measured latency and memory; a descriptor set carrying source info is not small, and the point
+    /// of a bound is that a session lasting all day does not grow without limit.
+    /// </remarks>
+    public const int DefaultCapacity = 16;
+
+    /// <remarks>
+    /// A found entry that fails its closure check is dropped and the load retried, which normally
+    /// settles on the second pass: the retry finds nothing, runs protoc, and returns without
+    /// re-checking, because a closure described from the files protoc has just read is current by
+    /// construction. More passes than that mean another thread keeps inserting entries that are stale
+    /// by the time this one looks, which is a file being rewritten continuously. Bounding the attempts
+    /// and falling back to an uncached load keeps that case slow rather than unbounded.
+    /// </remarks>
+    private const int MaxAttempts = 2;
+
+    private readonly object _gate = new();
+    private readonly Dictionary<DescriptorRequest, LinkedListNode<Entry>> _entries = [];
+
+    /// <summary>Least recently used at the front, so eviction takes <c>First</c>.</summary>
+    private readonly LinkedList<Entry> _order = new();
+
+    private int _hits;
+    private int _misses;
+    private int _invalidations;
+    private int _evictions;
+
+    public DescriptorCache(int capacity = DefaultCapacity)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
+
+        Capacity = capacity;
+    }
+
+    /// <summary>The most entries this cache will hold.</summary>
+    public int Capacity { get; }
+
+    /// <summary>How many entries it holds now.</summary>
+    public int Count
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _entries.Count;
+            }
+        }
+    }
+
+    /// <inheritdoc cref="DescriptorCacheStatistics"/>
+    public DescriptorCacheStatistics Statistics => new(
+        Volatile.Read(ref _hits),
+        Volatile.Read(ref _misses),
+        Volatile.Read(ref _invalidations),
+        Volatile.Read(ref _evictions));
+
+    /// <summary>
+    /// The bundle for <paramref name="request"/>, from the cache when one is there and still valid, and
+    /// from <paramref name="load"/> otherwise.
+    /// </summary>
+    /// <remarks>
+    /// A load that throws leaves nothing behind. Caching a failure would mean that fixing the broken
+    /// <c>.proto</c> and compiling again produced the same error, from an entry, without protoc ever
+    /// being asked to look at the corrected file -- which is the single most confusing thing a cache
+    /// can do to someone who has just fixed their mistake.
+    /// </remarks>
+    public DescriptorBundle GetOrLoad(DescriptorRequest request, Func<DescriptorBundle> load)
+        => GetOrLoad(request, load, CancellationToken.None);
+
+    /// <inheritdoc cref="GetOrLoad(DescriptorRequest, Func{DescriptorBundle})"/>
+    /// <param name="cancellationToken">
+    /// Abandons this caller's wait. The load itself runs on, because it is this cache's and not this
+    /// caller's; see the type's remarks.
+    /// </param>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
+    public DescriptorBundle GetOrLoad(
+        DescriptorRequest request,
+        Func<DescriptorBundle> load,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(load);
+
+        for (var attempt = 0; attempt < MaxAttempts; attempt++)
+        {
+            var node = Rent(request, load, out var wasPresent);
+
+            DescriptorBundle bundle;
+            try
+            {
+                bundle = Await(node.Value.Bundle, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // This caller gave up; the load did not. The entry is left exactly as it is, because
+                // it is still being filled and the next caller should find it rather than start a
+                // second protoc over the same schemas.
+                throw;
+            }
+            catch
+            {
+                // Everything else is a load that failed, and a cancellation the load raised of its
+                // own accord is one of them however much it resembles the case above. Told apart by
+                // whose token fired rather than by the type, because the type is the same: a load
+                // that decided its own work no longer applied would otherwise leave a faulted entry
+                // that only the continuation clears, so the caller who retries a moment later is
+                // handed the same cancellation again instead of a fresh attempt.
+                Drop(node);
+                throw;
+            }
+
+            if (!wasPresent)
+            {
+                Interlocked.Increment(ref _misses);
+                return bundle;
+            }
+
+            if (SchemaClosure.IsCurrent(bundle.Closure, request.SearchRoots))
+            {
+                Interlocked.Increment(ref _hits);
+                return bundle;
+            }
+
+            Interlocked.Increment(ref _invalidations);
+            Drop(node);
+        }
+
+        Interlocked.Increment(ref _misses);
+
+        // Uncached, because two passes have already found somebody else's entry stale, but not
+        // unsupervised: waited for exactly as every other load here is, so that a caller which asked
+        // to be able to leave can still leave. Run inline instead and the one path a caller reaches
+        // when the cache is thrashing is the one path that ignores its token -- a wait of up to
+        // protoc's whole budget with nothing able to end it.
+        return Await(Task.Run(load), cancellationToken);
+    }
+
+    /// <summary>Waits for a load, without joining this caller's fate to it.</summary>
+    /// <remarks>
+    /// One home for the wait, because there are two places that do it and the difference between
+    /// them was a defect rather than a decision. <c>WaitAsync</c> rather than <c>Wait</c> on both
+    /// counts: it leaves the load running when this caller gives up, and it surfaces a failed load
+    /// as the exception the load threw rather than wrapped in an <see cref="AggregateException"/>
+    /// that every caller would then have to unwrap.
+    /// </remarks>
+    private static DescriptorBundle Await(Task<DescriptorBundle> load, CancellationToken cancellationToken)
+        => load.WaitAsync(cancellationToken).GetAwaiter().GetResult();
+
+    private LinkedListNode<Entry> Rent(DescriptorRequest request, Func<DescriptorBundle> load, out bool wasPresent)
+    {
+        lock (_gate)
+        {
+            if (_entries.TryGetValue(request, out var existing))
+            {
+                _order.Remove(existing);
+                _order.AddLast(existing);
+                wasPresent = true;
+                return existing;
+            }
+
+            var created = _order.AddLast(new Entry(request, Task.Run(load)));
+
+            _entries[request] = created;
+            Discard(created);
+            Evict();
+
+            wasPresent = false;
+            return created;
+        }
+    }
+
+    /// <summary>Drops an entry whose load failed, whoever is left to notice.</summary>
+    /// <remarks>
+    /// A failed load is not cached -- fixing the broken <c>.proto</c> and compiling again must reach
+    /// protoc rather than the error. The caller that was waiting drops it too, and did so alone until
+    /// callers could leave: a load whose every waiter has cancelled would otherwise fault into an
+    /// entry nobody is watching, and stay there answering the same stale error to everyone who came
+    /// afterwards. Observing the exception here is also what keeps an abandoned failure from
+    /// surfacing later as an unobserved task exception.
+    /// </remarks>
+    private void Discard(LinkedListNode<Entry> node)
+        => node.Value.Bundle.ContinueWith(
+            load =>
+            {
+                _ = load.Exception;
+                Drop(node);
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
+
+    /// <remarks>
+    /// The node identifies the entry, not the request: by the time a stale or failed load is dropped,
+    /// another thread may already have replaced that request with a fresh entry, and removing by
+    /// request alone would throw away the good one -- leaving the next lookup to redo work that had
+    /// just been done correctly.
+    /// </remarks>
+    private void Drop(LinkedListNode<Entry> node)
+    {
+        lock (_gate)
+        {
+            if (node.List is null)
+            {
+                return;
+            }
+
+            if (_entries.TryGetValue(node.Value.Request, out var current) && ReferenceEquals(current, node))
+            {
+                _entries.Remove(node.Value.Request);
+            }
+
+            _order.Remove(node);
+        }
+    }
+
+    /// <summary>Trims to <see cref="Capacity"/>, oldest first, skipping loads still in flight.</summary>
+    /// <remarks>
+    /// <para>
+    /// An entry whose load has not finished is not a candidate. Evicting one would undo the
+    /// single-flight guarantee at exactly the moment it matters: the next caller for that same
+    /// request finds nothing, and starts a second protoc over the schemas the first is still
+    /// compiling. That would make "two compilations racing populate one entry once" conditional on
+    /// no unrelated load arriving in between -- which, in an editor holding a small cache and several
+    /// open files, is not a rare accident but the normal traffic.
+    /// </para>
+    /// <para>
+    /// The consequence is that a cache with every entry in flight sits briefly over capacity rather
+    /// than evicting work it is waiting on. That is the right way round: the bound exists to stop a
+    /// day-long session growing without limit, and it is restored by the next insertion after those
+    /// loads land. Nothing stays in flight indefinitely, because protoc runs under a budget and a
+    /// load that throws is dropped.
+    /// </para>
+    /// </remarks>
+    private void Evict()
+    {
+        var node = _order.First;
+
+        while (_entries.Count > Capacity && node is not null)
+        {
+            var next = node.Next;
+
+            if (node.Value.Bundle.IsCompleted)
+            {
+                _entries.Remove(node.Value.Request);
+                _order.Remove(node);
+                Interlocked.Increment(ref _evictions);
+            }
+
+            node = next;
+        }
+    }
+
+    private sealed record Entry(DescriptorRequest Request, Task<DescriptorBundle> Bundle);
+}
