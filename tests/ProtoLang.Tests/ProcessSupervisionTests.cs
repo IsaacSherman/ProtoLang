@@ -379,6 +379,70 @@ public class ProcessSupervisionTests
     }
 
     /// <summary>
+    /// The remembered descriptor-set cap holds when many cleanups fail at the same time. A separate
+    /// count check and insertion is not a cap: every concurrent cleanup can observe the same spare
+    /// slot and add a path of its own.
+    /// </summary>
+    [Fact]
+    public async Task DescriptorSetsRememberedByConcurrentFailedCleanupsStayBounded()
+    {
+        const int Cleanups = 40;
+
+        var temporary = TestPaths.CreateTempDirectory();
+        var paths = Enumerable.Range(0, Cleanups)
+            .Select(index => Path.Combine(temporary, $"stranded-{index}.desc"))
+            .ToArray();
+        var loader = new DescriptorLoader(
+            StandInProtoc.Silent(),
+            new DescriptorLoaderOptions { TemporaryDirectory = temporary });
+
+        foreach (var path in paths)
+        {
+            File.WriteAllText(path, "stranded");
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            foreach (var path in paths)
+            {
+                File.SetAttributes(path, FileAttributes.ReadOnly);
+            }
+        }
+        else
+        {
+            File.SetUnixFileMode(
+                temporary,
+                UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        }
+
+        var release = typeof(DescriptorLoader).GetMethod("Release", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("DescriptorLoader no longer cleans up descriptor sets.");
+        using var gate = new Barrier(Cleanups);
+
+        try
+        {
+            var cleanups = paths.Select(
+                path => Task.Factory.StartNew(
+                    () =>
+                    {
+                        gate.SignalAndWait(TestContext.Current.CancellationToken);
+                        release.Invoke(loader, [path]);
+                    },
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default));
+
+            await Task.WhenAll(cleanups).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+            Assert.InRange(Remembered(loader), 0, 32);
+        }
+        finally
+        {
+            StandInProtoc.Unlock(temporary);
+        }
+    }
+
+    /// <summary>
     /// A protoc that says it succeeded and wrote nothing is reported, not thrown out of the
     /// pipeline. Compilation catches a descriptor-load failure and nothing else, so an IO exception
     /// escaping here becomes a crash on input rather than a diagnostic.

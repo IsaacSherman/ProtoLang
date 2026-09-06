@@ -66,8 +66,14 @@ public sealed class DescriptorLoader
     private readonly string _protocPath;
 
     /// <summary>Descriptor sets this loader wrote and has not yet managed to delete.</summary>
-    /// <remarks>A set; the value is unused. <see cref="Release"/> says why they are kept.</remarks>
+    /// <remarks>
+    /// A set; the value is unused. <see cref="Release"/> says why they are kept, and
+    /// <see cref="Remember"/> why adding to them is the one part of this that needs a lock.
+    /// </remarks>
     private readonly ConcurrentDictionary<string, byte> _abandoned = new(StringComparer.Ordinal);
+
+    /// <inheritdoc cref="Remember"/>
+    private readonly object _abandonedGate = new();
 
     private int _protocInvocations;
 
@@ -384,7 +390,38 @@ public sealed class DescriptorLoader
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            if (Path.Exists(descriptorSetPath) && _abandoned.Count < MostAbandoned)
+            Remember(descriptorSetPath);
+        }
+    }
+
+    /// <summary>Adds one undeletable descriptor set to the list, if there is still room for it.</summary>
+    /// <remarks>
+    /// <para>
+    /// Counted and added under a lock, because asking a concurrent dictionary for its size and then
+    /// adding to it is two operations and therefore not a cap at all: every cleanup failing at the
+    /// same moment sees the same one free slot and every one of them takes it. Which is exactly the
+    /// shape of the case this bound exists for -- a directory that refuses deletion refuses it for
+    /// all four compile workers at once, not for one of them at a time.
+    /// </para>
+    /// <para>
+    /// The delete itself stays outside the lock. It is the only part of this that touches the disk,
+    /// it runs on every load rather than only on the failures, and serializing it would put every
+    /// compile worker behind one file operation to protect a list that is almost always empty.
+    /// Removals stay outside too, which is safe in the one direction that matters: a removal racing
+    /// the count can only make it smaller, and a decision to admit one more path when there was room
+    /// a moment ago is still a decision that respects the bound.
+    /// </para>
+    /// </remarks>
+    private void Remember(string descriptorSetPath)
+    {
+        if (!Path.Exists(descriptorSetPath))
+        {
+            return;
+        }
+
+        lock (_abandonedGate)
+        {
+            if (_abandoned.Count < MostAbandoned)
             {
                 _abandoned[descriptorSetPath] = 0;
             }
