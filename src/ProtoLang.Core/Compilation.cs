@@ -410,7 +410,17 @@ public sealed class Compilation
     /// where the schemas were.
     /// </remarks>
     public static IReadOnlyList<string> GetSearchPaths(string sourcePath, IReadOnlyList<string> includePaths)
-        => BuildSearchPaths([SourceIdentity.FromPath(sourcePath)], includePaths, out _);
+        => GetSearchPaths(SourceIdentity.FromPath(sourcePath), includePaths);
+
+    /// <inheritdoc cref="GetSearchPaths(string, IReadOnlyList{string})"/>
+    /// <remarks>
+    /// The overload for a caller holding a buffer rather than a file. An unsaved document has no path
+    /// to decompose and still belongs somewhere -- its workspace folder -- and
+    /// <see cref="SourceIdentity"/> is where that has already been settled. Asking with a path would
+    /// mean inventing one, and a fabricated path is a directory this would then search.
+    /// </remarks>
+    public static IReadOnlyList<string> GetSearchPaths(SourceIdentity source, IReadOnlyList<string> includePaths)
+        => BuildSearchPaths([source], includePaths, out _);
 
     /// <summary>Reports a failed descriptor load, under the code that says which way it failed.</summary>
     /// <remarks>
@@ -522,8 +532,7 @@ public sealed class Compilation
 
         Loader = loader;
 
-        var resolvePaths = new List<string>(SearchPaths);
-        resolvePaths.AddRange(loader.ImplicitIncludePaths);
+        var resolvePaths = SchemaCatalog.RootsFor(SearchPaths, loader);
 
         var imports = unit.Imports.Select(import => Resolve(import, resolvePaths)).ToList();
 
@@ -539,7 +548,7 @@ public sealed class Compilation
                     "proto file not found",
                     $"Could not find '{import.Path}' in any include directory.",
                     import.Span,
-                    ImportSearchHelp(import.SearchedPaths));
+                    ImportSearchHelp(import));
             }
         }
 
@@ -596,20 +605,38 @@ public sealed class Compilation
     }
 
     /// <summary>
-    /// The help line on an unresolved import: where the compiler looked, or why it had nowhere to
-    /// look.
+    /// The help line on an unresolved import: what it very nearly named, where the compiler looked,
+    /// or why it had nowhere to look.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A buffer that has never been saved contributes no directory of its own to the search path, so
     /// with no include paths there is genuinely nowhere to have looked. "Searched: " followed by
     /// nothing tells the reader less than saying so. A source with a path always contributes its own
     /// directory and can never reach that branch, which is why CLI output does not move.
+    /// </para>
+    /// <para>
+    /// <b>The near match comes first, because it is the half that can be acted on.</b> A list of
+    /// directories only helps a reader who already knows what they were aiming at; the name of the
+    /// schema beside the one they typed tells them what they got wrong. It costs one directory
+    /// listing per root and is asked only on a failure, so a compilation that resolves everything
+    /// pays nothing for it -- and where there is nothing near enough to name, the help is the
+    /// sentence it has always been, character for character.
+    /// </para>
     /// </remarks>
-    private string ImportSearchHelp(IReadOnlyList<string> resolvePaths)
-        => ConfigDirectory is null && resolvePaths.Count == 0
+    private string ImportSearchHelp(ImportResolution import)
+    {
+        var resolvePaths = import.SearchedPaths;
+
+        var searched = ConfigDirectory is null && resolvePaths.Count == 0
             ? "No include directories were given, and this source has no directory of its own to "
                 + "fall back on. Pass an include path, or save the file first."
             : "Searched: " + string.Join(", ", resolvePaths);
+
+        return SchemaCatalog.NearestTo(import.Path, resolvePaths) is { } nearest
+            ? $"Did you mean '{nearest}'? {searched}"
+            : searched;
+    }
 
     /// <param name="unusable">
     /// The include paths that could not be normalized, in the order they were given. Reported rather

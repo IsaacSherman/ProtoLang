@@ -89,6 +89,16 @@ public sealed record DocumentConfiguration
     /// </remarks>
     public IReadOnlyList<ResolvedIncludePath> IncludePaths { get; init; } = [];
 
+    /// <summary>Just the directories of <see cref="IncludePaths"/>, in the same order.</summary>
+    /// <remarks>
+    /// What the compiler is actually handed, which is a different thing from what a report shows: the
+    /// origin of each entry matters to a user asking why, and to nothing that resolves a path.
+    /// Published because two callers now need it -- the compilation these settings produce, and the
+    /// completion that has to predict where that compilation will look -- and a second projection
+    /// written at the second call site is a second chance to drop an entry or reorder one.
+    /// </remarks>
+    public IReadOnlyList<string> IncludeDirectories => [.. IncludePaths.Select(include => include.Path)];
+
     /// <summary>
     /// The language policy this document compiles under, or null when a configuration file was found
     /// and could not be read.
@@ -187,7 +197,7 @@ public sealed record DocumentConfiguration
 
         options = new CompilationOptions
         {
-            IncludePaths = [.. IncludePaths.Select(include => include.Path)],
+            IncludePaths = IncludeDirectories,
             Config = Config,
             Loader = loader,
         };

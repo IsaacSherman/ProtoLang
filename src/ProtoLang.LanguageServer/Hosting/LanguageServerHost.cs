@@ -51,6 +51,7 @@ public sealed class LanguageServerHost : IDisposable
     private readonly LoaderPool _loaders;
     private readonly DiagnosticRouter _router;
     private readonly CompileScheduler _scheduler;
+    private readonly CompletionProvider _completion;
 
     private DiagnosticMapper _mapper = new(relatedInformationSupported: false);
     private volatile ServerState _state = ServerState.NotInitialized;
@@ -75,6 +76,8 @@ public sealed class LanguageServerHost : IDisposable
             () => _mapper,
             _log,
             debounce);
+
+        _completion = new CompletionProvider(_documents, _configuration, _loaders);
 
         Register();
     }
@@ -108,6 +111,7 @@ public sealed class LanguageServerHost : IDisposable
         _connection.OnRequest(Methods.Initialize, (parameters, _) => Initialize(parameters));
         _connection.OnRequest(Methods.Shutdown, (_, _) => Shutdown());
         _connection.OnRequest(Methods.SemanticTokensFull, (parameters, _) => Answer<SemanticTokensParams>(parameters, Classify));
+        _connection.OnRequest(Methods.Completion, (parameters, _) => Answer<CompletionParams>(parameters, _completion.Complete));
 
         _connection.OnNotification(Methods.Initialized, (_, token) => Initialized(token));
         _connection.OnNotification(Methods.Exit, (_, _) => Exit());
@@ -218,6 +222,9 @@ public sealed class LanguageServerHost : IDisposable
                 SemanticTokensProvider = capabilities?.TextDocument?.SemanticTokens is null
                     ? null
                     : new SemanticTokensOptions { Legend = SemanticTokenLegend.Wire },
+                CompletionProvider = capabilities?.TextDocument?.Completion is null
+                    ? null
+                    : new CompletionOptions { TriggerCharacters = CompletionProvider.TriggerCharacters },
                 Workspace = new WorkspaceServerCapabilities
                 {
                     WorkspaceFolders = new WorkspaceFoldersServerCapabilities(),

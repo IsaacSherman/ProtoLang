@@ -99,6 +99,7 @@ public sealed class LanguageServerClient : IAsyncDisposable
         {
             PublishDiagnostics = new PublishDiagnosticsClientCapabilities { RelatedInformation = true },
             SemanticTokens = new SemanticTokensClientCapabilities(),
+            Completion = new CompletionClientCapabilities(),
         },
         General = new GeneralClientCapabilities { PositionEncodings = ["utf-16"] },
     };

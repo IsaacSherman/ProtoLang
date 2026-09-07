@@ -139,4 +139,56 @@ public class ImportResolutionTests
         Assert.Equal(ImportOutcome.Resolved, import.Outcome);
         Assert.Equal(Path.Combine(directory, "broken.proto"), import.ResolvedPath);
     }
+
+    // ------------------------------------------------------- what it nearly said
+
+    /// <summary>
+    /// The half of <c>PL0002</c> a reader can act on. A list of directories helps somebody who
+    /// already knew what they were aiming at; the name of the schema beside the one they typed tells
+    /// them what they got wrong.
+    /// </summary>
+    [Fact]
+    public void AnUnresolvedImportNamesTheSchemaItAlmostNamed()
+    {
+        var result = CompileSource("import proto \"invoic.proto\";\n" + Body);
+
+        var reported = Assert.Single(result.Diagnostics, d => d.Code == "PL0002");
+
+        Assert.Contains("invoice.proto", reported.Help);
+        Assert.StartsWith("Did you mean", reported.Help, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// And where nothing is close enough to name, the help is the sentence it has always been --
+    /// which is why the diagnostics the command line already renders do not move.
+    /// </summary>
+    [Fact]
+    public void AnUnresolvedImportWithNothingLikeItSaysOnlyWhereItLooked()
+    {
+        var result = CompileSource("import proto \"nosuch.proto\";\n" + Body);
+
+        var reported = Assert.Single(result.Diagnostics, d => d.Code == "PL0002");
+
+        Assert.StartsWith("Searched: ", reported.Help, StringComparison.Ordinal);
+        Assert.DoesNotContain("Did you mean", reported.Help);
+    }
+
+    /// <summary>
+    /// The suggestion is drawn from the roots this import was searched against, so a schema that
+    /// resolves only because protoc contributes its own directory is one the suggestion can reach.
+    /// </summary>
+    [Fact]
+    public void ANearMissOnAWellKnownSchemaIsNamedFromProtocsOwnDirectory()
+    {
+        var result = CompileSource("import proto \"google/protobuf/timestam.proto\";\n" + Body);
+
+        var reported = Assert.Single(result.Diagnostics, d => d.Code == "PL0002");
+
+        if (!reported.Help!.Contains("Did you mean", StringComparison.Ordinal))
+        {
+            Assert.Skip("This protoc ships no well-known schemas as files, so there is nothing to name.");
+        }
+
+        Assert.Contains("google/protobuf/timestamp.proto", reported.Help);
+    }
 }

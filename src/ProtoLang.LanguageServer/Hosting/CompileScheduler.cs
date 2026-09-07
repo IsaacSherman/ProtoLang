@@ -375,11 +375,11 @@ public sealed class CompileScheduler
 
         ReportExpiry(result, uri, compilation.Loader);
 
-        // The roots protoc's own error messages are resolved against: what the compilation searched,
-        // then what the loader adds of its own. Taken from the compilation that ran rather than rebuilt,
-        // so a well-known schema resolves to the file protoc actually read.
-        IReadOnlyList<string> resolvePaths =
-            [.. result.SearchPaths, .. compilation.Loader?.ImplicitIncludePaths ?? []];
+        // The roots protoc's own error messages are resolved against. Taken from the compilation that
+        // ran rather than rebuilt, so a well-known schema resolves to the file protoc actually read,
+        // and asked of the one function that knows what the order is rather than spelled out again
+        // here -- a second spelling is how this comes to name a root the compilation never searched.
+        var resolvePaths = SchemaCatalog.RootsFor(result.SearchPaths, compilation.Loader);
 
         return WithConfiguration(
             CompilationDiagnostics.Build(result, uri, resolvePaths, mapper),
