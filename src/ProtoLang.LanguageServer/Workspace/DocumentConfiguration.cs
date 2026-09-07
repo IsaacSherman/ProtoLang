@@ -94,10 +94,10 @@ public sealed record DocumentConfiguration
     /// and could not be read.
     /// </summary>
     /// <remarks>
-    /// Null stops the compilation, exactly as it does in <see cref="Compilation.ResolveConfig"/>: a
-    /// project that states a policy and is then silently ignored is worse off than one that states
-    /// nothing. The reason is in <see cref="Diagnostics"/>, and <see cref="IsUsable"/> is the question
-    /// to ask.
+    /// Null stops the compilation, exactly as it does in
+    /// <see cref="Compilation.ResolveConfig(string?, DiagnosticBag)"/>: a project that states a
+    /// policy and is then silently ignored is worse off than one that states nothing. The reason is
+    /// in <see cref="Diagnostics"/>, and <see cref="IsUsable"/> is the question to ask.
     /// </remarks>
     public ProjectConfig? Config { get; init; }
 

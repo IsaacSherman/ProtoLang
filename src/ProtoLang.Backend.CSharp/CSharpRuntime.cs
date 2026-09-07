@@ -518,7 +518,7 @@ public static class CSharpRuntime
     /// Emits the termination helper behind the checked overflow policy.
     /// </summary>
     /// <remarks>
-    /// Generic and returning <typeparamref name="T"/> so a caller can write
+    /// The helper this emits is generic and returns <c>T</c>, so a caller can write
     /// <c>return FailOverflow&lt;long&gt;("addition");</c>. That keeps every call site an ordinary
     /// return rather than a statement followed by unreachable code, which some consumers compile
     /// with warnings as errors.
