@@ -66,16 +66,23 @@ public sealed class CompletionProvider
     /// that has to prove the refusal above has to be able to move it inside that window, and there is
     /// nowhere else to stand.
     /// </remarks>
-    public Func<string, IReadOnlyList<string>, SchemaListing> Enumerate { get; init; }
-        = (directory, roots) => SchemaCatalog.Enumerate(directory, roots);
+    public Func<string, IReadOnlyList<string>, CancellationToken, SchemaListing> Enumerate { get; set; }
+        = (directory, roots, cancellationToken)
+            => SchemaCatalog.Enumerate(directory, roots, cancellationToken: cancellationToken);
 
     /// <summary>Everything that could be typed at one position.</summary>
     /// <exception cref="JsonRpcException">
     /// The buffer moved while this was being answered. See the type's remarks.
     /// </exception>
-    public CompletionList Complete(CompletionParams message)
+    /// <exception cref="OperationCanceledException">
+    /// The client withdrew the request. A superseded completion is one the client has already stopped
+    /// showing, and finishing a directory walk for it is work nobody is waiting on.
+    /// </exception>
+    public CompletionList Complete(CompletionParams message, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(message);
+
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (!DocumentUri.TryParse(message.TextDocument.Uri, out var uri) || _documents.Find(uri) is not { } document)
         {
@@ -91,7 +98,7 @@ public sealed class CompletionProvider
             return Nothing;
         }
 
-        var items = Schemas(document, context!);
+        var items = Schemas(document, context!, cancellationToken);
 
         if (_documents.Find(uri) is not { } current || current.Version != document.Version)
         {
@@ -109,15 +116,28 @@ public sealed class CompletionProvider
 
     /// <summary>What the include roots hold at the directory the cursor is in.</summary>
     /// <remarks>
+    /// <para>
     /// The roots are the compilation's own, asked for through the same two functions the compilation
     /// asks -- so a candidate offered here is one <c>SchemaLookup</c> would find, in the root it would
     /// find it in. A loader that could not be built costs only the well-known schemas; the user's own
     /// roots still answer, which is the case that matters most, because a workspace with no protoc is
     /// one where nothing else is telling the user anything at all.
+    /// </para>
+    /// <para>
+    /// <b>The cheap half of the configuration, not the whole of it.</b>
+    /// <c>WorkspaceConfiguration.Resolve</c> also settles the language policy, which means searching
+    /// upward for a <c>protolang.config.xml</c> and parsing it -- a directory walk and an XML parse,
+    /// for a value completion never reads, on a request that runs per keystroke rather than per
+    /// debounced compile. <c>ResolveImportRoots</c> is the same resolution minus that step, and it
+    /// shares the two resolvers with <c>Resolve</c> rather than restating their precedence.
+    /// </para>
     /// </remarks>
-    private IReadOnlyList<CompletionItem> Schemas(OpenDocument document, ImportPathContext context)
+    private IReadOnlyList<CompletionItem> Schemas(
+        OpenDocument document,
+        ImportPathContext context,
+        CancellationToken cancellationToken)
     {
-        var settings = _configuration.Current.Resolve(document.Uri);
+        var settings = _configuration.Current.ResolveImportRoots(document.Uri);
 
         _loaders.TryGet(settings.ProtocPath, out var loader, out _);
 
@@ -133,15 +153,20 @@ public sealed class CompletionProvider
         // failed import makes the opposite choice, and says why.
         return
         [
-            .. Enumerate(context.Directory, roots).Candidates
+            .. Enumerate(context.Directory, roots, cancellationToken).Candidates
                 .Select(candidate => Item(candidate, context, document)),
         ];
     }
 
     private static CompletionItem Item(SchemaCandidate candidate, ImportPathContext context, OpenDocument document)
     {
+        // Through PathIdentity rather than ordinally, because "is this the same path?" has one home
+        // and the answer differs by platform. On a volume that folds case, an import already written
+        // as 'Billing/Invoice.proto' resolves to the file offered here as 'billing/invoice.proto',
+        // and an ordinal comparison would offer it again unmarked -- which is the one thing this line
+        // exists to prevent.
         var imported = !candidate.IsDirectory
-            && context.Imported.Contains(candidate.Path, StringComparer.Ordinal);
+            && context.Imported.Contains(candidate.Path, PathIdentity.Comparer);
 
         return new CompletionItem
         {

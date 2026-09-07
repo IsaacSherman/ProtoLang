@@ -222,6 +222,14 @@ a queue one worker drains in order. That separation is what lets a handler ask t
 the connection ends, outstanding work is cancelled **before** the dispatcher is awaited; the other
 order waits forever for a handler whose answer is never coming.
 
+Draining in order is the default and is right for a handler that is arithmetic over a buffer the
+server already holds. A handler that **leaves the process** — one that opens a directory, or waits on
+a tool — opts out with `OnRequest(..., concurrent: true)`, because answered in order it holds the
+reading worker for as long as the outside world takes, and behind it sit every `didChange`, every
+`didClose`, and the `$/cancelRequest` that would have shortened it. Completion is the only such
+handler today. What one owes in return is the staleness rule: it read the buffer at one version and
+checks that version before it answers.
+
 The buffer the client sent is the source of truth and the file on disk is never read for an open
 document. Edits are applied incrementally, in order, each against the text the one before it
 produced. A compile is debounced and coalesced, carries the document version and the configuration
@@ -259,9 +267,12 @@ is offered comes from
 import is resolved against" now lives for everyone who asks: the include paths, then the source's own
 directory, then whatever the loader adds. One directory listing per root, on demand, no index and no
 cache — so progressive completion falls out of the shape rather than being built, and a schema that
-appeared on disk a second ago is offered. The listing is lazy and carries a **budget in entries
-examined**, because one level bounds depth and not breadth, and a root pointed at a vendored tree or
-a network mount is one somebody will point at one. A walk that stops on its budget says so:
+appeared on disk a second ago is offered. Only the include roots are resolved for it, never the
+language policy: settling that means searching upward for a `protolang.config.xml` and parsing it,
+which decides nothing about where a path resolves and would be paid per keystroke. The listing is
+lazy, reads each entry's kind from the same directory scan that found it, and carries a **budget in
+entries examined**, because one level bounds depth and not breadth, and a root pointed at a vendored
+tree or a network mount is one somebody will point at one. A walk that stops on its budget says so:
 completion offers what it saw, since the list is already declared incomplete, and the near match
 offers nothing, since the nearest of a partial reading is not the nearest. `#57` pins the figure for
 both. The same catalog names that near match on `PL0002`, so the terminal and the editor say the

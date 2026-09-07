@@ -1,5 +1,6 @@
 using System.Text.Json;
 using ProtoLang.Binding;
+using ProtoLang.Config;
 using ProtoLang.LanguageServer.Hosting;
 using ProtoLang.LanguageServer.Protocol;
 using ProtoLang.LanguageServer.Protocol.Lsp;
@@ -584,10 +585,10 @@ public class ImportCompletionTests
         var typedInto = new CompletionProvider(documents, Configuration(), Loaders())
         {
             // The buffer moves while the roots are being listed, which is the only window there is.
-            Enumerate = (directory, roots) =>
+            Enumerate = (directory, roots, token) =>
             {
                 documents.Open(uri, "protolang", 2, Source + "x");
-                return SchemaCatalog.Enumerate(directory, roots);
+                return SchemaCatalog.Enumerate(directory, roots, cancellationToken: token);
             },
         };
 
@@ -613,6 +614,142 @@ public class ImportCompletionTests
         var offered = Provider(documents).Complete(At(uri, PositionOf(Source, PathStart(Source))));
 
         Assert.Contains("shared.proto", offered.Items.Select(item => item.TextEdit!.NewText));
+    }
+
+    // ------------------------------------------------------- what it holds while it answers
+
+    /// <summary>
+    /// The connection drains one queue with one worker, so a handler that opens a directory on that
+    /// worker stops the server reading the wire for as long as the walk takes -- every edit, every
+    /// close, and the cancellation that would have shortened it, all queued behind a list the user may
+    /// already have dismissed.
+    /// </summary>
+    /// <remarks>
+    /// Asked by holding a completion inside the file-system step and then requiring the server to
+    /// answer something else. Semantic tokens is the something else because it needs nothing but the
+    /// buffer, so a reply to it proves the worker is free rather than that the machine was quick.
+    /// </remarks>
+    [Fact]
+    public async Task ACompletionStillWalkingDoesNotStopTheServerAnsweringAnythingElse()
+    {
+        using var walking = new SemaphoreSlim(0);
+        using var release = new SemaphoreSlim(0);
+
+        var (client, uri, text, _) = await OpenAsync("import proto \"\";" + Body);
+        await using var _client = client;
+
+        client.Host.Completion.Enumerate = (directory, roots, token) =>
+        {
+            walking.Release();
+            release.Wait(LanguageServerClient.Patience);
+
+            return SchemaCatalog.Enumerate(directory, roots, cancellationToken: token);
+        };
+
+        var completion = client.Ask(
+            Methods.Completion,
+            new CompletionParams
+            {
+                TextDocument = new TextDocumentIdentifier { Uri = uri },
+                Position = PositionOf(text, PathStart(text)),
+            });
+
+        Assert.True(await walking.WaitAsync(LanguageServerClient.Patience), "the completion never started");
+
+        var classified = await client
+            .RequestAsync(
+                Methods.SemanticTokensFull,
+                new SemanticTokensParams { TextDocument = new TextDocumentIdentifier { Uri = uri } })
+            .WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.NotNull(classified.Deserialize<SemanticTokens>(LspJson.Options));
+
+        release.Release();
+
+        var answered = await client.AnswerToAsync(completion);
+        Assert.NotEmpty(answered.Result.Deserialize<CompletionList>(LspJson.Options)!.Items);
+    }
+
+    /// <summary>
+    /// And a client that withdraws the question stops the walk, rather than waiting for an answer to
+    /// something it is no longer showing. A keystroke supersedes an open completion list, so this is
+    /// the ordinary case rather than the exotic one.
+    /// </summary>
+    [Fact]
+    public async Task ACompletionTheClientWithdrawsStopsWalkingRatherThanFinishing()
+    {
+        using var walking = new SemaphoreSlim(0);
+
+        var (client, uri, text, _) = await OpenAsync("import proto \"\";" + Body);
+        await using var _client = client;
+
+        client.Host.Completion.Enumerate = (directory, roots, token) =>
+        {
+            walking.Release();
+
+            // Until the client withdraws it, which is what the token carries.
+            token.WaitHandle.WaitOne(LanguageServerClient.Patience);
+
+            return SchemaCatalog.Enumerate(directory, roots, cancellationToken: token);
+        };
+
+        var completion = client.Ask(
+            Methods.Completion,
+            new CompletionParams
+            {
+                TextDocument = new TextDocumentIdentifier { Uri = uri },
+                Position = PositionOf(text, PathStart(text)),
+            });
+
+        Assert.True(await walking.WaitAsync(LanguageServerClient.Patience), "the completion never started");
+
+        client.Notify(Methods.CancelRequest, new Dictionary<string, object?> { ["id"] = completion });
+
+        var answered = await client.AnswerToAsync(completion);
+
+        Assert.Equal(ErrorCodes.RequestCancelled, answered.Error!.Code);
+    }
+
+    // ------------------------------------------------------- what it reads to answer
+
+    /// <summary>
+    /// Completion settles where imports resolve and nothing else. The language policy lives in a file
+    /// that has to be searched for and parsed, and this request runs per keystroke rather than per
+    /// debounced compile -- so a refused configuration file must neither stop it nor be read by it.
+    /// </summary>
+    [Fact]
+    public async Task ADocumentWhoseConfigurationFileWasRefusedStillCompletes()
+    {
+        var root = Workspace();
+        File.WriteAllText(Path.Combine(root, ProjectConfig.FileName), "<this is not a configuration file");
+
+        var (client, uri, text, _) = await OpenAsync("import proto \"\";" + Body, root: root);
+        await using var _client = client;
+
+        var offered = await CompleteAsync(client, uri, PositionOf(text, PathStart(text)));
+
+        Assert.Contains("shared.proto", Paths(offered));
+    }
+
+    /// <summary>
+    /// Where the file system folds case, a schema already imported under another spelling is the same
+    /// schema. Asserted against <see cref="PathIdentity"/> rather than against a platform, so the test
+    /// says the same thing everywhere and is right on both.
+    /// </summary>
+    [Fact]
+    public async Task AnImportSpelledInAnotherCaseIsRecognisedWhereverPathsFoldCase()
+    {
+        const string Source = "import proto \"Shared.proto\";\nimport proto \"\";";
+        var (client, uri, text, _) = await OpenAsync(Source + Body);
+        await using var _client = client;
+
+        var offered = await CompleteAsync(client, uri, PositionOf(text, PathStart(text, which: 1)));
+
+        var shared = Assert.Single(offered.Items, item => item.TextEdit!.NewText == "shared.proto");
+
+        Assert.Equal(
+            !PathIdentity.IsCaseSensitive,
+            shared.Detail!.Contains("already imported", StringComparison.Ordinal));
     }
 
     private static DocumentUri Uri(string path)

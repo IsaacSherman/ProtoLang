@@ -1072,6 +1072,67 @@ public class WorkspaceConfigurationTests
         Assert.Equal(0, cache.Statistics.Invalidations);
     }
 
+    // ------- resolving only what an import needs
+
+    /// <summary>
+    /// The cheap resolution answers the same protoc and the same include paths, in the same order, as
+    /// the full one. It exists to skip the language policy, and skipping anything else would make an
+    /// editor offer paths against roots the compilation will not search.
+    /// </summary>
+    [Fact]
+    public void ResolvingOnlyTheImportRootsSettlesThemExactlyAsResolvingEverythingDoes()
+    {
+        var directory = TempDirectory();
+        var protoc = TempFile(directory, OperatingSystem.IsWindows() ? "protoc.exe" : "protoc");
+        var schemas = TempDirectory("schemas");
+
+        var settings = Read(
+            out _,
+            new SettingValue(ProtoLangSettings.ProtocPathKey, protoc),
+            new SettingValue(ProtoLangSettings.IncludePathsKey, schemas));
+
+        var configuration = Workspace(WorkspaceFolder.FromPath(directory) with { Settings = settings });
+        var document = Document(directory);
+
+        var everything = configuration.Resolve(document);
+        var roots = configuration.ResolveImportRoots(document);
+
+        Assert.Equal(everything.ProtocPath, roots.ProtocPath);
+        Assert.Equal(everything.IncludeDirectories, roots.IncludeDirectories);
+        Assert.Equal(everything.Folder?.Path, roots.Folder?.Path);
+    }
+
+    /// <summary>
+    /// And it settles them without the configuration file having any say. Import completion runs per
+    /// keystroke, and searching upward for a <c>protolang.config.xml</c> and parsing it is a directory
+    /// walk and an XML parse for a value that decides nothing about where a path resolves.
+    /// </summary>
+    /// <remarks>
+    /// A refused file is what makes the difference visible: the full resolution reports it and refuses
+    /// to compile the document, and the cheap one carries no such notion at all and still names the
+    /// roots. A user whose policy file is broken can still be told what their imports could say, which
+    /// is the behaviour that matters -- being unable to fix an import while the config is broken would
+    /// be a second problem caused by the first.
+    /// </remarks>
+    [Fact]
+    public void ResolvingOnlyTheImportRootsNeverConsultsTheConfigurationFile()
+    {
+        var directory = TempDirectory();
+        var schemas = TempDirectory("schemas");
+        TempFile(directory, ProjectConfig.FileName, "<this is not a configuration file");
+
+        var settings = Read(out _, new SettingValue(ProtoLangSettings.IncludePathsKey, schemas));
+        var configuration = Workspace(WorkspaceFolder.FromPath(directory) with { Settings = settings });
+        var document = Document(directory);
+
+        var everything = configuration.Resolve(document);
+
+        Assert.True(everything.ConfigRefused, "the fixture has to be a file the full resolution refuses");
+        Assert.NotEmpty(everything.Diagnostics);
+
+        Assert.Equal([schemas], configuration.ResolveImportRoots(document).IncludeDirectories);
+    }
+
     [Fact]
     public void AChangedSchemaStillInvalidatesWhenTheRootIsSpelledDifferently()
     {

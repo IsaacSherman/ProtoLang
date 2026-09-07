@@ -1,3 +1,4 @@
+using ProtoLang.Binding;
 using ProtoLang.Syntax;
 using Xunit;
 
@@ -178,16 +179,22 @@ public class ImportResolutionTests
     /// resolves only because protoc contributes its own directory is one the suggestion can reach.
     /// </summary>
     [Fact]
+    /// <remarks>
+    /// The gate is asked of the environment before the compilation runs, not of the answer afterwards.
+    /// Skipping because no suggestion came back would skip on exactly the regression this exists to
+    /// catch: break the near match, or drop the loader's own roots, and the test would report green.
+    /// </remarks>
     public void ANearMissOnAWellKnownSchemaIsNamedFromProtocsOwnDirectory()
     {
+        var loader = DescriptorLoader.CreateDefault();
+        if (loader.ImplicitIncludePaths.Count == 0)
+        {
+            Assert.Skip($"'{loader.ProtocPath}' ships no well-known schemas as files.");
+        }
+
         var result = CompileSource("import proto \"google/protobuf/timestam.proto\";\n" + Body);
 
         var reported = Assert.Single(result.Diagnostics, d => d.Code == "PL0002");
-
-        if (!reported.Help!.Contains("Did you mean", StringComparison.Ordinal))
-        {
-            Assert.Skip("This protoc ships no well-known schemas as files, so there is nothing to name.");
-        }
 
         Assert.Contains("google/protobuf/timestamp.proto", reported.Help);
     }

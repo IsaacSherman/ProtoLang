@@ -98,6 +98,15 @@ public sealed class LanguageServerHost : IDisposable
     /// <summary>Compilations that have actually run, as opposed to been scheduled.</summary>
     public int Compilations => _scheduler.Compilations;
 
+    /// <summary>What answers a completion request, for a test and for #58.</summary>
+    /// <remarks>
+    /// Published for the same reason <see cref="Compilations"/> is: the property most worth holding in
+    /// place -- that this handler gives the reading worker back before it touches the file system --
+    /// cannot be observed from outside without making one walk slow on purpose, and there is nowhere
+    /// else to stand to do that.
+    /// </remarks>
+    public CompletionProvider Completion => _completion;
+
     /// <summary>Serves until the client goes away or <c>exit</c> arrives.</summary>
     public Task RunAsync(CancellationToken cancellationToken = default)
         => _connection.RunAsync(cancellationToken);
@@ -111,7 +120,10 @@ public sealed class LanguageServerHost : IDisposable
         _connection.OnRequest(Methods.Initialize, (parameters, _) => Initialize(parameters));
         _connection.OnRequest(Methods.Shutdown, (_, _) => Shutdown());
         _connection.OnRequest(Methods.SemanticTokensFull, (parameters, _) => Answer<SemanticTokensParams>(parameters, Classify));
-        _connection.OnRequest(Methods.Completion, (parameters, _) => Answer<CompletionParams>(parameters, _completion.Complete));
+        _connection.OnRequest(
+            Methods.Completion,
+            (parameters, token) => AnswerOffThread<CompletionParams>(parameters, token, _completion.Complete),
+            concurrent: true);
 
         _connection.OnNotification(Methods.Initialized, (_, token) => Initialized(token));
         _connection.OnNotification(Methods.Exit, (_, _) => Exit());
@@ -141,6 +153,36 @@ public sealed class LanguageServerHost : IDisposable
         RequireRunning();
 
         return Task.FromResult(handler(LspJson.Read<T>(parameters) ?? throw Missing<T>()));
+    }
+
+    /// <summary>Runs a request handler that goes to the file system, off the thread that reads the wire.</summary>
+    /// <remarks>
+    /// <para>
+    /// The connection drains one queue with one worker, in order, and <see cref="Answer{T}"/> runs its
+    /// handler on that worker -- which is right for a handler that is arithmetic over a buffer it
+    /// already has, and wrong for one that opens a directory. A completion answered inline holds the
+    /// worker for the length of the walk, and behind it sit every <c>didChange</c>, every
+    /// <c>didClose</c>, and the <c>$/cancelRequest</c> that would have shortened it. On an include
+    /// path that is a network mount, that is the buffer ceasing to sync while the user types.
+    /// <c>CompileScheduler.Schedule</c> was changed for the same reason and says so.
+    /// </para>
+    /// <para>
+    /// The lifecycle check and the deserialization stay on the worker: both are cheap, and a request
+    /// that arrived too early or carried nothing is refused rather than scheduled. What moves is the
+    /// work, and it takes the request's own token with it, so a client that withdraws the question
+    /// stops the walk instead of waiting for its answer.
+    /// </para>
+    /// </remarks>
+    private Task<object?> AnswerOffThread<T>(
+        JsonElement? parameters,
+        CancellationToken cancellationToken,
+        Func<T, CancellationToken, object?> handler)
+    {
+        RequireRunning();
+
+        var message = LspJson.Read<T>(parameters) ?? throw Missing<T>();
+
+        return Task.Run(() => handler(message, cancellationToken), cancellationToken);
     }
 
     /// <summary>Runs a notification handler, dropping the message when it arrives out of turn.</summary>

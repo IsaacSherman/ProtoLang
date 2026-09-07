@@ -120,6 +120,15 @@ public static class SchemaCatalog
     /// <param name="budget">
     /// The most file system entries this may look at, across every root, before it stops and says so.
     /// </param>
+    /// <param name="cancellationToken">
+    /// Checked per entry, because the budget bounds how much is read and not how long reading it
+    /// takes. A caller who has been told nobody wants this answer any more -- a client withdrawing a
+    /// completion request the next keystroke superseded -- can stop a walk that is waiting on a slow
+    /// or remote root, which the budget alone cannot. Per entry and nowhere else, including not at
+    /// the top: a second check would answer for the case that is already covered by the first entry
+    /// and would quietly stand in for it under test, leaving the one that stops a walk already under
+    /// way held in place by nothing.
+    /// </param>
     /// <remarks>
     /// Directories first and then alphabetically, which is a presentation order rather than a
     /// resolution one -- <see cref="SchemaCandidate.Root"/> already carries the resolution. Merging
@@ -129,7 +138,8 @@ public static class SchemaCatalog
     public static SchemaListing Enumerate(
         string directory,
         IReadOnlyList<string> roots,
-        int budget = MostEntriesExamined)
+        int budget = MostEntriesExamined,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(directory);
         ArgumentNullException.ThrowIfNull(roots);
@@ -140,13 +150,15 @@ public static class SchemaCatalog
         }
 
         var found = new List<SchemaCandidate>();
-        var seen = new Dictionary<string, int>(PathIdentity.Comparer);
+        var seen = new Dictionary<string, int>(StringComparer.Ordinal);
         var examined = 0;
 
         foreach (var root in roots)
         {
             foreach (var entry in Listing(Path.Combine(root, prefix)))
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 // Counted per entry rather than per candidate, because the cost is in walking a
                 // directory and not in what walking it turned up. A root holding fifty thousand
                 // images and one schema is exactly the case this is here for.
@@ -196,10 +208,14 @@ public static class SchemaCatalog
     /// </para>
     /// </remarks>
     /// <param name="budget"><inheritdoc cref="Enumerate" path="/param[@name='budget']"/></param>
+    /// <param name="cancellationToken">
+    /// <inheritdoc cref="Enumerate" path="/param[@name='cancellationToken']"/>
+    /// </param>
     public static string? NearestTo(
         string relativePath,
         IReadOnlyList<string> roots,
-        int budget = MostEntriesExamined)
+        int budget = MostEntriesExamined,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(relativePath);
         ArgumentNullException.ThrowIfNull(roots);
@@ -213,7 +229,7 @@ public static class SchemaCatalog
             return null;
         }
 
-        var listing = Enumerate(written[..(cut + 1)], roots, budget);
+        var listing = Enumerate(written[..(cut + 1)], roots, budget, cancellationToken);
         if (!listing.SawEverything)
         {
             return null;
@@ -263,26 +279,35 @@ public static class SchemaCatalog
     /// place under a root at all.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The refusals are the point. A rooted path and a <c>..</c> segment both address a location the
     /// include roots do not contain, which protoc would not resolve either -- and combining one with a
-    /// root here would enumerate somewhere outside the workspace and offer the user its contents.
+    /// root here would enumerate somewhere the author did not ask about and offer them its contents.
+    /// </para>
+    /// <para>
+    /// <b>Asked before the leading separator is trimmed</b>, which is not a detail: trimming turns
+    /// <c>/billing</c> into <c>billing</c>, and that is a relative path rooted at nothing, so a check
+    /// afterwards can only ever catch a drive letter. A root that happened to hold a directory of that
+    /// name would then answer an absolute path with its contents.
+    /// </para>
     /// </remarks>
     private static bool TryDescend(string directory, out string prefix)
     {
-        prefix = directory.Replace('\\', '/').Trim('/');
+        prefix = string.Empty;
 
-        if (prefix.Length == 0)
-        {
-            return true;
-        }
+        var written = directory.Replace('\\', '/');
 
-        if (Path.IsPathRooted(prefix) || prefix.Split('/').Contains(".."))
+        if (Path.IsPathRooted(written) || written.Split('/').Contains(".."))
         {
-            prefix = string.Empty;
             return false;
         }
 
-        prefix += "/";
+        prefix = written.Trim('/');
+
+        if (prefix.Length > 0)
+        {
+            prefix += "/";
+        }
 
         return true;
     }
@@ -296,6 +321,13 @@ public static class SchemaCatalog
     /// lets the count stop the walk where it stands.
     /// </para>
     /// <para>
+    /// <b>Infos rather than names.</b> The name-returning form gives back strings, so deciding whether
+    /// each one is a directory means asking the file system a second time -- one extra round trip per
+    /// entry, on the wide or remote roots the budget exists to bound, which would roughly double the
+    /// latency the budget is there to cap. The scan already knows: it is what distinguishes a
+    /// <c>DirectoryInfo</c> from a <c>FileInfo</c> here, and no further call is made.
+    /// </para>
+    /// <para>
     /// The enumerator is driven by hand because a <c>try</c> cannot hold a <c>yield return</c>, and
     /// the failures here arrive on <c>MoveNext</c> rather than on the call: a directory that is not
     /// there, one this process may not read, one whose path this platform will not accept. Each
@@ -303,12 +335,12 @@ public static class SchemaCatalog
     /// ordinary case this feature exists to make visible.
     /// </para>
     /// </remarks>
-    private static IEnumerable<string> Listing(string directory)
+    private static IEnumerable<FileSystemInfo> Listing(string directory)
     {
-        IEnumerator<string> entries;
+        IEnumerator<FileSystemInfo> entries;
         try
         {
-            entries = Directory.EnumerateFileSystemEntries(directory).GetEnumerator();
+            entries = new DirectoryInfo(directory).EnumerateFileSystemInfos().GetEnumerator();
         }
         catch (Exception ex) when (Unreadable(ex))
         {
@@ -345,15 +377,15 @@ public static class SchemaCatalog
     /// file called 'Invoice.PROTO' on a case-sensitive volume is one protoc resolves perfectly well
     /// when it is imported by that spelling, which is the spelling this offers.
     /// </remarks>
-    private static SchemaCandidate? Candidate(string entry, string prefix, string root)
+    private static SchemaCandidate? Candidate(FileSystemInfo entry, string prefix, string root)
     {
-        var name = Path.GetFileName(entry);
+        var name = entry.Name;
         if (name.Length == 0)
         {
             return null;
         }
 
-        if (Directory.Exists(entry))
+        if (entry is DirectoryInfo)
         {
             return new SchemaCandidate(prefix + name + "/", IsDirectory: true, root);
         }
@@ -371,11 +403,26 @@ public static class SchemaCatalog
     }
 
     /// <summary>
+    /// What makes two entries in different roots the same entry: the path, compared the way this
+    /// machine compares paths, and whether it is a directory.
+    /// </summary>
+    /// <remarks>
+    /// The kind is part of it because <see cref="PathIdentity.KeyFor"/> trims a trailing separator,
+    /// which is right for a path and wrong here: it makes a directory called <c>wkt.proto</c> and a
+    /// schema called <c>wkt.proto</c> one key. Merged, the directory would win, the importable schema
+    /// in the later root would never be offered at all, and the surviving candidate would name a root
+    /// <see cref="SchemaLookup.Find"/> does not resolve to -- since that asks <c>File.Exists</c> and
+    /// walks straight past the directory.
+    /// </remarks>
+    private static string KeyFor(SchemaCandidate candidate)
+        => PathIdentity.KeyFor(candidate.Path) + (candidate.IsDirectory ? "/" : string.Empty);
+
+    /// <summary>
     /// Files a candidate under its path, or records that a root behind the winner holds it too.
     /// </summary>
     private static void Merge(List<SchemaCandidate> found, Dictionary<string, int> seen, SchemaCandidate candidate)
     {
-        if (seen.TryGetValue(candidate.Path, out var index))
+        if (seen.TryGetValue(KeyFor(candidate), out var index))
         {
             var winner = found[index];
             found[index] = winner with { ShadowedRoots = [.. winner.ShadowedRoots, candidate.Root] };
@@ -383,7 +430,7 @@ public static class SchemaCatalog
             return;
         }
 
-        seen[candidate.Path] = found.Count;
+        seen[KeyFor(candidate)] = found.Count;
         found.Add(candidate);
     }
 

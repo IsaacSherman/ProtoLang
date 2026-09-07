@@ -548,7 +548,7 @@ public sealed class Compilation
                     "proto file not found",
                     $"Could not find '{import.Path}' in any include directory.",
                     import.Span,
-                    ImportSearchHelp(import));
+                    ImportSearchHelp(import, cancellationToken));
             }
         }
 
@@ -624,7 +624,7 @@ public sealed class Compilation
     /// sentence it has always been, character for character.
     /// </para>
     /// </remarks>
-    private string ImportSearchHelp(ImportResolution import)
+    private string ImportSearchHelp(ImportResolution import, CancellationToken cancellationToken)
     {
         var resolvePaths = import.SearchedPaths;
 
@@ -633,9 +633,12 @@ public sealed class Compilation
                 + "fall back on. Pass an include path, or save the file first."
             : "Searched: " + string.Join(", ", resolvePaths);
 
-        return SchemaCatalog.NearestTo(import.Path, resolvePaths) is { } nearest
-            ? $"Did you mean '{nearest}'? {searched}"
-            : searched;
+        var nearest = SchemaCatalog.NearestTo(
+            import.Path,
+            resolvePaths,
+            cancellationToken: cancellationToken);
+
+        return nearest is null ? searched : $"Did you mean '{nearest}'? {searched}";
     }
 
     /// <param name="unusable">

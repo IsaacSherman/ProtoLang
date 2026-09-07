@@ -52,7 +52,9 @@ namespace ProtoLang.LanguageServer.Workspace;
 /// Resolution is recomputed per request rather than cached per document. The expensive part of it is
 /// reading a <c>protolang.config.xml</c>, which is one small file; caching that would need its own
 /// invalidation on a file write, which is a second cache with a second way to serve a stale answer.
-/// #57 measures whether this needs revisiting.
+/// #57 measures whether this needs revisiting. A caller that does not need the policy asks
+/// <see cref="ResolveImportRoots"/> and does not pay for it at all, which is what keeps a request
+/// running per keystroke off that file.
 /// </para>
 /// </remarks>
 public sealed record WorkspaceConfiguration
@@ -189,6 +191,39 @@ public sealed record WorkspaceConfiguration
             ConfigPath = configPath,
             Diagnostics = [.. diagnostics],
         };
+    }
+
+    /// <summary>
+    /// Only the part of a document's configuration that decides where an <c>import proto</c> path
+    /// resolves: its folder, the protoc that will run, and the include directories.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="Resolve"/> minus the language policy, for a caller that does not need one. Settling
+    /// policy means searching upward for a <c>protolang.config.xml</c> and parsing it, and import
+    /// completion runs per keystroke rather than per debounced compile -- so paying a directory walk
+    /// and an XML parse for a value it never reads is work done once per character typed.
+    /// </para>
+    /// <para>
+    /// It calls the same two resolvers <see cref="Resolve"/> does rather than restating them, so the
+    /// precedence cannot come out different: the only thing it leaves out is the step it exists to
+    /// leave out. Diagnostics are discarded, because a setting being ignored is reported against the
+    /// document by the compilation that publishes them, and reporting it twice from two paths would
+    /// double every warning.
+    /// </para>
+    /// </remarks>
+    public ImportRoots ResolveImportRoots(DocumentUri document)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+
+        var discarded = new DiagnosticBag();
+        var folder = FolderFor(document);
+        var scopes = ScopesFor(folder);
+
+        return new ImportRoots(
+            folder,
+            ResolveProtoc(scopes, discarded).Path,
+            ResolveIncludePaths(scopes, discarded));
     }
 
     /// <summary>One place a setting can be written, and what a relative path there means.</summary>

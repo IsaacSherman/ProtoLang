@@ -111,6 +111,40 @@ public class SchemaCatalogTests
         Assert.Equal([second], shadowed.ShadowedRoots);
     }
 
+    /// <summary>
+    /// A directory and a schema of the same name are two different things, and only one of them can
+    /// be imported. Merging them hides the one that can.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="PathIdentity.KeyFor"/> trims a trailing separator, which is right for a path and
+    /// wrong for a candidate: it makes <c>wkt.proto/</c> and <c>wkt.proto</c> one key. The directory
+    /// arrives first and would keep the entry, so the schema in the later root would never be offered
+    /// at all -- and the surviving candidate would name a root <see cref="SchemaLookup.Find"/> walks
+    /// straight past, since that asks <c>File.Exists</c>.
+    /// </remarks>
+    [Fact]
+    public void ADirectoryDoesNotSwallowASchemaOfTheSameNameInAnotherRoot()
+    {
+        var withDirectory = TestPaths.CreateTempDirectory();
+        Directory.CreateDirectory(Path.Combine(withDirectory, "wkt.proto"));
+
+        var withSchema = TestPaths.CreateTempDirectory();
+        Write(withSchema, "wkt.proto");
+
+        var offered = Enumerate(string.Empty, withDirectory, withSchema);
+
+        var schema = Single(offered, "wkt.proto");
+
+        Assert.Equal(withSchema, schema.Root);
+        Assert.Empty(schema.ShadowedRoots);
+        Assert.Contains(offered, candidate => candidate.Path == "wkt.proto/" && candidate.IsDirectory);
+
+        // Which is the answer the compiler gives for the same question.
+        Assert.Equal(
+            Path.Combine(withSchema, "wkt.proto"),
+            SchemaLookup.Find("wkt.proto", [withDirectory, withSchema]));
+    }
+
     [Fact]
     public void APathHeldByOneRootAloneShadowsNothing()
     {
@@ -274,14 +308,24 @@ public class SchemaCatalogTests
     /// A prefix that climbs out of the roots names a place protoc would not resolve either, and
     /// enumerating it would show the user the contents of a directory outside their workspace.
     /// </summary>
+    /// <remarks>
+    /// Every prefix here names a directory the roots really do hold, so the refusal has to come from
+    /// the rule rather than from the combined path happening not to exist. That is what the earlier
+    /// version of this test got wrong about <c>/etc/</c>: the guard trimmed the leading separator
+    /// before asking whether the path was rooted, so it never fired, and the test passed only because
+    /// no root held a directory of that name.
+    /// </remarks>
     [Theory]
     [InlineData("../")]
-    [InlineData("billing/../../")]
-    [InlineData("/etc/")]
+    [InlineData("billing/../billing/")]
+    [InlineData("/billing/")]
+    [InlineData("//billing/")]
+    [InlineData("\\billing\\")]
     public void APrefixThatCouldNotNameAPlaceUnderARootOffersNothing(string prefix)
     {
         var (first, second) = Roots();
 
+        Assert.NotEmpty(Enumerate("billing/", first, second));
         Assert.Empty(Enumerate(prefix, first, second));
     }
 
@@ -474,6 +518,25 @@ public class SchemaCatalogTests
 
         Assert.False(SchemaCatalog.Enumerate(string.Empty, [root]).SawEverything);
         Assert.Null(SchemaCatalog.NearestTo("filler1.protoo", [root]));
+    }
+
+    /// <summary>
+    /// The budget bounds how much is read and not how long reading it takes, so a caller who has been
+    /// told nobody wants the answer can stop a walk the budget would happily let run.
+    /// </summary>
+    [Fact]
+    public void AWalkNobodyIsWaitingOnStopsRatherThanFinishing()
+    {
+        var root = Crowded(entries: 10);
+
+        using var withdrawn = new CancellationTokenSource();
+        withdrawn.Cancel();
+
+        Assert.Throws<OperationCanceledException>(
+            () => SchemaCatalog.Enumerate(string.Empty, [root], cancellationToken: withdrawn.Token));
+
+        Assert.Throws<OperationCanceledException>(
+            () => SchemaCatalog.NearestTo("filler1.protoo", [root], cancellationToken: withdrawn.Token));
     }
 
     /// <summary>A root holding <paramref name="entries"/> schemas and nothing else.</summary>
