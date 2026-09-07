@@ -253,6 +253,58 @@ public class ImportCompletionTests
             item => Assert.Equal(PositionOf(text, start + 3), item.TextEdit!.Range.End));
     }
 
+    /// <summary>
+    /// A semicolon is an ordinary character inside a quoted string and a legal one in a directory
+    /// name, so it ends the path only when the author has not closed the quote. Treating it as a
+    /// terminator outright made a real directory impossible to offer or replace.
+    /// </summary>
+    [Fact]
+    public async Task ASemicolonInsideAClosedStringIsPartOfThePathAndNotTheEndOfIt()
+    {
+        var root = Workspace();
+        Schema(root, "odd;name/invoice.proto");
+
+        const string Source = "import proto \"odd;name/\";";
+        var (client, uri, text, _) = await OpenAsync(Source + Body, root: root);
+        await using var _client = client;
+
+        var start = PathStart(text);
+        var offered = await CompleteAsync(client, uri, PositionOf(text, start + "odd;name/".Length));
+
+        Assert.Equal(["odd;name/invoice.proto"], Paths(offered));
+
+        // And the edit still stops at the closing quote rather than at the semicolon inside the path.
+        Assert.All(
+            offered.Items,
+            item => Assert.Equal(
+                PositionOf(text, start + "odd;name/".Length),
+                item.TextEdit!.Range.End));
+    }
+
+    /// <summary>
+    /// A Windows user types their own separator and an editor closes the quote for them, which leaves
+    /// a backslash immediately before the closing quote. Read as the lexer reads it that backslash
+    /// escapes the quote, the path runs on to the semicolon, and the edit eats the quote the editor
+    /// supplied. Read as a separator -- which is what it is here -- the line completes.
+    /// </summary>
+    [Fact]
+    public async Task ASeparatorTypedRightBeforeAnAutoClosedQuoteStillCompletes()
+    {
+        const string Source = "import proto \"billing\\\";";
+        var (client, uri, text, _) = await OpenAsync(Source + Body);
+        await using var _client = client;
+
+        var caret = PathStart(text) + "billing\\".Length;
+        var offered = await CompleteAsync(client, uri, PositionOf(text, caret));
+
+        Assert.Equal(
+            ["billing/tax/", "billing/credit.proto", "billing/invoice.proto"],
+            Paths(offered));
+
+        // And the edit stops at the quote rather than swallowing it and the semicolon behind it.
+        Assert.All(offered.Items, item => Assert.Equal(PositionOf(text, caret), item.TextEdit!.Range.End));
+    }
+
     [Fact]
     public async Task EveryPathIsOfferedInProtobufFormRatherThanThisMachinesSpelling()
     {

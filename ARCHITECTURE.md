@@ -259,11 +259,16 @@ is offered comes from
 import is resolved against" now lives for everyone who asks: the include paths, then the source's own
 directory, then whatever the loader adds. One directory listing per root, on demand, no index and no
 cache — so progressive completion falls out of the shape rather than being built, and a schema that
-appeared on disk a second ago is offered. The same catalog names the near match on `PL0002`, so the
-terminal and the editor say the same thing about a path that resolved to nothing. Nothing here
-compiles, and this is the first request that can go stale between reading the buffer and answering,
-so it re-checks the version and refuses with `ContentModified` rather than inserting text at an
-offset that has stopped meaning what it meant.
+appeared on disk a second ago is offered. The listing is lazy and carries a **budget in entries
+examined**, because one level bounds depth and not breadth, and a root pointed at a vendored tree or
+a network mount is one somebody will point at one. A walk that stops on its budget says so:
+completion offers what it saw, since the list is already declared incomplete, and the near match
+offers nothing, since the nearest of a partial reading is not the nearest. `#57` pins the figure for
+both. The same catalog names that near match on `PL0002`, so the terminal and the editor say the
+same thing about a path that resolved to nothing. Nothing here compiles, and this is the first
+request that can go stale between reading the buffer and answering, so it re-checks the version and
+refuses with `ContentModified` rather than inserting text at an offset that has stopped meaning what
+it meant.
 
 ### Backends
 

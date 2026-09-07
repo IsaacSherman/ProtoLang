@@ -132,23 +132,48 @@ internal sealed record ImportPathContext(
 
     /// <summary>Where the path stops, whether or not the author has closed the quote.</summary>
     /// <remarks>
-    /// The closing quote, the end of the line, or the semicolon an unterminated literal swallowed on
-    /// its way to the line's end. The third is why this scans rather than trusting the token's span:
-    /// the lexer has no choice but to run an unterminated literal to the end of the line, so the span
-    /// of <c>import proto ";</c> covers the semicolon -- and an edit built on that span would delete
-    /// the one character of the declaration the author did get right.
+    /// <para>
+    /// <b>The closing quote decides, and only its absence gives the semicolon a say.</b> A semicolon
+    /// is an ordinary character inside a quoted string and a legal one in a directory name, so
+    /// treating it as a terminator outright would make <c>odd;name/invoice.proto</c> impossible to
+    /// complete -- a real path this feature would then be unable to offer or to replace.
+    /// </para>
+    /// <para>
+    /// It matters only in the unterminated case, and there it matters a lot. The lexer has no choice
+    /// but to run an unterminated literal to the end of the line, so the token span of
+    /// <c>import proto ";</c> covers the semicolon, and an edit built on that span would delete the
+    /// one character of the declaration the author did get right. So: the first quote on the line
+    /// ends the path, and the first semicolon does only when the line holds no quote at all.
+    /// </para>
+    /// <para>
+    /// <b>A backslash is a separator here and not an escape</b>, which is the same choice
+    /// <see cref="DirectoryOf"/> and the catalog already make, for the same reason: a Windows user
+    /// typing the separator their operating system uses is a thing that happens, and a quotation mark
+    /// inside a schema path is not -- Windows forbids the character in a file name outright. Reading
+    /// the backslash as the lexer does would break the case that is real to protect the case that is
+    /// not: an editor auto-closing the quote leaves <c>import proto "billing\"</c>, where the closing
+    /// quote is the editor's and the path is what precedes it.
+    /// </para>
     /// </remarks>
     private static int PathEnd(string text, int start)
     {
-        for (var index = start; index < text.Length; index++)
+        var semicolon = -1;
+        var index = start;
+
+        for (; index < text.Length && text[index] is not ('\n' or '\r'); index++)
         {
-            if (text[index] is '"' or ';' or '\n' or '\r')
+            if (text[index] == '"')
             {
                 return index;
             }
+
+            if (text[index] == ';' && semicolon < 0)
+            {
+                semicolon = index;
+            }
         }
 
-        return text.Length;
+        return semicolon >= 0 ? semicolon : index;
     }
 
     /// <summary>The directory part of what has been typed, separator included.</summary>

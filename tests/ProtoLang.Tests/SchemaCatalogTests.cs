@@ -51,7 +51,7 @@ public class SchemaCatalogTests
     }
 
     private static IReadOnlyList<SchemaCandidate> Enumerate(string directory, params string[] roots)
-        => SchemaCatalog.Enumerate(directory, roots);
+        => SchemaCatalog.Enumerate(directory, roots).Candidates;
 
     // ------------------------------------------------------- agreeing with the compiler
 
@@ -63,7 +63,7 @@ public class SchemaCatalogTests
 
         foreach (var directory in new[] { string.Empty, "billing/", "billing/tax/" })
         {
-            foreach (var candidate in SchemaCatalog.Enumerate(directory, roots))
+            foreach (var candidate in SchemaCatalog.Enumerate(directory, roots).Candidates)
             {
                 if (candidate.IsDirectory)
                 {
@@ -85,7 +85,7 @@ public class SchemaCatalogTests
         var (first, second) = Roots();
         string[] roots = [first, second];
 
-        foreach (var candidate in SchemaCatalog.Enumerate("billing/", roots))
+        foreach (var candidate in SchemaCatalog.Enumerate("billing/", roots).Candidates)
         {
             if (candidate.IsDirectory)
             {
@@ -216,7 +216,7 @@ public class SchemaCatalogTests
 
         foreach (var directory in new[] { string.Empty, "billing/", "billing/tax/" })
         {
-            foreach (var candidate in SchemaCatalog.Enumerate(directory, [first, second]))
+            foreach (var candidate in SchemaCatalog.Enumerate(directory, [first, second]).Candidates)
             {
                 Assert.DoesNotContain('\\', candidate.Path);
                 Assert.False(
@@ -267,7 +267,7 @@ public class SchemaCatalogTests
     [Fact]
     public void NoRootsAtAllIsAnEmptyListRatherThanAFailure()
     {
-        Assert.Empty(SchemaCatalog.Enumerate(string.Empty, []));
+        Assert.Empty(SchemaCatalog.Enumerate(string.Empty, []).Candidates);
     }
 
     /// <summary>
@@ -303,10 +303,10 @@ public class SchemaCatalogTests
 
         var roots = SchemaCatalog.RootsFor([], loader);
 
-        Assert.Contains("google/", SchemaCatalog.Enumerate(string.Empty, roots).Select(c => c.Path));
+        Assert.Contains("google/", SchemaCatalog.Enumerate(string.Empty, roots).Candidates.Select(c => c.Path));
         Assert.Contains(
             "google/protobuf/timestamp.proto",
-            SchemaCatalog.Enumerate("google/protobuf/", roots).Select(c => c.Path));
+            SchemaCatalog.Enumerate("google/protobuf/", roots).Candidates.Select(c => c.Path));
     }
 
     // ------------------------------------------------------- the near match
@@ -391,6 +391,104 @@ public class SchemaCatalogTests
         var (first, _) = Roots();
 
         Assert.Null(SchemaCatalog.NearestTo(string.Empty, [first]));
+    }
+
+    // ------------------------------------------------------- what it is allowed to cost
+
+    /// <summary>
+    /// The walk stops on its budget and says it stopped, rather than reading a directory somebody
+    /// pointed at a vendored tree or a network mount to the end.
+    /// </summary>
+    [Fact]
+    public void AWalkThatRanOutOfBudgetSaysItDidNotSeeEverything()
+    {
+        var root = Crowded(entries: 10);
+
+        var cut = SchemaCatalog.Enumerate(string.Empty, [root], budget: 4);
+
+        Assert.False(cut.SawEverything);
+        Assert.True(cut.Candidates.Count <= 4, "no more candidates than entries examined");
+
+        Assert.True(SchemaCatalog.Enumerate(string.Empty, [root], budget: 10).SawEverything);
+    }
+
+    /// <summary>
+    /// The budget counts entries walked rather than candidates kept, because the cost is in reading
+    /// the directory and not in what reading it turned up. A root holding ten thousand images and one
+    /// schema is exactly the case the budget is for, and one that counted candidates would walk all
+    /// of it and report a budget of one as never reached.
+    /// </summary>
+    [Fact]
+    public void TheBudgetCountsWhatWasWalkedRatherThanWhatWasKept()
+    {
+        var root = TestPaths.CreateTempDirectory();
+        for (var index = 0; index < 10; index++)
+        {
+            Write(root, $"image{index}.png");
+        }
+
+        Write(root, "invoice.proto");
+
+        Assert.False(SchemaCatalog.Enumerate(string.Empty, [root], budget: 5).SawEverything);
+    }
+
+    /// <summary>
+    /// A partial walk cannot know that what it did not reach was further away than what it did, so it
+    /// names nothing rather than presenting the nearest of an arbitrary prefix as the nearest of the
+    /// directory. This is the compiler's error path: it runs on every failed import, from the command
+    /// line as well as the editor.
+    /// </summary>
+    /// <remarks>
+    /// The near match is in the first root and the breadth is in the second, so the walk reaches it
+    /// and then runs out. A test that put both in one directory would rest on the order the file
+    /// system happened to list in, and would pass whether the walk was cut short before the match or
+    /// after it -- which is to say it would pass with the rule removed.
+    /// </remarks>
+    [Fact]
+    public void ADirectoryTooBroadToReadWithinTheBudgetSuggestsNothing()
+    {
+        var near = TestPaths.CreateTempDirectory();
+        Write(near, "invoice.proto");
+
+        var broad = Crowded(entries: 10);
+
+        Assert.Equal("invoice.proto", SchemaCatalog.NearestTo("invoce.proto", [near, broad], budget: 64));
+        Assert.Null(SchemaCatalog.NearestTo("invoce.proto", [near, broad], budget: 4));
+    }
+
+    /// <summary>
+    /// The budget a caller names none of is the published one, so the guard is in force on the path
+    /// the compiler actually takes rather than only where a test passes a number.
+    /// </summary>
+    /// <remarks>
+    /// Every other test here supplies a budget, so without this one the published figure could be
+    /// raised to infinity and nothing would notice. Observing a default means exceeding it, which
+    /// means one more file than it allows; a few thousand empty ones cost well under a second, and
+    /// asserting the parameter through reflection instead would pin the declaration rather than the
+    /// behaviour.
+    /// </remarks>
+    [Fact]
+    public void TheBudgetACallerDoesNotNameIsThePublishedOne()
+    {
+        var root = Crowded(SchemaCatalog.MostEntriesExamined + 1);
+
+        Assert.False(SchemaCatalog.Enumerate(string.Empty, [root]).SawEverything);
+        Assert.Null(SchemaCatalog.NearestTo("filler1.protoo", [root]));
+    }
+
+    /// <summary>A root holding <paramref name="entries"/> schemas and nothing else.</summary>
+    private static string Crowded(int entries)
+    {
+        var root = TestPaths.CreateTempDirectory();
+
+        for (var index = 0; index < entries; index++)
+        {
+            // Empty, and no directory check per file: this is called with a few thousand, and what is
+            // under test is how many entries the walk looks at rather than what is in them.
+            File.Create(Path.Combine(root, $"filler{index}.proto")).Dispose();
+        }
+
+        return root;
     }
 
     private static SchemaCandidate Single(IReadOnlyList<SchemaCandidate> candidates, string path)

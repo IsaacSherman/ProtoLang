@@ -27,6 +27,19 @@ public sealed record SchemaCandidate(string Path, bool IsDirectory, string Root)
     public IReadOnlyList<string> ShadowedRoots { get; init; } = [];
 }
 
+/// <summary>What one directory holds across the roots, and whether the walk saw all of it.</summary>
+/// <param name="SawEverything">
+/// False when the walk stopped on its budget, which means the list is a prefix of the truth rather
+/// than the truth. A caller offering these to a person may still offer them; a caller reasoning about
+/// which of them is nearest to something must not, because the nearest of an arbitrary prefix is not
+/// the nearest.
+/// </param>
+public sealed record SchemaListing(IReadOnlyList<SchemaCandidate> Candidates, bool SawEverything)
+{
+    /// <summary>Nothing, seen in full: the answer for a prefix that could not name a place.</summary>
+    public static SchemaListing Nothing { get; } = new([], SawEverything: true);
+}
+
 /// <summary>
 /// What is importable, asked one directory at a time: which roots to search, what they hold, and --
 /// when a path named nothing -- what it very nearly named.
@@ -55,6 +68,18 @@ public sealed record SchemaCandidate(string Path, bool IsDirectory, string Root)
 /// </remarks>
 public static class SchemaCatalog
 {
+    /// <summary>
+    /// How many file system entries one question may look at before it stops and says it did.
+    /// </summary>
+    /// <remarks>
+    /// A guard, not a measurement. Nobody picks a schema out of two thousand names, so a directory
+    /// wider than this is not one a person is choosing from -- it is a vendored tree, a build output,
+    /// or a network mount somebody added to their include paths, and reading all of it would turn a
+    /// keystroke or a diagnostic into a wait. #57 pins the real figure, and pins it once for both
+    /// callers, since completion and the near match on a failed import walk through the same door.
+    /// </remarks>
+    public const int MostEntriesExamined = 2048;
+
     /// <summary>
     /// The directories an <c>import proto</c> path is resolved against, in the order protoc searches
     /// them: everything the compilation settled, then whatever the loader adds of its own.
@@ -92,36 +117,52 @@ public static class SchemaCatalog
     /// level. A backslash is read as a separator and answered with forward slashes, so a Windows user
     /// who typed one is corrected rather than refused.
     /// </param>
+    /// <param name="budget">
+    /// The most file system entries this may look at, across every root, before it stops and says so.
+    /// </param>
     /// <remarks>
     /// Directories first and then alphabetically, which is a presentation order rather than a
     /// resolution one -- <see cref="SchemaCandidate.Root"/> already carries the resolution. Merging
     /// happens in root order, before the sort, so the first root holding a name is the one that keeps
     /// it however the list is later arranged.
     /// </remarks>
-    public static IReadOnlyList<SchemaCandidate> Enumerate(string directory, IReadOnlyList<string> roots)
+    public static SchemaListing Enumerate(
+        string directory,
+        IReadOnlyList<string> roots,
+        int budget = MostEntriesExamined)
     {
         ArgumentNullException.ThrowIfNull(directory);
         ArgumentNullException.ThrowIfNull(roots);
 
         if (!TryDescend(directory, out var prefix))
         {
-            return [];
+            return SchemaListing.Nothing;
         }
 
         var found = new List<SchemaCandidate>();
         var seen = new Dictionary<string, int>(PathIdentity.Comparer);
+        var examined = 0;
 
         foreach (var root in roots)
         {
-            foreach (var entry in EntriesOf(root, prefix))
+            foreach (var entry in Listing(Path.Combine(root, prefix)))
             {
-                Merge(found, seen, entry with { Root = root });
+                // Counted per entry rather than per candidate, because the cost is in walking a
+                // directory and not in what walking it turned up. A root holding fifty thousand
+                // images and one schema is exactly the case this is here for.
+                if (++examined > budget)
+                {
+                    return Sorted(found, sawEverything: false);
+                }
+
+                if (Candidate(entry, prefix, root) is { } candidate)
+                {
+                    Merge(found, seen, candidate);
+                }
             }
         }
 
-        found.Sort(Presentation);
-
-        return found;
+        return Sorted(found, sawEverything: true);
     }
 
     /// <summary>
@@ -143,8 +184,22 @@ public static class SchemaCatalog
     /// does not, a schema differing only in case is precisely what the author meant and is invisible
     /// to them in every other diagnostic they will see.
     /// </para>
+    /// <para>
+    /// <b>A directory too broad to be read within the budget suggests nothing at all.</b> This runs
+    /// on a compiler's error path, on a machine whose include roots may be a network mount or a
+    /// vendored tree with tens of thousands of files in it, and a diagnostic that takes seconds to
+    /// print is a worse failure than one that says less. Silence rather than a best effort, because a
+    /// partial walk cannot know that what it did not reach was further away than what it did: it
+    /// would name the nearest of an arbitrary prefix of the directory and present it as the nearest
+    /// of the whole. <paramref name="budget"/> is a guard rather than a measured figure, and #57 pins
+    /// it for this and for completion together, since both walk through here.
+    /// </para>
     /// </remarks>
-    public static string? NearestTo(string relativePath, IReadOnlyList<string> roots)
+    /// <param name="budget"><inheritdoc cref="Enumerate" path="/param[@name='budget']"/></param>
+    public static string? NearestTo(
+        string relativePath,
+        IReadOnlyList<string> roots,
+        int budget = MostEntriesExamined)
     {
         ArgumentNullException.ThrowIfNull(relativePath);
         ArgumentNullException.ThrowIfNull(roots);
@@ -158,12 +213,18 @@ public static class SchemaCatalog
             return null;
         }
 
-        var budget = Math.Max(1, name.Length / 3);
+        var listing = Enumerate(written[..(cut + 1)], roots, budget);
+        if (!listing.SawEverything)
+        {
+            return null;
+        }
+
+        var allowed = Math.Max(1, name.Length / 3);
 
         string? best = null;
         var nearest = int.MaxValue;
 
-        foreach (var candidate in Enumerate(written[..(cut + 1)], roots))
+        foreach (var candidate in listing.Candidates)
         {
             // The candidate's own last segment rather than a slice at the written path's separator:
             // the two agree only when the author spelled the directory exactly as Enumerate
@@ -179,7 +240,7 @@ public static class SchemaCatalog
 
             // Strictly nearer, so that an exact tie keeps the earlier candidate and the answer follows
             // the order Enumerate settled rather than the order the file system happened to list in.
-            if (distance <= budget && distance < nearest)
+            if (distance <= allowed && distance < nearest)
             {
                 best = candidate.Path;
                 nearest = distance;
@@ -226,48 +287,87 @@ public static class SchemaCatalog
         return true;
     }
 
-    /// <summary>What one root holds at <paramref name="prefix"/>, with no root filled in yet.</summary>
+    /// <summary>What one directory holds, lazily, and nothing at all when it cannot be read.</summary>
     /// <remarks>
-    /// The root is stamped on by the caller because it is the caller that knows the search order, and
-    /// the order is the whole of what <see cref="SchemaCandidate.Root"/> means.
+    /// <para>
+    /// Lazy on purpose. The array-returning form reads the whole directory into memory before the
+    /// caller sees an entry, so a budget written around it would be a budget on nothing: the work and
+    /// the allocation have already happened by the time the first entry can be counted. Enumerating
+    /// lets the count stop the walk where it stands.
+    /// </para>
+    /// <para>
+    /// The enumerator is driven by hand because a <c>try</c> cannot hold a <c>yield return</c>, and
+    /// the failures here arrive on <c>MoveNext</c> rather than on the call: a directory that is not
+    /// there, one this process may not read, one whose path this platform will not accept. Each
+    /// contributes nothing and lets the remaining roots answer, since a wrong include path is the
+    /// ordinary case this feature exists to make visible.
+    /// </para>
     /// </remarks>
-    private static IEnumerable<SchemaCandidate> EntriesOf(string root, string prefix)
+    private static IEnumerable<string> Listing(string directory)
     {
-        string[] entries;
+        IEnumerator<string> entries;
         try
         {
-            entries = Directory.GetFileSystemEntries(Path.Combine(root, prefix));
+            entries = Directory.EnumerateFileSystemEntries(directory).GetEnumerator();
         }
-        catch (Exception ex) when (ex is IOException
-            or UnauthorizedAccessException
-            or ArgumentException
-            or NotSupportedException)
+        catch (Exception ex) when (Unreadable(ex))
         {
             yield break;
         }
 
-        foreach (var entry in entries)
+        using (entries)
         {
-            var name = Path.GetFileName(entry);
-            if (name.Length == 0)
+            while (true)
             {
-                continue;
-            }
+                try
+                {
+                    if (!entries.MoveNext())
+                    {
+                        yield break;
+                    }
+                }
+                catch (Exception ex) when (Unreadable(ex))
+                {
+                    yield break;
+                }
 
-            if (Directory.Exists(entry))
-            {
-                yield return new SchemaCandidate(prefix + name + "/", IsDirectory: true, root);
-                continue;
-            }
-
-            // Case-insensitively, everywhere. An extension is not a name: a file called
-            // 'Invoice.PROTO' on a case-sensitive volume is one protoc resolves perfectly well when
-            // it is imported by that spelling, which is the spelling this offers.
-            if (name.EndsWith(".proto", StringComparison.OrdinalIgnoreCase))
-            {
-                yield return new SchemaCandidate(prefix + name, IsDirectory: false, root);
+                yield return entries.Current;
             }
         }
+    }
+
+    private static bool Unreadable(Exception ex)
+        => ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException;
+
+    /// <summary>What one entry is, or null when it is nothing an import could name.</summary>
+    /// <remarks>
+    /// The extension is matched without regard to case, everywhere. An extension is not a name: a
+    /// file called 'Invoice.PROTO' on a case-sensitive volume is one protoc resolves perfectly well
+    /// when it is imported by that spelling, which is the spelling this offers.
+    /// </remarks>
+    private static SchemaCandidate? Candidate(string entry, string prefix, string root)
+    {
+        var name = Path.GetFileName(entry);
+        if (name.Length == 0)
+        {
+            return null;
+        }
+
+        if (Directory.Exists(entry))
+        {
+            return new SchemaCandidate(prefix + name + "/", IsDirectory: true, root);
+        }
+
+        return name.EndsWith(".proto", StringComparison.OrdinalIgnoreCase)
+            ? new SchemaCandidate(prefix + name, IsDirectory: false, root)
+            : null;
+    }
+
+    private static SchemaListing Sorted(List<SchemaCandidate> found, bool sawEverything)
+    {
+        found.Sort(Presentation);
+
+        return new SchemaListing(found, sawEverything);
     }
 
     /// <summary>

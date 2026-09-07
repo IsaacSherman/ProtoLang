@@ -66,8 +66,8 @@ public sealed class CompletionProvider
     /// that has to prove the refusal above has to be able to move it inside that window, and there is
     /// nowhere else to stand.
     /// </remarks>
-    public Func<string, IReadOnlyList<string>, IReadOnlyList<SchemaCandidate>> Enumerate { get; init; }
-        = SchemaCatalog.Enumerate;
+    public Func<string, IReadOnlyList<string>, SchemaListing> Enumerate { get; init; }
+        = (directory, roots) => SchemaCatalog.Enumerate(directory, roots);
 
     /// <summary>Everything that could be typed at one position.</summary>
     /// <exception cref="JsonRpcException">
@@ -127,7 +127,15 @@ public sealed class CompletionProvider
 
         var roots = SchemaCatalog.RootsFor(searchPaths, loader);
 
-        return [.. Enumerate(context.Directory, roots).Select(candidate => Item(candidate, context, document))];
+        // A listing cut short by its budget is still offered. The list is already declared incomplete
+        // to the client, which re-asks on the next keystroke, and a person narrowing a very wide
+        // directory by typing is better served by a prefix of it than by nothing. The near match on a
+        // failed import makes the opposite choice, and says why.
+        return
+        [
+            .. Enumerate(context.Directory, roots).Candidates
+                .Select(candidate => Item(candidate, context, document)),
+        ];
     }
 
     private static CompletionItem Item(SchemaCandidate candidate, ImportPathContext context, OpenDocument document)
