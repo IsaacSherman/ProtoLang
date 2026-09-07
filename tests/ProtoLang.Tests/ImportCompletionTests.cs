@@ -322,6 +322,25 @@ public class ImportCompletionTests
         Assert.Contains("already imported", shared.Detail);
     }
 
+    /// <summary>
+    /// The declaration under the caret imports nothing yet, whatever it currently reads. Counting it
+    /// would mark the schema on that very line as a duplicate of itself, on the one list where the
+    /// user is deciding whether to keep it.
+    /// </summary>
+    [Fact]
+    public async Task TheImportBeingEditedIsNotADuplicateOfItself()
+    {
+        const string Source = "import proto \"shared.proto\";";
+        var (client, uri, text, _) = await OpenAsync(Source + Body);
+        await using var _client = client;
+
+        var offered = await CompleteAsync(client, uri, PositionOf(text, PathStart(text) + 3));
+
+        var shared = Assert.Single(offered.Items, item => item.TextEdit!.NewText == "shared.proto");
+
+        Assert.DoesNotContain("already imported", shared.Detail);
+    }
+
     [Fact]
     public async Task ASchemaThatIsNotYetImportedSaysOnlyWhereItIs()
     {
@@ -370,11 +389,19 @@ public class ImportCompletionTests
     /// be typed and nowhere else. The regions are computed from the text rather than written down, so
     /// the test still means something after the fixture is edited.
     /// </summary>
+    /// <remarks>
+    /// The fixture holds the two things that look like an import path and are not: a comment naming
+    /// one, which the lexer discards as trivia, and a string literal in expression position, which it
+    /// does not. The second is the one that matters -- a token stream scanned for string literals
+    /// alone finds it, and offering schema paths inside a return value is completion firing in a
+    /// place no schema path can go.
+    /// </remarks>
     [Fact]
     public async Task OnlyACaretInsideAnImportPathCompletesAtAll()
     {
         const string Source =
-            "// nothing here is a \"path.proto\"\nimport proto \"\";\nimport proto \"billing/\";\n" + Body;
+            "// nothing here is a \"path.proto\"\nimport proto \"\";\nimport proto \"billing/\";\n"
+                + "\nextend InvoiceItem {\n    fn label() -> string { return \"billing/invoice.proto\"; }\n}\n";
 
         var (client, uri, text, _) = await OpenAsync(Source);
         await using var _client = client;

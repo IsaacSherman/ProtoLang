@@ -58,6 +58,7 @@ internal sealed record ImportPathContext(
 
         var imported = new List<string>();
         SourceSpan? found = null;
+        var editing = -1;
 
         foreach (var quoted in ImportPaths(tokens))
         {
@@ -69,12 +70,21 @@ internal sealed record ImportPathContext(
             if (Covers(text, quoted.Span, offset))
             {
                 found = quoted.Span;
+                editing = imported.Count - 1;
             }
         }
 
         if (found is not { } span)
         {
             return false;
+        }
+
+        // The declaration being edited does not import anything yet, whatever it currently reads.
+        // Counting it would mark the schema already on that line as a duplicate of itself, on the one
+        // list where the user is deciding whether to keep it.
+        if (editing >= 0)
+        {
+            imported.RemoveAt(editing);
         }
 
         var start = span.Start.Offset + 1;
