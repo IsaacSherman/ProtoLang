@@ -1439,6 +1439,19 @@ Implementation Note:
   is a schema like any other; what differs between installations is whether a file backs it at all,
   since `protoc` resolves those schemas from descriptors compiled into the binary from version 33
   onwards and from files shipped beside the binary before that.
+- **The names a schema makes reachable are published as one index rather than left to be
+  re-derived.** A compilation reports every message and enum the imported schemas declare, nested
+  declarations included, under both the full name and the simple one, as `CompilationResult.Types`.
+  Type references are resolved against exactly that index, so a host predicting what a type position
+  will accept asks it rather than walking the descriptors a second time. A second walk is not merely
+  redundant. Enums and messages nested inside a message are reachable only by descending, so the
+  first thing an independent walk omits is the nested enum; and what a caller must know about an
+  ambiguous simple name is three different questions, not one. A receiver after `extend` is ambiguous
+  only against other messages (`PL0020`). A type position takes messages and enums as a single name
+  space, so a name matching one of each is as ambiguous as one matching two enums (`PL0074`). An enum
+  in front of a dot is ambiguous only against other enums. An index that answered a single "is this
+  ambiguous" would be wrong at two of those three sites, and wrong silently -- offering a name the
+  compiler then refuses, or withholding one it would have accepted.
 - A descriptor-load failure preserves `protoc`'s own report line by line, with the file and position
   each line names kept separate from its message, rather than only as prose inside a `PL0003`
   message. Publishing a schema error against the schema is only possible if that structure survives.
