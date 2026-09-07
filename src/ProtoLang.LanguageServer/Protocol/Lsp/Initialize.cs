@@ -48,7 +48,21 @@ public sealed record TextDocumentClientCapabilities
 
     /// <summary>Present when the client will ask for semantic tokens at all.</summary>
     public SemanticTokensClientCapabilities? SemanticTokens { get; init; }
+
+    /// <summary>Present when the client will ask for completion at all.</summary>
+    public CompletionClientCapabilities? Completion { get; init; }
 }
+
+/// <inheritdoc cref="ClientCapabilities"/>
+/// <remarks>
+/// Deliberately empty: presence is the whole of what this server consults. LSP's completion
+/// capability describes what an <em>item</em> may carry -- snippets, documentation formats, tag
+/// support -- and this server sends the same plain item to every client, so declaring members here
+/// would be carrying shape for no behavior. What the members would have decided, they decide by
+/// their absence: an edit range is always sent because clients disagree about word boundaries, and
+/// the insert format is always stated because a path is not a snippet.
+/// </remarks>
+public sealed record CompletionClientCapabilities;
 
 /// <inheritdoc cref="ClientCapabilities"/>
 public sealed record GeneralClientCapabilities
@@ -162,6 +176,9 @@ public sealed record ServerCapabilities
 
     /// <summary>Null when the client never said it wanted semantic tokens.</summary>
     public SemanticTokensOptions? SemanticTokensProvider { get; init; }
+
+    /// <summary>Null when the client never said it wanted completion.</summary>
+    public CompletionOptions? CompletionProvider { get; init; }
 
     public WorkspaceServerCapabilities? Workspace { get; init; }
 }

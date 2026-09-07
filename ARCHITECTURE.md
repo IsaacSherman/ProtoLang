@@ -53,9 +53,12 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
 5. **No gate.** Parse errors do not stop the pipeline. A buffer being typed into is broken most of
    the time an editor asks anything about it, and what it most often asks — what may follow this
    dot — only the binder can answer.
-6. **Descriptors.** Each import is resolved against the search paths into an
+6. **Descriptors.** Each import is resolved into an
    [`ImportResolution`](src/ProtoLang.Core/ImportResolution.cs) — resolved, not found, or never
-   written — and the whole list is published on the result. Then
+   written — against the roots
+   [`SchemaCatalog.RootsFor`](src/ProtoLang.Core/Binding/SchemaCatalog.cs) settles: the search paths,
+   then the loader's own. The whole list is published on the result, and one that was not found is
+   told which schema in the directory it named it came closest to. Then
    [`DescriptorLoader`](src/ProtoLang.Core/Binding/DescriptorLoader.cs) shells out to `protoc`
    (located by [`ProtocLocator`](src/ProtoLang.Core/Binding/ProtocLocator.cs)) and returns a
    [`DescriptorBundle`](src/ProtoLang.Core/Binding/DescriptorBundle.cs): the built `FileDescriptor`s,
@@ -145,6 +148,9 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | Where a comment was | `Comment` | [Syntax/Comment.cs](src/ProtoLang.Core/Syntax/Comment.cs) |
 | Written or not-yet-written names | `SyntaxName` | [Syntax/SyntaxName.cs](src/ProtoLang.Core/Syntax/SyntaxName.cs) |
 | What became of an import | `ImportResolution` | [ImportResolution.cs](src/ProtoLang.Core/ImportResolution.cs) |
+| Which file a schema path names | `SchemaLookup` | [Binding/SchemaLookup.cs](src/ProtoLang.Core/Binding/SchemaLookup.cs) |
+| Which roots are searched, and what they hold | `SchemaCatalog`, `SchemaCandidate` | [Binding/SchemaCatalog.cs](src/ProtoLang.Core/Binding/SchemaCatalog.cs) |
+| What could be typed at a position | `CompletionProvider`, `ImportPathContext` | [Hosting/CompletionProvider.cs](src/ProtoLang.LanguageServer/Hosting/CompletionProvider.cs) |
 | What a descriptor load produced | `DescriptorBundle`, `SchemaFile` | [Binding/DescriptorBundle.cs](src/ProtoLang.Core/Binding/DescriptorBundle.cs) |
 | What decides a load, and keys it | `DescriptorRequest` | [Binding/DescriptorRequest.cs](src/ProtoLang.Core/Binding/DescriptorRequest.cs) |
 | Whether a load can be reused | `DescriptorCache`, `SchemaClosure` | [Binding/DescriptorCache.cs](src/ProtoLang.Core/Binding/DescriptorCache.cs) |
@@ -216,6 +222,30 @@ a queue one worker drains in order. That separation is what lets a handler ask t
 the connection ends, outstanding work is cancelled **before** the dispatcher is awaited; the other
 order waits forever for a handler whose answer is never coming.
 
+Draining in order is the default and is right for a handler that is arithmetic over a buffer the
+server already holds. A handler that **leaves the process** — one that opens a directory, or waits on
+a tool — opts out with `OnRequest(..., concurrent: true)`, because answered in order it holds the
+reading worker for as long as the outside world takes, and behind it sit every `didChange`, every
+`didClose`, and the `$/cancelRequest` that would have shortened it. Completion is the only such
+handler today, and what it owes in return is four things, all of them easy to get wrong:
+
+- **Settle which buffer the request is about before yielding.** `CompletionProvider.Read` runs on the
+  ordered worker; only the walk is deferred. Deferring the lookup lets the `didChange` behind the
+  request be applied first, and the position is then measured against text the client had not sent —
+  after which every staleness check agrees, because they are all asking about the wrong document.
+- **Identify the buffer and the configuration as objects, not as a version and a generation.** Both
+  are immutable, so holding them holds the question. A version number is unique only within one open
+  session: close a document and reopen it and the client starts again at one.
+- **Bound its own outstanding work.** A newer completion supersedes the outstanding one for its
+  document, exactly as a keystroke supersedes a scheduled compile, and a semaphore bounds how many
+  run across documents. A per-walk budget bounds one walk and says nothing about how many there are.
+- **Give up the ones nobody is waiting for, before they take a slot.** `didClose` calls
+  `CompletionProvider.Forget` beside `CompileScheduler.ForgetAsync`, and a request that reaches the
+  front of the queue re-checks freshness before it walks rather than only after — an edit is the one
+  reason for abandonment that carries no cancellation to notice. Waiting for a slot is part of the
+  request: it sits inside the same cleanup as the walk, so a request that ends while waiting is still
+  retired, and gives back only a slot it actually took.
+
 The buffer the client sent is the source of truth and the file on disk is never read for an open
 document. Edits are applied incrementally, in order, each against the text the one before it
 produced. A compile is debounced and coalesced, carries the document version and the configuration
@@ -244,6 +274,29 @@ Classification (spec 6.5) lexes and nothing more, so it answers for a file that 
 legend is the whole standard token set, declared now because it is negotiated once and indexed by
 position; identifiers are uniformly `variable` until a semantic model can do better.
 
+Completion is the same bargain and one step further out. `CompletionProvider` decides which context
+the caret is in before it asks what belongs there, and today recognizes one — inside an `import
+proto` string, found by `ImportPathContext` in the token stream, because the tree does not carry the
+path's own span and the state this is invoked in is one the parser has already recovered from. What
+is offered comes from
+[`SchemaCatalog`](src/ProtoLang.Core/Binding/SchemaCatalog.cs), which is also where "the roots an
+import is resolved against" now lives for everyone who asks: the include paths, then the source's own
+directory, then whatever the loader adds. One directory listing per root, on demand, no index and no
+cache — so progressive completion falls out of the shape rather than being built, and a schema that
+appeared on disk a second ago is offered. Only the include roots are resolved for it, never the
+language policy: settling that means searching upward for a `protolang.config.xml` and parsing it,
+which decides nothing about where a path resolves and would be paid per keystroke. The listing is
+lazy, reads each entry's kind from the same directory scan that found it, and carries a **budget in
+entries examined**, because one level bounds depth and not breadth, and a root pointed at a vendored
+tree or a network mount is one somebody will point at one. A walk that stops on its budget says so:
+completion offers what it saw, since the list is already declared incomplete, and the near match
+offers nothing, since the nearest of a partial reading is not the nearest. `#57` pins the figure for
+both. The same catalog names that near match on `PL0002`, so the terminal and the editor say the
+same thing about a path that resolved to nothing. Nothing here compiles, and this is the first
+request that can go stale between reading the buffer and answering, so it re-checks the version and
+refuses with `ContentModified` rather than inserting text at an offset that has stopped meaning what
+it meant.
+
 ### Backends
 
 Per spec 23 a backend consumes only the typed IR, never the AST, and rejects what it cannot support
@@ -258,7 +311,8 @@ One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized b
 `SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
 `SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `ScopeQueryTests`,
 `DescriptorCacheTests`, `SchemaDeclarationTests`, `ProcessSupervisionTests`, `CompileSupervisionTests`,
-`WorkspaceConfigurationTests`, `LanguageServerTests`, `SemanticTokenTests`,
+`WorkspaceConfigurationTests`, `LanguageServerTests`, `SemanticTokenTests`, `SchemaCatalogTests`,
+`ImportCompletionTests`,
 `TreeWalkTests`, `ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`,
 and the scaffolding and smoke suites.
 
@@ -313,5 +367,7 @@ only to have the lexer keep the comment spans it was already walking past. #41 c
 wave by making the retained source info answerable, so a schema element's declaration and its doc
 comment are reachable from a descriptor. #54 made abandoned work stop costing anything: a
 cancellable wait on `protoc`, an expiry that says it is one, a stated queue bound, and counters that
-turn "no leak over a working day" into a soak test. Everything from here should be additive: new
+turn "no leak over a working day" into a soak test. #56 opened the completion surface on the first
+line anybody writes, and reached Core to give the include roots one home rather than the two
+expressions that had been agreeing by coincidence. Everything from here should be additive: new
 types, new projects. Rewriting the binder is the signal to stop and re-scope.

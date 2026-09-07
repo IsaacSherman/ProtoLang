@@ -20,6 +20,7 @@ public static class Methods
     public const string DidSave = "textDocument/didSave";
     public const string PublishDiagnostics = "textDocument/publishDiagnostics";
     public const string SemanticTokensFull = "textDocument/semanticTokens/full";
+    public const string Completion = "textDocument/completion";
 
     public const string DidChangeConfiguration = "workspace/didChangeConfiguration";
     public const string DidChangeWorkspaceFolders = "workspace/didChangeWorkspaceFolders";

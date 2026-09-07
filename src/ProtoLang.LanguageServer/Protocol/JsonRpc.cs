@@ -72,6 +72,16 @@ public static class ErrorCodes
 
     /// <summary>The client withdrew the request, or the server gave up on it.</summary>
     public const int RequestCancelled = -32800;
+
+    /// <summary>The buffer moved while the request was being answered, so there is nothing to say.</summary>
+    /// <remarks>
+    /// Spec 26.1 requires it: an answer about a version the buffer has moved past is never published,
+    /// and a request that can answer only about such a version is refused as such rather than
+    /// answered. Distinct from <see cref="RequestCancelled"/>, which says the client withdrew the
+    /// question -- here the client still wants an answer, and the only honest one is that the question
+    /// is about text nobody is looking at any more. A client that sees this asks again.
+    /// </remarks>
+    public const int ContentModified = -32801;
 }
 
 /// <summary>What went wrong with one request.</summary>

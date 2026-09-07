@@ -51,6 +51,7 @@ public sealed class LanguageServerHost : IDisposable
     private readonly LoaderPool _loaders;
     private readonly DiagnosticRouter _router;
     private readonly CompileScheduler _scheduler;
+    private readonly CompletionProvider _completion;
 
     private DiagnosticMapper _mapper = new(relatedInformationSupported: false);
     private volatile ServerState _state = ServerState.NotInitialized;
@@ -76,6 +77,8 @@ public sealed class LanguageServerHost : IDisposable
             _log,
             debounce);
 
+        _completion = new CompletionProvider(_documents, _configuration, _loaders);
+
         Register();
     }
 
@@ -95,6 +98,15 @@ public sealed class LanguageServerHost : IDisposable
     /// <summary>Compilations that have actually run, as opposed to been scheduled.</summary>
     public int Compilations => _scheduler.Compilations;
 
+    /// <summary>What answers a completion request, for a test and for #58.</summary>
+    /// <remarks>
+    /// Published for the same reason <see cref="Compilations"/> is: the property most worth holding in
+    /// place -- that this handler gives the reading worker back before it touches the file system --
+    /// cannot be observed from outside without making one walk slow on purpose, and there is nowhere
+    /// else to stand to do that.
+    /// </remarks>
+    public CompletionProvider Completion => _completion;
+
     /// <summary>Serves until the client goes away or <c>exit</c> arrives.</summary>
     public Task RunAsync(CancellationToken cancellationToken = default)
         => _connection.RunAsync(cancellationToken);
@@ -108,6 +120,7 @@ public sealed class LanguageServerHost : IDisposable
         _connection.OnRequest(Methods.Initialize, (parameters, _) => Initialize(parameters));
         _connection.OnRequest(Methods.Shutdown, (_, _) => Shutdown());
         _connection.OnRequest(Methods.SemanticTokensFull, (parameters, _) => Answer<SemanticTokensParams>(parameters, Classify));
+        _connection.OnRequest(Methods.Completion, Complete, concurrent: true);
 
         _connection.OnNotification(Methods.Initialized, (_, token) => Initialized(token));
         _connection.OnNotification(Methods.Exit, (_, _) => Exit());
@@ -137,6 +150,47 @@ public sealed class LanguageServerHost : IDisposable
         RequireRunning();
 
         return Task.FromResult(handler(LspJson.Read<T>(parameters) ?? throw Missing<T>()));
+    }
+
+    /// <summary>
+    /// Answers a completion: read here, in order with everything else, and walked anywhere.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The connection drains one queue with one worker, in order, and <see cref="Answer{T}"/> runs its
+    /// handler on that worker -- which is right for a handler that is arithmetic over a buffer it
+    /// already has, and wrong for one that opens a directory. A completion answered inline holds the
+    /// worker for the length of the walk, and behind it sit every <c>didChange</c>, every
+    /// <c>didClose</c>, and the <c>$/cancelRequest</c> that would have shortened it. On an include
+    /// path that is a network mount, that is the buffer ceasing to sync while the user types.
+    /// <c>CompileScheduler.Schedule</c> was changed for the same reason and says so.
+    /// </para>
+    /// <para>
+    /// <b>What may not move off this worker is deciding which buffer the request is about.</b>
+    /// <c>CompletionProvider.Read</c> is called here, before this method returns and therefore before
+    /// the next message is dequeued, precisely so that a <c>didChange</c> queued behind the request
+    /// cannot be applied first. Deferring it would leave the position measured against text the client
+    /// had not sent when it asked -- and every staleness check afterwards would agree, because they
+    /// would all be asking about the same wrong document.
+    /// </para>
+    /// <para>
+    /// The lifecycle check and the deserialization stay here for the same reason they always did: both
+    /// are cheap, and a request that arrived too early or carried nothing is refused rather than
+    /// scheduled. What leaves is the walk, and it takes the request's own token with it.
+    /// </para>
+    /// </remarks>
+    private async Task<object?> Complete(JsonElement? parameters, CancellationToken cancellationToken)
+    {
+        RequireRunning();
+
+        var message = LspJson.Read<CompletionParams>(parameters) ?? throw Missing<CompletionParams>();
+
+        if (_completion.Read(message) is not { } asked)
+        {
+            return CompletionProvider.Nothing;
+        }
+
+        return await _completion.AnswerAsync(asked, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Runs a notification handler, dropping the message when it arrives out of turn.</summary>
@@ -218,6 +272,9 @@ public sealed class LanguageServerHost : IDisposable
                 SemanticTokensProvider = capabilities?.TextDocument?.SemanticTokens is null
                     ? null
                     : new SemanticTokensOptions { Legend = SemanticTokenLegend.Wire },
+                CompletionProvider = capabilities?.TextDocument?.Completion is null
+                    ? null
+                    : new CompletionOptions { TriggerCharacters = CompletionProvider.TriggerCharacters },
                 Workspace = new WorkspaceServerCapabilities
                 {
                     WorkspaceFolders = new WorkspaceFoldersServerCapabilities(),
@@ -361,6 +418,11 @@ public sealed class LanguageServerHost : IDisposable
         }
 
         _documents.Close(uri);
+
+        // Every kind of outstanding work for this document, not just the compile. A completion is the
+        // other kind, it can be queued behind a slow walk for as long as that walk takes, and nothing
+        // else would ever tell it the buffer it describes has gone.
+        _completion.Forget(uri);
 
         return _scheduler.ForgetAsync(uri);
     }

@@ -12,7 +12,40 @@ namespace ProtoLang.LanguageServer.Workspace;
 /// the question this whole type exists to answer.
 /// </param>
 /// <param name="Source">The scope that supplied it.</param>
-public sealed record ResolvedIncludePath(string Path, string AsWritten, ConfigurationSource Source);
+public sealed record ResolvedIncludePath(string Path, string AsWritten, ConfigurationSource Source)
+{
+    /// <summary>Just the directories, in order: what a compilation is actually handed.</summary>
+    /// <remarks>
+    /// A different thing from what a report shows, which is why it is a projection rather than the
+    /// stored shape: the origin of each entry matters to a user asking why, and to nothing that
+    /// resolves a path. One home for it because three callers now want it, and a projection written
+    /// again at a call site is another chance to drop an entry or reorder one.
+    /// </remarks>
+    public static IReadOnlyList<string> Directories(IReadOnlyList<ResolvedIncludePath> includePaths)
+    {
+        ArgumentNullException.ThrowIfNull(includePaths);
+
+        return [.. includePaths.Select(include => include.Path)];
+    }
+}
+
+/// <summary>
+/// Where an <c>import proto</c> path resolves for one document, and nothing else about it.
+/// </summary>
+/// <remarks>
+/// <see cref="DocumentConfiguration"/> without the language policy, for the requests that answer
+/// while the user is still typing. Settling policy reads a file off disk; deciding what an import
+/// could name does not, and the two are separated so the second never pays for the first. See
+/// <c>WorkspaceConfiguration.ResolveImportRoots</c>, which is where the two are kept from drifting.
+/// </remarks>
+public sealed record ImportRoots(
+    WorkspaceFolder? Folder,
+    string? ProtocPath,
+    IReadOnlyList<ResolvedIncludePath> IncludePaths)
+{
+    /// <inheritdoc cref="ResolvedIncludePath.Directories"/>
+    public IReadOnlyList<string> IncludeDirectories => ResolvedIncludePath.Directories(IncludePaths);
+}
 
 /// <summary>One line of the resolved-configuration report: a setting, its value, and its origin.</summary>
 /// <remarks>
@@ -88,6 +121,9 @@ public sealed record DocumentConfiguration
     /// precedence instead, which is what first-match resolution already means.
     /// </remarks>
     public IReadOnlyList<ResolvedIncludePath> IncludePaths { get; init; } = [];
+
+    /// <inheritdoc cref="ResolvedIncludePath.Directories"/>
+    public IReadOnlyList<string> IncludeDirectories => ResolvedIncludePath.Directories(IncludePaths);
 
     /// <summary>
     /// The language policy this document compiles under, or null when a configuration file was found
@@ -187,7 +223,7 @@ public sealed record DocumentConfiguration
 
         options = new CompilationOptions
         {
-            IncludePaths = [.. IncludePaths.Select(include => include.Path)],
+            IncludePaths = IncludeDirectories,
             Config = Config,
             Loader = loader,
         };

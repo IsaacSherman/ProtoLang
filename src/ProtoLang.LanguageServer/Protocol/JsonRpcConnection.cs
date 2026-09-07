@@ -50,6 +50,9 @@ public sealed class JsonRpcConnection : IDisposable
     private readonly Dictionary<string, Func<JsonElement?, CancellationToken, Task>> _notifications
         = new(StringComparer.Ordinal);
 
+    /// <inheritdoc cref="OnRequest" path="/param[@name='concurrent']"/>
+    private readonly HashSet<string> _concurrent = new(StringComparer.Ordinal);
+
     private readonly ConcurrentDictionary<string, TaskCompletionSource<IncomingMessage>> _pending = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _running = new(StringComparer.Ordinal);
 
@@ -72,8 +75,40 @@ public sealed class JsonRpcConnection : IDisposable
     }
 
     /// <summary>Registers what answers <paramref name="method"/>.</summary>
-    public void OnRequest(string method, Func<JsonElement?, CancellationToken, Task<object?>> handler)
-        => _requests[method] = handler;
+    /// <param name="concurrent">
+    /// Whether an answer to this may be worked on while later messages are read and acted on.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <b>False by default, and that is the safe default rather than the timid one.</b> The queue is
+    /// drained by one worker in order, and awaiting each handler is what makes <c>initialize</c>,
+    /// <c>shutdown</c> and every notification happen in the sequence the client sent them. A handler
+    /// that is arithmetic over a buffer the server already holds costs microseconds, so nothing is
+    /// lost by waiting for it.
+    /// </para>
+    /// <para>
+    /// True is for a handler that leaves this process -- one that opens a directory, or waits on a
+    /// tool. Answered in order, such a handler holds the reading worker for as long as the outside
+    /// world takes, and behind it sit every <c>didChange</c>, every <c>didClose</c>, and the
+    /// <c>$/cancelRequest</c> that would have shortened it: on a slow include path, the buffer stops
+    /// syncing while the user types. JSON-RPC permits responses in any order, so the only thing given
+    /// up is an ordering the protocol never promised. What a concurrent handler owes in return is the
+    /// staleness rule (spec 26.1): it read the buffer at one version and must check that version
+    /// before it answers.
+    /// </para>
+    /// </remarks>
+    public void OnRequest(
+        string method,
+        Func<JsonElement?, CancellationToken, Task<object?>> handler,
+        bool concurrent = false)
+    {
+        _requests[method] = handler;
+
+        if (concurrent)
+        {
+            _concurrent.Add(method);
+        }
+    }
 
     /// <summary>Registers what acts on <paramref name="method"/>, which expects no answer.</summary>
     public void OnNotification(string method, Func<JsonElement?, CancellationToken, Task> handler)
@@ -317,7 +352,11 @@ public sealed class JsonRpcConnection : IDisposable
         {
             while (_inbox.Reader.TryRead(out var message))
             {
-                if (message.IsRequest)
+                if (message.IsRequest && _concurrent.Contains(message.Method!))
+                {
+                    Detach(AnswerAsync(message), message.Method!);
+                }
+                else if (message.IsRequest)
                 {
                     await AnswerAsync(message).ConfigureAwait(false);
                 }
@@ -328,6 +367,21 @@ public sealed class JsonRpcConnection : IDisposable
             }
         }
     }
+
+    /// <summary>Lets an answer finish on its own, and says so if it cannot.</summary>
+    /// <remarks>
+    /// <see cref="AnswerAsync"/> already turns anything a handler throws into an error response, so
+    /// the only way this faults is a failure while sending -- which the drain loop must survive, since
+    /// dying here stops the session reading anything at all. Observed rather than dropped, because an
+    /// unobserved fault is a process-level event on some runtime configurations and a silence on the
+    /// rest, and neither is what a reader of the log needs.
+    /// </remarks>
+    private void Detach(Task answering, string method)
+        => _ = answering.ContinueWith(
+            faulted => _log.Error($"'{method}' could not be answered.", faulted.Exception!),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
 
     private async Task AnswerAsync(IncomingMessage message)
     {
