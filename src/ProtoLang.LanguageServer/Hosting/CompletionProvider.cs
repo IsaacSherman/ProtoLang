@@ -23,7 +23,7 @@ public sealed class CompletionRequest
         DocumentUri uri,
         OpenDocument document,
         WorkspaceConfiguration configuration,
-        ImportPathContext context)
+        CompletionSubject context)
     {
         Uri = uri;
         Document = document;
@@ -39,7 +39,11 @@ public sealed class CompletionRequest
     /// <summary>The settings this is about, as an object rather than as a generation.</summary>
     public WorkspaceConfiguration Configuration { get; }
 
-    internal ImportPathContext Context { get; }
+    /// <summary>Which kind of place the caret turned out to be in.</summary>
+    public CompletionContextKind Kind => Context.Kind;
+
+    /// <summary>What the caret is in, decided while nothing could race the decision.</summary>
+    internal CompletionSubject Context { get; }
 }
 
 /// <summary>
@@ -57,12 +61,19 @@ public sealed class CompletionRequest
 /// produces a list the user has to dismiss on every keystroke.
 /// </para>
 /// <para>
-/// <b>Nothing is compiled and protoc never runs.</b> The buffer is lexed and the include roots are
-/// listed, both of which answer while the user is still typing; waiting on a schema load would make
-/// completion arrive after the character that invalidated it. It follows that a document whose
-/// configuration file was refused still completes, which is deliberate: a broken
+/// <b>An import path is answered without compiling anything.</b> The buffer is lexed and the include
+/// roots are listed, both of which answer while the user is still typing; waiting on a schema load
+/// would make completion arrive after the character that invalidated it. It follows that a document
+/// whose configuration file was refused still completes its imports, which is deliberate: a broken
 /// <c>protolang.config.xml</c> stops compilation, and being unable to fix an import while it is
 /// broken would be the second problem caused by the first.
+/// </para>
+/// <para>
+/// <b>A schema context has no such option.</b> What may follow a dot, and what names are in scope at
+/// a position, are questions only the binder can answer, so those contexts compile the buffer the
+/// request was read against -- through <see cref="DocumentSemantics"/>, which is also what keeps that
+/// from being a compile per keystroke. The contrast is the useful part rather than an inconsistency:
+/// the cheap contexts stay cheap, and the ones that cannot be cheap say why.
 /// </para>
 /// <para>
 /// <b>Read in order, answered out of it.</b> <see cref="Read"/> runs on the one worker that reads the
@@ -195,8 +206,19 @@ public sealed class CompletionProvider
 
         var offset = document.Lines.OffsetOf(message.Position.Line + 1, message.Position.Character + 1);
 
-        return ImportPathContext.TryFind(document.Text, offset, out var context)
-            ? new CompletionRequest(uri!, document, _configuration.Current, context!)
+        // Import first, and nothing currently depends on that. What keeps the two apart is that a
+        // caret inside an import path is inside a string literal, and the general probe declines
+        // every string literal on its own -- so reversing these two lines produces the same answers.
+        // Said explicitly because it is the kind of ordering a reader assumes is load-bearing and
+        // then preserves for the wrong reason: a context added later that does mean to answer inside
+        // a string has to say so where strings are refused, not rely on being probed second.
+        if (ImportPathContext.TryFind(document.Text, offset, out var path))
+        {
+            return new CompletionRequest(uri!, document, _configuration.Current, path!);
+        }
+
+        return SchemaSubject.TryFind(document.Text, offset, out var subject)
+            ? new CompletionRequest(uri!, document, _configuration.Current, subject!)
             : null;
     }
 
@@ -259,11 +281,19 @@ public sealed class CompletionProvider
 
         try
         {
-            var items = Schemas(asked, cancellationToken);
+            // The arm the type's remarks promised. Each context produces its own candidates and says
+            // for itself whether the list is finished, because the two answers are one decision: a
+            // list is incomplete exactly when typing another character would widen it.
+            var (items, incomplete) = asked.Context switch
+            {
+                ImportPathContext path => (Schemas(asked, path, cancellationToken), true),
+                SchemaSubject subject => (Symbols(asked, subject, cancellationToken), false),
+                _ => ([], true),
+            };
 
             Require(asked);
 
-            return new CompletionList { Items = items };
+            return new CompletionList { Items = items, IsIncomplete = incomplete };
         }
         finally
         {
@@ -396,10 +426,11 @@ public sealed class CompletionProvider
     /// shares the two resolvers with <c>Resolve</c> rather than restating their precedence.
     /// </para>
     /// </remarks>
-    private IReadOnlyList<CompletionItem> Schemas(CompletionRequest asked, CancellationToken cancellationToken)
+    /// <summary>What this file could import, one directory level of every root.</summary>
+    private IReadOnlyList<CompletionItem> Schemas(
+        CompletionRequest asked, ImportPathContext context, CancellationToken cancellationToken)
     {
         var document = asked.Document;
-        var context = asked.Context;
 
         // Resolved from the configuration this request read rather than from whatever is current, so
         // the roots walked and the roots checked at the end are the same roots.
@@ -422,6 +453,23 @@ public sealed class CompletionProvider
             .. Enumerate(context.Directory, roots, cancellationToken).Candidates
                 .Select(candidate => Item(candidate, context, document)),
         ];
+    }
+
+    /// <summary>What the schema and the binder's own rules allow where the caret is.</summary>
+    /// <remarks>
+    /// Empty until the contexts land one at a time. A caret in one of these positions offers nothing
+    /// today, which is exactly what it offered before this arm existed -- so the seam widened without
+    /// any answer moving, and the sweep that says which context every offset is in holds that.
+    /// </remarks>
+    private static IReadOnlyList<CompletionItem> Symbols(
+        CompletionRequest asked, SchemaSubject subject, CancellationToken cancellationToken)
+    {
+        _ = asked;
+        _ = subject;
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        return [];
     }
 
     private static CompletionItem Item(SchemaCandidate candidate, ImportPathContext context, OpenDocument document)
