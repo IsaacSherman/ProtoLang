@@ -95,7 +95,7 @@ public sealed record ScaffoldOptions(
     /// </param>
     /// <remarks>
     /// The form for a caller that has a source path and no compilation in hand. It resolves imports
-    /// through <see cref="Compilation.GetSearchPaths"/> so it searches exactly where the compiler
+    /// through <see cref="Compilation.GetSearchPaths(string, IReadOnlyList{string})"/> so it searches exactly where the compiler
     /// searched; a caller holding a <see cref="CompilationResult"/> should pass
     /// <see cref="CompilationResult.SearchPaths"/> to the other overload and skip the re-derivation
     /// entirely, which is also the only route open to a compilation of a buffer that has no path.
