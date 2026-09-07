@@ -91,6 +91,14 @@ public sealed class CompletionRequest
 /// exist because the per-walk budget bounds one walk and says nothing about how many there are, and a
 /// slow root turns that into threads and open handles piling up behind a user who is simply typing.
 /// </para>
+/// <para>
+/// <b>Waiting for a slot is part of the request, not part of the queue.</b> Most of a busy request's
+/// life is spent waiting, and most of the reasons a request ends -- withdrawn, superseded, closed --
+/// arrive while it waits. So the wait sits inside the same cleanup as the walk: whichever way it ends
+/// the entry is retired, and the slot is given back only if it was ever taken. The alternative, an
+/// unconditional release, hands the pool a slot for a wait that failed and quietly raises the limit by
+/// one for every completion the client thought better of.
+/// </para>
 /// </remarks>
 public sealed class CompletionProvider
 {
@@ -206,11 +214,18 @@ public sealed class CompletionProvider
 
         var work = Supersede(asked.Uri, cancellationToken);
         var token = work.Token;
-
-        await _concurrency.WaitAsync(token).ConfigureAwait(false);
+        var acquired = false;
 
         try
         {
+            // Inside the cleanup, because waiting is where a request spends most of its life and
+            // cancelling one is the ordinary case: withdrawn by the client, superseded by the next
+            // keystroke, or abandoned because the document closed. Left outside, every one of those
+            // leaves its entry behind, and an entry nothing will ever retire makes this document look
+            // permanently busy to anything that counts what is outstanding.
+            await _concurrency.WaitAsync(token).ConfigureAwait(false);
+            acquired = true;
+
             // Task.Run rather than trusting the await above to have yielded. A semaphore with a slot
             // free completes synchronously, and the continuation would then run the walk on whichever
             // thread called this -- which is the one reading the wire, and the whole reason this is
@@ -219,13 +234,27 @@ public sealed class CompletionProvider
         }
         finally
         {
-            _concurrency.Release();
+            // Only what was taken is given back. Releasing unconditionally would hand the pool a slot
+            // for a wait that never succeeded, and the limit would climb by one for every request the
+            // client withdrew.
+            if (acquired)
+            {
+                _concurrency.Release();
+            }
+
             Retire(asked.Uri, work);
         }
     }
 
     private CompletionList Answer(CompletionRequest asked, CancellationToken cancellationToken)
     {
+        // Before the walk as well as after it. A request that queued behind a slow one may have been
+        // waiting for a while, and a buffer that moved in the meantime has already decided the answer:
+        // walking a root to produce something that will be refused spends the slot a live request is
+        // waiting for. Cancellation covers the cases that have a token -- withdrawal, supersession, a
+        // close -- and an edit is the one that does not.
+        Require(asked);
+
         Enter();
 
         try
@@ -272,6 +301,24 @@ public sealed class CompletionProvider
 
     private static JsonRpcException Refuse(string reason)
         => new(new ResponseError(ErrorCodes.ContentModified, reason + " Ask again."));
+
+    /// <summary>Abandons a document's outstanding completion, because it is no longer open.</summary>
+    /// <remarks>
+    /// The same obligation <see cref="CompileScheduler.ForgetAsync"/> already discharges for compiles,
+    /// and spec 26.1 states it once for both: what is outstanding for a document is abandoned when the
+    /// document closes. Without it a completion queued behind a slow one still takes its turn, walks a
+    /// root for a buffer the editor has shut, and is refused at the end -- having spent one of the few
+    /// slots a live request was waiting for. Refusing it later is correct and too late.
+    /// </remarks>
+    public void Forget(DocumentUri document)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+
+        if (_outstanding.TryRemove(document.Key, out var work))
+        {
+            Cancel(work);
+        }
+    }
 
     /// <summary>
     /// Takes this document's outstanding slot, cancelling whoever had it, and links the client's own

@@ -227,7 +227,7 @@ server already holds. A handler that **leaves the process** — one that opens a
 a tool — opts out with `OnRequest(..., concurrent: true)`, because answered in order it holds the
 reading worker for as long as the outside world takes, and behind it sit every `didChange`, every
 `didClose`, and the `$/cancelRequest` that would have shortened it. Completion is the only such
-handler today, and what it owes in return is three things, all of them easy to get wrong:
+handler today, and what it owes in return is four things, all of them easy to get wrong:
 
 - **Settle which buffer the request is about before yielding.** `CompletionProvider.Read` runs on the
   ordered worker; only the walk is deferred. Deferring the lookup lets the `didChange` behind the
@@ -239,6 +239,12 @@ handler today, and what it owes in return is three things, all of them easy to g
 - **Bound its own outstanding work.** A newer completion supersedes the outstanding one for its
   document, exactly as a keystroke supersedes a scheduled compile, and a semaphore bounds how many
   run across documents. A per-walk budget bounds one walk and says nothing about how many there are.
+- **Give up the ones nobody is waiting for, before they take a slot.** `didClose` calls
+  `CompletionProvider.Forget` beside `CompileScheduler.ForgetAsync`, and a request that reaches the
+  front of the queue re-checks freshness before it walks rather than only after — an edit is the one
+  reason for abandonment that carries no cancellation to notice. Waiting for a slot is part of the
+  request: it sits inside the same cleanup as the walk, so a request that ends while waiting is still
+  retired, and gives back only a slot it actually took.
 
 The buffer the client sent is the source of truth and the file on disk is never read for an open
 document. Edits are applied incrementally, in order, each against the text the one before it

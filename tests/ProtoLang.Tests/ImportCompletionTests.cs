@@ -757,9 +757,12 @@ public class ImportCompletionTests
     /// message is dequeued at all.
     /// </para>
     /// <para>
-    /// Two things give the defect away. The walk is never reached, because the position measured
-    /// against the newer and shorter text lands outside the string; or it is reached for the wrong
-    /// directory. Both are asserted, because which one happens depends on where the read landed.
+    /// What gives the defect away is the shape of the answer. A position measured against the newer
+    /// and shorter text lands outside the string, no context is recognized, and the client is sent an
+    /// empty list -- a successful answer about nothing, where the correct behaviour is a refusal. So
+    /// the refusal is the assertion. The directory a walk was asked about is checked too where a walk
+    /// happened, but it is not waited for: a request whose buffer moved while it waited its turn is
+    /// refused before it walks, which is the freshness rule working rather than the ordering failing.
     /// </para>
     /// </remarks>
     [Fact]
@@ -798,9 +801,6 @@ public class ImportCompletionTests
                     });
             }
 
-            await gate.EnteredAsync(TimeSpan.FromSeconds(5));
-            Assert.Equal(["billing/"], gate.Directories);
-
             // An ordered request behind the edits: its answer cannot come back until they have been
             // applied, so releasing the walk now means the walk is answering about text that moved.
             // Capped well under the client's own patience, because a server that has stopped reading
@@ -816,6 +816,12 @@ public class ImportCompletionTests
             var answered = await client.AnswerToAsync(completion);
 
             Assert.Equal(ErrorCodes.ContentModified, answered.Error!.Code);
+
+            // The walk is not waited for, because it may rightly never happen: a request whose buffer
+            // moved while it waited its turn is refused before it walks. Where one did happen it says
+            // the same thing the refusal says -- the directory came from the text the client was
+            // looking at when it asked, and not from what the edits behind it produced.
+            Assert.All(gate.Directories, directory => Assert.Equal("billing/", directory));
         }
     }
 
@@ -842,6 +848,18 @@ public class ImportCompletionTests
             => Assert.True(
                 await _entered.WaitAsync(patience ?? LanguageServerClient.Patience),
                 "a walk that was expected to start never did");
+
+        /// <summary>That no further walk begins, which is a bounded wait rather than a proof.</summary>
+        /// <remarks>
+        /// A walk handed a slot it should not have starts within the time it takes to queue one work
+        /// item, so a second is generous by orders of magnitude. The asymmetry is deliberate and worth
+        /// naming: with the slot accounted for correctly this cannot fail, and it is only the
+        /// detection of the defect that is timing-dependent.
+        /// </remarks>
+        public async Task NotEnteredAsync(TimeSpan patience)
+            => Assert.False(
+                await _entered.WaitAsync(patience),
+                "a walk started while the only slot was held, so a slot was conceded that was never taken");
 
         public void Open() => _open.Set();
 
@@ -945,6 +963,183 @@ public class ImportCompletionTests
         var answered = await client.AnswerToAsync(completion);
 
         Assert.Equal(ErrorCodes.RequestCancelled, answered.Error!.Code);
+    }
+
+    // ------------------------------------------------------- what becomes of one nobody wants
+
+    /// <summary>A buffer whose caret sits in an empty import path, which is where completion is asked.</summary>
+    private const string EmptyPath = "import proto \"\";";
+
+    /// <summary>Opens a buffer in the store and starts a completion for the caret inside its import.</summary>
+    private static (DocumentUri Uri, Task<CompletionList> Answering) Ask(
+        CompletionProvider provider,
+        DocumentStore documents,
+        string root,
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        var uri = Uri(Path.Combine(root, name + ".protolang"));
+        documents.Open(uri, "protolang", 1, EmptyPath);
+
+        var asked = provider.Read(At(uri, PositionOf(EmptyPath, PathStart(EmptyPath))));
+
+        return (uri, provider.AnswerAsync(Assert.IsType<CompletionRequest>(asked), cancellationToken));
+    }
+
+    /// <summary>A provider with one slot, so the second request made of it is queued rather than run.</summary>
+    private static CompletionProvider Queueing(DocumentStore documents, Gate gate)
+        => new(documents, Configuration(), Loaders(), concurrency: 1) { Enumerate = gate.Walk };
+
+    /// <summary>
+    /// A request withdrawn before it ever got a slot leaves nothing behind. Not its entry, which
+    /// nothing afterwards would retire and which makes the document look permanently busy to anything
+    /// counting what is outstanding; and not a slot, because it never held one and returning it would
+    /// raise the limit by one for every completion a client thought better of.
+    /// </summary>
+    /// <remarks>
+    /// Waiting is where a busy request spends most of its life, and withdrawal while waiting is the
+    /// ordinary case rather than the exotic one -- a keystroke supersedes the list the user is looking
+    /// at, and the client cancels what it asked for a character ago.
+    /// </remarks>
+    [Fact]
+    public async Task ACompletionWithdrawnWhileWaitingForASlotLeavesNothingBehind()
+    {
+        using var gate = new Gate();
+
+        var root = Workspace();
+        var documents = new DocumentStore();
+        var provider = Queueing(documents, gate);
+
+        var holding = Ask(provider, documents, root, "holding");
+        await gate.EnteredAsync(TimeSpan.FromSeconds(5));
+
+        using var withdrawn = new CancellationTokenSource();
+        var queued = Ask(provider, documents, root, "queued", withdrawn.Token);
+        withdrawn.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued.Answering);
+
+        Assert.True(
+            provider.Outstanding == 1,
+            $"{provider.Outstanding} documents look busy, and only the one still walking is");
+
+        // Started while the gate still holds the only slot, so if the withdrawal conceded one it never
+        // took, this walk begins beside that one instead of waiting behind it.
+        var following = Ask(provider, documents, root, "following");
+        await gate.NotEnteredAsync(TimeSpan.FromSeconds(1));
+
+        gate.Open();
+
+        Assert.NotEmpty((await holding.Answering).Items);
+        Assert.NotEmpty((await following.Answering).Items);
+        Assert.Equal(0, provider.Outstanding);
+    }
+
+    /// <summary>
+    /// Closing a document abandons the completion outstanding for it -- the same obligation the compile
+    /// queue discharges in the same handler, and which spec 26.1 states once for both. Driven over the
+    /// wire, because what is under test is that <c>didClose</c> reaches the provider at all.
+    /// </summary>
+    [Fact]
+    public async Task ClosingADocumentAbandonsTheCompletionOutstandingForIt()
+    {
+        using var gate = new Gate();
+
+        var (client, uri, text, _) = await OpenAsync("import proto \"\";" + Body);
+        await using var _client = client;
+
+        client.Host.Completion.Enumerate = gate.Walk;
+
+        var completion = client.Ask(
+            Methods.Completion,
+            new CompletionParams
+            {
+                TextDocument = new TextDocumentIdentifier { Uri = uri },
+                Position = PositionOf(text, PathStart(text)),
+            });
+
+        await gate.EnteredAsync(TimeSpan.FromSeconds(5));
+
+        client.Notify(
+            Methods.DidClose,
+            new DidCloseTextDocumentParams { TextDocument = new TextDocumentIdentifier { Uri = uri } });
+
+        var answered = await client.AnswerToAsync(completion);
+
+        Assert.Equal(ErrorCodes.RequestCancelled, answered.Error!.Code);
+        Assert.Equal(0, client.Host.Completion.Outstanding);
+    }
+
+    /// <summary>
+    /// And one still waiting for a slot never takes it. This is the case the limit makes likely rather
+    /// than rare: a queued request waits for as long as the walk ahead of it takes, which is exactly
+    /// the window in which somebody shuts the file. Refusing it at the end is correct and one slot too
+    /// late -- the slot a live request was waiting for.
+    /// </summary>
+    [Fact]
+    public async Task ACompletionQueuedForADocumentThatClosesNeverStartsWalking()
+    {
+        using var gate = new Gate();
+
+        var root = Workspace();
+        var documents = new DocumentStore();
+        var provider = Queueing(documents, gate);
+
+        var holding = Ask(provider, documents, root, "holding");
+        await gate.EnteredAsync(TimeSpan.FromSeconds(5));
+
+        var queued = Ask(provider, documents, root, "queued");
+
+        documents.Close(queued.Uri);
+        provider.Forget(queued.Uri);
+
+        // The slot is released before the queued request is awaited, so a close that failed to abandon
+        // it produces a walk and a refusal rather than a wait for a cancellation that is never coming.
+        // A test that hangs where it should fail says nothing, slowly.
+        gate.Open();
+        Assert.NotEmpty((await holding.Answering).Items);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued.Answering);
+
+        Assert.True(
+            gate.Directories.Count == 1,
+            $"{gate.Directories.Count} walks ran, and the one for the closed document should not have");
+    }
+
+    /// <summary>
+    /// A buffer that moved while its completion waited has already settled the answer, so the walk is
+    /// never started. An edit is the reason for abandonment that carries no token -- withdrawal,
+    /// supersession and a close all cancel, and typing does not -- so the freshness check is the only
+    /// thing that can catch it, and asking only at the end means paying for the walk to find out.
+    /// </summary>
+    [Fact]
+    public async Task ACompletionQueuedWhileItsBufferMovesIsRefusedBeforeItWalks()
+    {
+        using var gate = new Gate();
+
+        var root = Workspace();
+        var documents = new DocumentStore();
+        var provider = Queueing(documents, gate);
+
+        var holding = Ask(provider, documents, root, "holding");
+        await gate.EnteredAsync(TimeSpan.FromSeconds(5));
+
+        var queued = Ask(provider, documents, root, "queued");
+
+        documents.Apply(
+            queued.Uri,
+            2,
+            [new TextDocumentContentChangeEvent { Text = "import proto \"billing/\";" }]);
+
+        gate.Open();
+        Assert.NotEmpty((await holding.Answering).Items);
+
+        var refusal = await Assert.ThrowsAsync<JsonRpcException>(() => queued.Answering);
+
+        Assert.Equal(ErrorCodes.ContentModified, refusal.Error.Code);
+        Assert.True(
+            gate.Directories.Count == 1,
+            $"{gate.Directories.Count} walks ran, and the one whose buffer had moved should not have");
     }
 
     // ------------------------------------------------------- what it reads to answer

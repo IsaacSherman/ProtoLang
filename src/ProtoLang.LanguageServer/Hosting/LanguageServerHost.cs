@@ -419,6 +419,11 @@ public sealed class LanguageServerHost : IDisposable
 
         _documents.Close(uri);
 
+        // Every kind of outstanding work for this document, not just the compile. A completion is the
+        // other kind, it can be queued behind a slow walk for as long as that walk takes, and nothing
+        // else would ever tell it the buffer it describes has gone.
+        _completion.Forget(uri);
+
         return _scheduler.ForgetAsync(uri);
     }
 
