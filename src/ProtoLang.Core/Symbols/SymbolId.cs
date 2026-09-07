@@ -79,9 +79,9 @@ public readonly record struct SymbolId
 
     /// <summary>The identity of a protobuf message field.</summary>
     /// <remarks>
-    /// <see cref="FieldDescriptor.FullName"/> is <c>package.Message.field</c>, so two fields with
-    /// the same name on different messages are two symbols. That case is the whole reason schema
-    /// identity cannot be a name.
+    /// A field's <see cref="DescriptorBase.FullName"/> is <c>package.Message.field</c>, so two
+    /// fields with the same name on different messages are two symbols. That case is the whole
+    /// reason schema identity cannot be a name.
     /// </remarks>
     public static SymbolId ForField(FieldDescriptor field)
         => new(SymbolKind.Field, field.FullName);
