@@ -50,6 +50,7 @@ public sealed class LanguageServerHost : IDisposable
     private readonly ConfigurationSync _configuration;
     private readonly LoaderPool _loaders;
     private readonly DiagnosticRouter _router;
+    private readonly DocumentSemantics _semantics;
     private readonly CompileScheduler _scheduler;
     private readonly CompletionProvider _completion;
 
@@ -68,6 +69,12 @@ public sealed class LanguageServerHost : IDisposable
             parameters => _connection.NotifyAsync(Methods.PublishDiagnostics, parameters),
             uri => _documents.Find(uri)?.Version);
 
+        // One per server rather than one per component, because it is the point of it: a compile the
+        // scheduler ran and a question a request asks about the same untouched buffer are the same
+        // compile, and two of these would be two answers about one document with nothing keeping them
+        // in agreement.
+        _semantics = new DocumentSemantics(_loaders);
+
         _scheduler = new CompileScheduler(
             _documents,
             _configuration,
@@ -75,7 +82,8 @@ public sealed class LanguageServerHost : IDisposable
             _router,
             () => _mapper,
             _log,
-            debounce);
+            debounce,
+            semantics: _semantics);
 
         _completion = new CompletionProvider(_documents, _configuration, _loaders);
 
@@ -106,6 +114,14 @@ public sealed class LanguageServerHost : IDisposable
     /// else to stand to do that.
     /// </remarks>
     public CompletionProvider Completion => _completion;
+
+    /// <summary>What compiles a buffer for the questions asked between keystrokes, for a test and #58.</summary>
+    /// <remarks>
+    /// Published so that "this buffer is compiled once however many questions are asked of it" is a
+    /// measurement rather than an argument, which is the same reason <see cref="Compilations"/> is
+    /// published and the only way to tell a cache that is working from one that silently is not.
+    /// </remarks>
+    public DocumentSemantics Semantics => _semantics;
 
     /// <summary>Serves until the client goes away or <c>exit</c> arrives.</summary>
     public Task RunAsync(CancellationToken cancellationToken = default)
@@ -423,6 +439,11 @@ public sealed class LanguageServerHost : IDisposable
         // other kind, it can be queued behind a slow walk for as long as that walk takes, and nothing
         // else would ever tell it the buffer it describes has gone.
         _completion.Forget(uri);
+
+        // And what was remembered about it. Every question comes through the store, so once the
+        // document is closed nothing can ask -- and an entry nothing can ask for is a syntax tree and
+        // an IR module held until the process exits.
+        _semantics.Forget(uri);
 
         return _scheduler.ForgetAsync(uri);
     }
