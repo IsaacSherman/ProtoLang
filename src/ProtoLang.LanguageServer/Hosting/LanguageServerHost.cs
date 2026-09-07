@@ -120,10 +120,7 @@ public sealed class LanguageServerHost : IDisposable
         _connection.OnRequest(Methods.Initialize, (parameters, _) => Initialize(parameters));
         _connection.OnRequest(Methods.Shutdown, (_, _) => Shutdown());
         _connection.OnRequest(Methods.SemanticTokensFull, (parameters, _) => Answer<SemanticTokensParams>(parameters, Classify));
-        _connection.OnRequest(
-            Methods.Completion,
-            (parameters, token) => AnswerOffThread<CompletionParams>(parameters, token, _completion.Complete),
-            concurrent: true);
+        _connection.OnRequest(Methods.Completion, Complete, concurrent: true);
 
         _connection.OnNotification(Methods.Initialized, (_, token) => Initialized(token));
         _connection.OnNotification(Methods.Exit, (_, _) => Exit());
@@ -155,7 +152,9 @@ public sealed class LanguageServerHost : IDisposable
         return Task.FromResult(handler(LspJson.Read<T>(parameters) ?? throw Missing<T>()));
     }
 
-    /// <summary>Runs a request handler that goes to the file system, off the thread that reads the wire.</summary>
+    /// <summary>
+    /// Answers a completion: read here, in order with everything else, and walked anywhere.
+    /// </summary>
     /// <remarks>
     /// <para>
     /// The connection drains one queue with one worker, in order, and <see cref="Answer{T}"/> runs its
@@ -167,22 +166,31 @@ public sealed class LanguageServerHost : IDisposable
     /// <c>CompileScheduler.Schedule</c> was changed for the same reason and says so.
     /// </para>
     /// <para>
-    /// The lifecycle check and the deserialization stay on the worker: both are cheap, and a request
-    /// that arrived too early or carried nothing is refused rather than scheduled. What moves is the
-    /// work, and it takes the request's own token with it, so a client that withdraws the question
-    /// stops the walk instead of waiting for its answer.
+    /// <b>What may not move off this worker is deciding which buffer the request is about.</b>
+    /// <c>CompletionProvider.Read</c> is called here, before this method returns and therefore before
+    /// the next message is dequeued, precisely so that a <c>didChange</c> queued behind the request
+    /// cannot be applied first. Deferring it would leave the position measured against text the client
+    /// had not sent when it asked -- and every staleness check afterwards would agree, because they
+    /// would all be asking about the same wrong document.
+    /// </para>
+    /// <para>
+    /// The lifecycle check and the deserialization stay here for the same reason they always did: both
+    /// are cheap, and a request that arrived too early or carried nothing is refused rather than
+    /// scheduled. What leaves is the walk, and it takes the request's own token with it.
     /// </para>
     /// </remarks>
-    private Task<object?> AnswerOffThread<T>(
-        JsonElement? parameters,
-        CancellationToken cancellationToken,
-        Func<T, CancellationToken, object?> handler)
+    private async Task<object?> Complete(JsonElement? parameters, CancellationToken cancellationToken)
     {
         RequireRunning();
 
-        var message = LspJson.Read<T>(parameters) ?? throw Missing<T>();
+        var message = LspJson.Read<CompletionParams>(parameters) ?? throw Missing<CompletionParams>();
 
-        return Task.Run(() => handler(message, cancellationToken), cancellationToken);
+        if (_completion.Read(message) is not { } asked)
+        {
+            return CompletionProvider.Nothing;
+        }
+
+        return await _completion.AnswerAsync(asked, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Runs a notification handler, dropping the message when it arrives out of turn.</summary>
