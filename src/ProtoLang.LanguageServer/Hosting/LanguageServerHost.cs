@@ -85,7 +85,8 @@ public sealed class LanguageServerHost : IDisposable
             debounce,
             semantics: _semantics);
 
-        _completion = new CompletionProvider(_documents, _configuration, _loaders);
+        _completion = new CompletionProvider(
+            _documents, _configuration, _loaders, semantics: _semantics);
 
         Register();
     }

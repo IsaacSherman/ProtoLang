@@ -551,15 +551,21 @@ public class ImportCompletionTests
         Assert.Null(silent.Capabilities.CompletionProvider);
     }
 
-    /// <summary>The two characters that open a path segment, which is when a client should ask.</summary>
+    /// <summary>Every character after which a client should ask without being asked to.</summary>
+    /// <remarks>
+    /// One flat list serving every context, because the protocol cannot scope a trigger character to
+    /// a position. The quote and the separator open a path segment; the dot is member completion's,
+    /// and is asserted here rather than only beside the members because what is published is one list
+    /// and a context that quietly dropped another context's character would be found nowhere else.
+    /// </remarks>
     [Fact]
-    public async Task TheTriggerCharactersAreTheOnesThatOpenAPathSegment()
+    public async Task TheTriggerCharactersAreTheOnesAfterWhichAnAnswerWouldHaveChanged()
     {
         await using var client = LanguageServerClient.Create();
 
         var offered = await client.InitializeAsync(LanguageServerClient.FullCapabilities, null);
 
-        Assert.Equal(["\"", "/"], offered.Capabilities.CompletionProvider!.TriggerCharacters);
+        Assert.Equal(["\"", "/", "."], offered.Capabilities.CompletionProvider!.TriggerCharacters);
     }
 
     // ------------------------------------------------------- answering about text that is still there

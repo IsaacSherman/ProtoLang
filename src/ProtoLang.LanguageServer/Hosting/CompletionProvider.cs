@@ -1,5 +1,9 @@
 using System.Collections.Concurrent;
+using Google.Protobuf.Reflection;
 using ProtoLang.Binding;
+using ProtoLang.Ir;
+using ProtoLang.Semantics;
+using ProtoLang.Types;
 using ProtoLang.LanguageServer.Protocol;
 using ProtoLang.LanguageServer.Protocol.Lsp;
 using ProtoLang.LanguageServer.Workspace;
@@ -13,7 +17,7 @@ namespace ProtoLang.LanguageServer.Hosting;
 /// <remarks>
 /// Everything here is settled while messages are still being read in order, and none of it can move
 /// afterwards: <see cref="OpenDocument"/> and <see cref="WorkspaceConfiguration"/> are both immutable,
-/// so holding the objects holds the question. What comes later -- listing directories -- may take as
+/// so holding the objects holds the question. What comes later -- listing directories, compiling -- may take as
 /// long as it takes without changing what the answer is about, and can be checked against these two
 /// before it is sent.
 /// </remarks>
@@ -47,18 +51,17 @@ public sealed class CompletionRequest
 }
 
 /// <summary>
-/// What could be typed at a position. Today that is one thing: the schemas an <c>import proto</c>
-/// path could name.
+/// What could be typed at a position: the schemas an <c>import proto</c> path could name, and the
+/// members a dot could reach.
 /// </summary>
 /// <remarks>
 /// <para>
 /// <b>Context first, candidates second.</b> This asks which of the language's completion contexts the
-/// cursor is in before it asks what belongs there, and it currently recognizes exactly one. That is
-/// one indirection more than #56 needs on its own and one less reshaping than #43 would otherwise
-/// have to do: member completion after a dot, a bare identifier, a type position are three more
-/// contexts, and each is an arm here rather than a second entry point beside it. A cursor in no
-/// recognized context offers nothing, which is the only correct answer -- an editor that guesses
-/// produces a list the user has to dismiss on every keystroke.
+/// cursor is in before it asks what belongs there. A bare identifier, a type position, a receiver
+/// after <c>extend</c> and a name inside a <c>test</c> are the ones still to come, and each is an arm
+/// in <see cref="Read"/> and in the switch that answers, rather than a second entry point beside
+/// them. A cursor in no recognized context offers nothing, which is the only correct answer -- an
+/// editor that guesses produces a list the user has to dismiss on every keystroke.
 /// </para>
 /// <para>
 /// <b>An import path is answered without compiling anything.</b> The buffer is lexed and the include
@@ -124,6 +127,7 @@ public sealed class CompletionProvider
     private readonly DocumentStore _documents;
     private readonly ConfigurationSync _configuration;
     private readonly LoaderPool _loaders;
+    private readonly DocumentSemantics _semantics;
     private readonly SemaphoreSlim _concurrency;
 
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _outstanding = new(StringComparer.Ordinal);
@@ -135,21 +139,37 @@ public sealed class CompletionProvider
         DocumentStore documents,
         ConfigurationSync configuration,
         LoaderPool loaders,
-        int concurrency = DefaultConcurrency)
+        int concurrency = DefaultConcurrency,
+        DocumentSemantics? semantics = null)
     {
         _documents = documents ?? throw new ArgumentNullException(nameof(documents));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         _loaders = loaders ?? throw new ArgumentNullException(nameof(loaders));
+
+        // Shared where it is given, for the reason CompileScheduler takes the same argument: a
+        // compile a keystroke scheduled and a list asked for between two keystrokes should be one
+        // compile. A caller with no interest in that gets one of its own.
+        _semantics = semantics ?? new DocumentSemantics(loaders);
+
         _concurrency = new SemaphoreSlim(concurrency, concurrency);
     }
 
     /// <summary>The characters that should make a client ask without being asked to.</summary>
     /// <remarks>
-    /// The two that open a path segment. The quote starts a path and the separator starts a segment
-    /// inside one, and since candidates are enumerated a directory at a time, the separator is
-    /// precisely the keystroke after which the previous answer stopped describing anything.
+    /// <para>
+    /// Two open a path segment. The quote starts a path and the separator starts a segment inside
+    /// one, and since candidates are enumerated a directory at a time, the separator is precisely the
+    /// keystroke after which the previous answer stopped describing anything.
+    /// </para>
+    /// <para>
+    /// The dot is the third, and it is the one that makes member completion work at all: it is typed
+    /// at the moment the member name is genuinely missing, which is the state the binder keeps the
+    /// receiver's type through. One flat list rather than one per context, because the protocol has
+    /// no way to scope a trigger character to a position -- so the list is the union, and each
+    /// context still decides for itself whether it has anything to say.
+    /// </para>
     /// </remarks>
-    public static IReadOnlyList<string> TriggerCharacters { get; } = ["\"", "/"];
+    public static IReadOnlyList<string> TriggerCharacters { get; } = ["\"", "/", "."];
 
     /// <summary>Where candidates come from.</summary>
     /// <remarks>
@@ -457,20 +477,159 @@ public sealed class CompletionProvider
 
     /// <summary>What the schema and the binder's own rules allow where the caret is.</summary>
     /// <remarks>
-    /// Empty until the contexts land one at a time. A caret in one of these positions offers nothing
-    /// today, which is exactly what it offered before this arm existed -- so the seam widened without
-    /// any answer moving, and the sweep that says which context every offset is in holds that.
+    /// The contexts land one at a time; a caret in one that has not landed offers nothing, which is
+    /// what it offered before this arm existed.
     /// </remarks>
-    private static IReadOnlyList<CompletionItem> Symbols(
+    private IReadOnlyList<CompletionItem> Symbols(
         CompletionRequest asked, SchemaSubject subject, CancellationToken cancellationToken)
     {
-        _ = asked;
-        _ = subject;
+        if (!subject.PrecededByDot)
+        {
+            return [];
+        }
+
+        var compiled = _semantics.For(asked.Document, asked.Configuration, cancellationToken);
+
+        if (compiled.Semantics is not { } model || compiled.Result is not { } result)
+        {
+            return [];
+        }
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        return [];
+        return Members(ReceiverAt(model, subject), result, subject, asked.Document);
     }
+
+    /// <summary>The type of the value the caret's dot is reaching into, or null when it is unknown.</summary>
+    /// <remarks>
+    /// <para>
+    /// Two shapes, and the first is the one that matters. <see cref="IrMissingMemberAccess"/> is what
+    /// the binder leaves where a member name has not been written yet -- <c>line.</c> with the caret
+    /// after the dot, which is the state completion is triggered in -- and it exists precisely so the
+    /// receiver's type survives a binding that otherwise failed. Everything else about that
+    /// expression is an error; the one thing that is not is the answer.
+    /// </para>
+    /// <para>
+    /// The second is a member that did resolve, so that invoking completion on a name already written
+    /// offers its siblings rather than nothing.
+    /// </para>
+    /// <para>
+    /// <b>A name written but unresolved is the gap, and it is deliberate for now.</b> The binder
+    /// collapses <c>line.nosuch</c> to an error literal and the receiver goes with it, so an explicit
+    /// invocation part-way through typing a member name offers nothing. It is not the path the client
+    /// ordinarily takes -- the list is requested when the dot is typed, when the name is genuinely
+    /// missing, and is declared complete so the client filters the rest locally -- and closing it
+    /// means having the binder keep the receiver here as it already does one branch above, which is a
+    /// change to what the IR preserves rather than to this file.
+    /// </para>
+    /// </remarks>
+    private static PlType? ReceiverAt(SemanticModel model, SchemaSubject subject)
+    {
+        var at = model.IrAt(subject.Start);
+
+        if (at?.Enclosing<IrMissingMemberAccess>() is { } missing)
+        {
+            return missing.Receiver.Type;
+        }
+
+        return at?.Enclosing<IrFieldAccess>()?.Receiver.Type;
+    }
+
+    /// <summary>What may be written after a dot on a value of this type.</summary>
+    /// <remarks>
+    /// <para>
+    /// The rules are the binder's and are borrowed rather than restated. A map field is excluded on
+    /// the descriptor, because reading one is <c>PL0038</c> and a map never becomes a
+    /// <see cref="PlType"/> at all -- the same exclusion, for the same reason, that
+    /// <c>ScopeSearch.ReachableFields</c> makes. A method is offered because it is reachable through a
+    /// call, and it is offered with its parentheses because naming one without calling it is
+    /// <c>PL0040</c>.
+    /// </para>
+    /// <para>
+    /// A repeated field offers nothing, which is the whole answer rather than an omission: there is no
+    /// member access into a repetition, only <c>for x in ...</c>, so offering the element type's
+    /// members would offer names that cannot be written where the caret is. An unknown receiver
+    /// offers nothing for the same reason -- returning a wrong list is worse than returning none.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<CompletionItem> Members(
+        PlType? receiver, CompilationResult result, SchemaSubject subject, OpenDocument document)
+        => receiver switch
+        {
+            MessageType message =>
+            [
+                .. message.Descriptor.Fields.InDeclarationOrder()
+                    .Where(field => !field.IsMap)
+                    .Select(field => Member(
+                        field.Name,
+                        CompletionItemKind.Field,
+                        TypeFactory.FromField(field).DisplayName,
+                        Documentation(result, field),
+                        rank: "0",
+                        subject,
+                        document)),
+
+                .. result.Module is { } module
+                    ? module.MethodsOn(message.Descriptor.FullName).Select(method => Member(
+                        method.Name + "()",
+                        CompletionItemKind.Method,
+                        method.Signature.DisplayName,
+                        null,
+                        rank: "1",
+                        subject,
+                        document))
+                    : [],
+            ],
+
+            EnumPlType enumeration =>
+            [
+                .. enumeration.Descriptor.Values.Select(value => Member(
+                    value.Name,
+                    CompletionItemKind.EnumMember,
+                    enumeration.Descriptor.FullName,
+                    Documentation(result, value),
+                    rank: "0",
+                    subject,
+                    document)),
+            ],
+
+            _ => [],
+        };
+
+    /// <summary>The leading comment written about a schema declaration, where there is one.</summary>
+    private static string? Documentation(CompilationResult result, FieldDescriptor field)
+        => result.Schema?.DeclarationOf(field)?.Documentation.Leading;
+
+    private static string? Documentation(CompilationResult result, EnumValueDescriptor value)
+        => result.Schema?.DeclarationOf(value)?.Documentation.Leading;
+
+    private static CompletionItem Member(
+        string label,
+        CompletionItemKind kind,
+        string detail,
+        string? documentation,
+        string rank,
+        SchemaSubject subject,
+        OpenDocument document)
+        => new()
+        {
+            Label = label,
+            Kind = kind,
+            Detail = detail,
+            Documentation = documentation,
+            FilterText = label,
+
+            // A rank ahead of the name, so the kinds stay grouped however the client sorts within
+            // them. Ordinal on the name inside a rank, which is the order the schema declared them.
+            SortText = rank + label,
+            InsertTextFormat = InsertTextFormat.PlainText,
+
+            // The whole identifier under the caret, not the part typed before the list was built. The
+            // list is declared complete, so the client re-applies an item it already holds after the
+            // user types more -- and a range covering only the old prefix would leave the rest behind.
+            TextEdit = new TextEdit(
+                new Range(At(document, subject.Start), At(document, subject.End)), label),
+        };
 
     private static CompletionItem Item(SchemaCandidate candidate, ImportPathContext context, OpenDocument document)
     {

@@ -8,6 +8,27 @@ namespace ProtoLang.LanguageServer.Protocol.Lsp;
 /// </remarks>
 public enum CompletionItemKind
 {
+    /// <summary>A ProtoLang method declared on the receiver in an <c>extend</c> block.</summary>
+    Method = 2,
+
+    /// <summary>A protobuf field of the receiver message.</summary>
+    Field = 5,
+
+    /// <summary>A local, a parameter, or a loop binding.</summary>
+    Variable = 6,
+
+    /// <summary>A protobuf message type.</summary>
+    Class = 7,
+
+    /// <summary>A protobuf enum type.</summary>
+    Enum = 13,
+
+    /// <summary>A ProtoLang keyword.</summary>
+    Keyword = 14,
+
+    /// <summary>One value of a protobuf enum.</summary>
+    EnumMember = 20,
+
     File = 17,
     Folder = 19,
 }
