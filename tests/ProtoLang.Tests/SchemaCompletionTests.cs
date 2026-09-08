@@ -540,6 +540,196 @@ public class SchemaCompletionTests
                 diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code)));
     }
 
+    // ------- what a bare identifier offers
+
+    /// <summary>
+    /// Written with explicit newlines rather than as a raw string literal, so a marker containing one
+    /// matches whatever line endings the file itself is stored with.
+    /// </summary>
+    private const string Scoped =
+        "extend Outer {\n"
+        + "    fn helper(scale: int64) -> int64 { return count * scale; }\n"
+        + "\n"
+        + "    fn f(given: int64) -> int64 {\n"
+        + "        var local: int64 = 1;\n"
+        + "        for each in nested_values {\n"
+        + "            local = local + 1;\n"
+        + "        }\n"
+        + "        return local;\n"
+        + "    }\n"
+        + "}\n";
+
+    [Fact]
+    public async Task ABareIdentifierOffersTheLocalsAndParametersInScope()
+    {
+        var offered = await OfferedAsync(Scoped, "return loc");
+
+        Assert.Contains("local", Labels(offered));
+        Assert.Contains("given", Labels(offered));
+    }
+
+    /// <summary>
+    /// The language permits a bare field reference against the implicit receiver, so the receiver's
+    /// fields are names that bind exactly where a local does.
+    /// </summary>
+    [Fact]
+    public async Task ABareIdentifierOffersTheFieldsOfTheImplicitReceiver()
+    {
+        var offered = await OfferedAsync(Scoped, "return loc");
+
+        Assert.Contains("count", Labels(offered));
+        Assert.Contains("label", Labels(offered));
+    }
+
+    /// <summary>
+    /// A bare name resolves against the implicit receiver, so 'helper()' binds -- while 'helper'
+    /// alone is PL0037, since BindName never looks at methods. The parentheses are what make the item
+    /// one that binds.
+    /// </summary>
+    [Fact]
+    public async Task ABareIdentifierOffersMethodsAsCallsRatherThanAsNames()
+    {
+        var offered = await OfferedAsync(Scoped, "return loc");
+
+        Assert.Contains("helper()", Labels(offered));
+        Assert.DoesNotContain("helper", Labels(offered));
+    }
+
+    /// <summary>
+    /// ScopeAt already drops a map field, for the reason the binder refuses one. Asserted here as
+    /// well as after a dot because the two contexts reach the field set by different routes.
+    /// </summary>
+    [Fact]
+    public async Task ABareIdentifierNeverOffersAMapField()
+    {
+        var offered = await OfferedAsync(
+            "extend Mapped {\n    fn f() -> int64 {\n        return count;\n    }\n}\n",
+            "return cou");
+
+        Assert.Contains("count", Labels(offered));
+        Assert.DoesNotContain("tags", Labels(offered));
+    }
+
+    /// <summary>
+    /// Where a statement can begin, both sets apply. Part-way through an expression only the
+    /// expression starters can go, because 'return return;' is not something an author can accept.
+    /// </summary>
+    [Fact]
+    public async Task AKeywordIsOfferedOnlyWhereTheGrammarWouldTakeIt()
+    {
+        var starting = await OfferedAsync(Scoped, "var local: int64 = 1;\n");
+        var midExpression = await OfferedAsync(Scoped, "return loc");
+
+        foreach (var keyword in new[] { "var", "return", "if", "while", "for" })
+        {
+            Assert.Contains(keyword, Labels(starting));
+            Assert.DoesNotContain(keyword, Labels(midExpression));
+        }
+
+        // The other way round, and exclusively so. A caret starting a statement sits in front of
+        // whatever is already written, and an operator accepted there swallows the next name as its
+        // operand -- 'has' before 'local = ...' asks for the presence of a local, which does not bind.
+        foreach (var keyword in new[] { "has", "not", "true", "false" })
+        {
+            Assert.DoesNotContain(keyword, Labels(starting));
+            Assert.Contains(keyword, Labels(midExpression));
+        }
+    }
+
+    /// <summary>
+    /// They are statements only inside a loop, so offering them elsewhere offers something the parser
+    /// takes and the binder then refuses.
+    /// </summary>
+    [Fact]
+    public async Task BreakAndContinueAreOfferedOnlyInsideALoop()
+    {
+        var outside = await OfferedAsync(Scoped, "var local: int64 = 1;\n");
+        var inside = await OfferedAsync(Scoped, "local = local + 1;\n");
+
+        Assert.DoesNotContain("break", Labels(outside));
+        Assert.DoesNotContain("continue", Labels(outside));
+        Assert.Contains("break", Labels(inside));
+        Assert.Contains("continue", Labels(inside));
+    }
+
+    /// <summary>
+    /// The loop binding is in scope for the body and nowhere else, which the scope query already
+    /// knows; completion offering it outside would be offering a name that does not resolve.
+    /// </summary>
+    [Fact]
+    public async Task ALoopBindingIsOfferedInsideItsLoopAndNotOutsideIt()
+    {
+        var inside = await OfferedAsync(Scoped, "local = local + 1;");
+        var outside = await OfferedAsync(Scoped, "return loc");
+
+        Assert.Contains("each", Labels(inside));
+        Assert.DoesNotContain("each", Labels(outside));
+    }
+
+    [Fact]
+    public async Task EveryNameOfferedForABareIdentifierCarriesItsResolvedTypeAsDetail()
+    {
+        var offered = await OfferedAsync(Scoped, "return loc");
+        var local = Assert.Single(offered, item => item.Label == "local");
+
+        Assert.Equal(CompletionItemKind.Variable, local.Kind);
+        Assert.Equal("int64", local.Detail);
+    }
+
+    /// <summary>
+    /// A name the author wrote three lines up is more likely to be what they are typing than a field
+    /// of the receiver, and a keyword is likelier still to be neither.
+    /// </summary>
+    [Fact]
+    public async Task WhatTheAuthorDeclaredSortsAheadOfTheSchemaAndBothAheadOfKeywords()
+    {
+        var offered = await OfferedAsync(Scoped, "return loc");
+
+        string Sort(string label) => Assert.Single(offered, item => item.Label == label).SortText!;
+
+        Assert.True(
+            string.CompareOrdinal(Sort("local"), Sort("count")) < 0,
+            "a local sorts ahead of a field of the receiver");
+
+        // 'has' rather than a statement keyword, because the caret here is part-way through an
+        // expression and a statement keyword is correctly not offered at all.
+        Assert.True(
+            string.CompareOrdinal(Sort("count"), Sort("has")) < 0,
+            "a field of the receiver sorts ahead of a keyword");
+    }
+
+    /// <summary>
+    /// The same promise, over the context where most of the items are: every name in scope, every
+    /// method, and every keyword, applied at every position one could be typed.
+    /// </summary>
+    [Fact]
+    public async Task EveryItemOfferedForABareIdentifierBindsWhenItIsAccepted()
+    {
+        var (provider, uri, text) = Beside(Scoped);
+
+        var applied = await CompletionProbe.SweepAsync(
+            provider,
+            uri,
+            text,
+            CompletionProbe.AtEveryNameAndStatementStart(text),
+            uri.Path!,
+            Loader());
+
+        Assert.True(applied.Count > 100, $"the sweep must apply plenty; it applied {applied.Count}");
+
+        foreach (var attempt in applied)
+        {
+            var refused = attempt.About
+                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
+                .ToList();
+
+            Assert.True(
+                refused.Count == 0,
+                $"accepting '{attempt.Item.Label}' at offset {attempt.Caret} produced "
+                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+        }
+    }
+
     // ------- a buffer that does not parse is the ordinary case
 
     /// <summary>

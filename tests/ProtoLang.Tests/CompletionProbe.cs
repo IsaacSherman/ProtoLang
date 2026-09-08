@@ -98,6 +98,32 @@ internal static class CompletionProbe
         }
     }
 
+    /// <summary>Every offset where a name begins, and every one where a statement could.</summary>
+    /// <remarks>
+    /// Both, because they are different questions with different answers: a name half-typed is an
+    /// expression position, and the blank space after a semicolon is a statement position, and a
+    /// keyword legal in one is illegal in the other. Sweeping only the first would leave the whole
+    /// statement-keyword set unchecked.
+    /// </remarks>
+    public static IEnumerable<int> AtEveryNameAndStatementStart(string text)
+    {
+        for (var offset = 0; offset < text.Length; offset++)
+        {
+            var previous = offset == 0 ? '\0' : text[offset - 1];
+
+            if (char.IsLetter(text[offset]) && !char.IsLetterOrDigit(previous) && previous != '_')
+            {
+                // One character in, so the caret sits inside a name being typed rather than before it.
+                yield return Math.Min(offset + 1, text.Length);
+            }
+
+            if (previous is ';' or '{' or '}')
+            {
+                yield return offset;
+            }
+        }
+    }
+
     /// <summary>Offers at every caret, accepts every item, and recompiles each result.</summary>
     public static async Task<IReadOnlyList<AppliedItem>> SweepAsync(
         CompletionProvider provider,

@@ -3,6 +3,8 @@ using Google.Protobuf.Reflection;
 using ProtoLang.Binding;
 using ProtoLang.Ir;
 using ProtoLang.Semantics;
+using ProtoLang.Symbols;
+using ProtoLang.Syntax;
 using ProtoLang.Types;
 using ProtoLang.LanguageServer.Protocol;
 using ProtoLang.LanguageServer.Protocol.Lsp;
@@ -483,11 +485,6 @@ public sealed class CompletionProvider
     private IReadOnlyList<CompletionItem> Symbols(
         CompletionRequest asked, SchemaSubject subject, CancellationToken cancellationToken)
     {
-        if (!subject.PrecededByDot)
-        {
-            return [];
-        }
-
         var compiled = _semantics.For(asked.Document, asked.Configuration, cancellationToken);
 
         if (compiled.Semantics is not { } model || compiled.Result is not { } result)
@@ -497,8 +494,124 @@ public sealed class CompletionProvider
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        return Members(ReceiverAt(model, subject), result, subject, asked.Document);
+        return subject.PrecededByDot
+            ? Members(ReceiverAt(model, subject), result, subject, asked.Document)
+            : InScope(model, result, subject, asked.Document);
     }
+
+    /// <summary>What a bare identifier could name where the caret is.</summary>
+    /// <remarks>
+    /// <para>
+    /// The names come from <c>ScopeAt</c> rather than from a walk of the tree, which is what makes
+    /// this correct rather than approximately correct: that query already drops a field shadowed by a
+    /// local of the same name, and a map field, for the same reasons the binder would refuse them.
+    /// Restating either rule here would be a second copy that agrees until it does not.
+    /// </para>
+    /// <para>
+    /// Methods are offered too, and as calls. A bare name resolves against the implicit receiver, so
+    /// <c>helper()</c> binds exactly as <c>this.helper()</c> would -- while a bare <c>helper</c> with
+    /// no parentheses is <c>PL0037</c>, an unknown name, because <c>BindName</c> never looks at
+    /// methods. Offering the name alone would be offering something that cannot bind.
+    /// </para>
+    /// <para>
+    /// A null scope is not a bare-identifier position at all: outside a method body, or inside a type
+    /// reference, which the query declines on purpose. Both offer nothing here.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<CompletionItem> InScope(
+        SemanticModel model, CompilationResult result, SchemaSubject subject, OpenDocument document)
+    {
+        if (model.ScopeAt(subject.Start) is not { } scope)
+        {
+            return [];
+        }
+
+        return
+        [
+            .. scope.Names.Select(visible => Member(
+                visible.Name,
+                visible.Symbol.Kind is SymbolKind.Field ? CompletionItemKind.Field : CompletionItemKind.Variable,
+                visible.Type.DisplayName,
+                null,
+
+                // A name the author introduced ahead of one the schema did, because a local written
+                // three lines up is more likely to be what is being typed than a field of the
+                // receiver, and the two are otherwise indistinguishable in a list.
+                rank: visible.Symbol.Kind is SymbolKind.Field ? "1" : "0",
+                subject,
+                document)),
+
+            .. result.Module is { } module
+                ? module.MethodsOn(scope.Receiver.Descriptor.FullName).Select(method => Member(
+                    method.Name + "()",
+                    CompletionItemKind.Method,
+                    method.Signature.DisplayName,
+                    null,
+                    rank: "2",
+                    subject,
+                    document))
+                : [],
+
+            .. Keywords(model, subject, document),
+        ];
+    }
+
+    /// <summary>The keywords that could legally begin what is being written here.</summary>
+    /// <remarks>
+    /// <para>
+    /// Two sets, from the grammar in spec 7.1, and <b>which of them applies depends on where the
+    /// caret is</b>. A keyword that starts a statement can only go where a statement can start:
+    /// half-way through <c>return lo|cal</c> the caret is inside an expression, and <c>return
+    /// return;</c> is not something an author can accept. Expression starters go in either place,
+    /// since a statement may be an expression.
+    /// </para>
+    /// <para>
+    /// <c>break</c> and <c>continue</c> are narrower again -- statements, and only inside a loop.
+    /// Offering them elsewhere offers something the parser takes and the binder then refuses.
+    /// </para>
+    /// <para>
+    /// Written out here rather than derived, because the parser publishes no list of what may start a
+    /// statement and inventing one there would be a second grammar. What holds it honest instead is
+    /// the sweep: every keyword offered is applied and recompiled like any other item.
+    /// </para>
+    /// </remarks>
+    private static IEnumerable<CompletionItem> Keywords(
+        SemanticModel model, SchemaSubject subject, OpenDocument document)
+    {
+        var at = model.SyntaxAt(subject.Start);
+
+        // Between statements, or on the first word of one. A block as the innermost statement means
+        // the caret is inside the block and inside none of its children; and a word beginning exactly
+        // where the enclosing statement begins is that statement's own first token, which is a
+        // statement-start position however completely the rest of it has parsed. Without the second
+        // half, a caret one character into a written 'var' is judged to be inside an expression, and
+        // an operator keyword offered there replaces 'var' and swallows the name after it.
+        var starting = at?.Enclosing<Statement>() is not { } statement
+            || statement is BlockStatement
+            || statement.Span.Start.Offset == subject.Start;
+
+        var inLoop = at is not null
+            && at.Ancestors.Any(node => node is ForInStatement or WhileStatement);
+
+        // Exclusive rather than nested. Where a statement begins, the caret is in front of whatever
+        // is already written, and an operator keyword accepted there swallows the next name as its
+        // operand: 'has' inserted before 'local = ...' asks for the presence of a local, which is
+        // PL0041. Where an expression is being written the caret is on a name and replaces it, so the
+        // operators are the ones that fit and a statement keyword is the one that cannot.
+        var keywords = starting
+            ? inLoop ? StatementStarters.Concat(LoopOnly) : StatementStarters
+            : ExpressionStarters;
+
+        return keywords.Select(keyword => Member(
+            keyword, CompletionItemKind.Keyword, "keyword", null, rank: "8", subject, document));
+    }
+
+    private static readonly IReadOnlyList<string> StatementStarters =
+        ["var", "return", "if", "while", "for"];
+
+    private static readonly IReadOnlyList<string> LoopOnly = ["break", "continue"];
+
+    private static readonly IReadOnlyList<string> ExpressionStarters = ["has", "not", "true", "false"];
 
     /// <summary>The type of the value the caret's dot is reaching into, or null when it is unknown.</summary>
     /// <remarks>
