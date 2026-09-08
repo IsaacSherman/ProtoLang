@@ -2,6 +2,33 @@ using Google.Protobuf.Reflection;
 
 namespace ProtoLang.Binding;
 
+/// <summary>One type a ProtoLang author may name, under both spellings that reach it.</summary>
+/// <remarks>
+/// Two shapes rather than one carrying a pair of nullable descriptors, because a type is a message or
+/// an enum and never both, and a record whose members can contradict each other is one a reader has to
+/// check before trusting. The consumer has to know which it is in any case: what may follow
+/// <c>extend</c> is messages alone, and the two are documented and rendered by different means.
+/// </remarks>
+public abstract record SchemaTypeName(string FullName, string SimpleName)
+{
+    /// <summary>Whether this is a message, and so may be a receiver.</summary>
+    public abstract bool IsMessage { get; }
+}
+
+/// <inheritdoc cref="SchemaTypeName"/>
+public sealed record SchemaMessageName(MessageDescriptor Descriptor)
+    : SchemaTypeName(Descriptor.FullName, Descriptor.Name)
+{
+    public override bool IsMessage => true;
+}
+
+/// <inheritdoc cref="SchemaTypeName"/>
+public sealed record SchemaEnumName(EnumDescriptor Descriptor)
+    : SchemaTypeName(Descriptor.FullName, Descriptor.Name)
+{
+    public override bool IsMessage => false;
+}
+
 /// <summary>
 /// Every message and enum the imported schemas make nameable, indexed by the two spellings a
 /// ProtoLang author may write: the full name, and the simple one.
@@ -101,6 +128,32 @@ public sealed class SchemaTypes
     /// schemas declared them. More than one means the simple name is ambiguous.</summary>
     public IReadOnlyList<EnumDescriptor> EnumsNamed(string simpleName)
         => _enumsBySimpleName.GetValueOrDefault(simpleName) is { } found ? found : [];
+
+    /// <summary>Every type the imported schemas make nameable, nested declarations included.</summary>
+    /// <remarks>
+    /// In full-name order, so a host offering them produces the same list twice running. Messages and
+    /// enums together, because a type position takes either and the caller that wants only messages
+    /// says so.
+    /// </remarks>
+    public IEnumerable<SchemaTypeName> All
+        => _messagesByFullName.Values.Select(SchemaTypeName (message) => new SchemaMessageName(message))
+            .Concat(_enumsByFullName.Values.Select(SchemaTypeName (enumType) => new SchemaEnumName(enumType)))
+            .OrderBy(type => type.FullName, StringComparer.Ordinal);
+
+    /// <summary>
+    /// Whether <paramref name="simpleName"/> reaches more than one type, and so cannot be written
+    /// unqualified in a type position.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is one of three different questions about ambiguity and answers only its own.</b>
+    /// Messages and enums share a single name space in a type position, so a name matching one of each
+    /// is as ambiguous as one matching two enums -- which is <c>PL0074</c>, and is not the rule for a
+    /// receiver after <c>extend</c> (messages alone, <c>PL0020</c>) nor for an enum in front of a dot
+    /// (enums alone). It is named for the position it governs so that reaching for it in one of the
+    /// others has to be a deliberate act rather than an assumption.
+    /// </remarks>
+    public bool IsAmbiguousAsATypeName(string simpleName)
+        => MessagesNamed(simpleName).Count + EnumsNamed(simpleName).Count > 1;
 
     private void IndexMessage(MessageDescriptor message)
     {

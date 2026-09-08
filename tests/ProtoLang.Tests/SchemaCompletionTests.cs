@@ -730,6 +730,132 @@ public class SchemaCompletionTests
         }
     }
 
+    // ------- what a type position offers
+
+    private const string Typed =
+        "extend Outer {\n"
+        + "    fn f(given: int64) -> int64 {\n"
+        + "        var local: Inner = inner;\n"
+        + "        return count;\n"
+        + "    }\n"
+        + "}\n";
+
+    [Fact]
+    public async Task ATypePositionOffersEveryScalarSpelling()
+    {
+        var offered = await OfferedAsync(Typed, "var local: Inn");
+
+        foreach (var scalar in new[] { "int32", "int64", "uint32", "uint64", "double", "float", "bool", "string", "bytes" })
+        {
+            Assert.Contains(scalar, Labels(offered));
+        }
+    }
+
+    /// <summary>It is a return-type marker and nothing else, so it belongs only where one goes.</summary>
+    [Fact]
+    public async Task VoidIsOfferedAsAReturnTypeAndNowhereElse()
+    {
+        var returning = await OfferedAsync(Typed, "fn f(given: int64) -> int");
+        var declaring = await OfferedAsync(Typed, "var local: Inn");
+
+        Assert.Contains("void", Labels(returning));
+        Assert.DoesNotContain("void", Labels(declaring));
+    }
+
+    [Fact]
+    public async Task ATypePositionOffersTheImportedMessagesAndEnumsUnderBothSpellings()
+    {
+        var offered = await OfferedAsync(Typed, "var local: Inn");
+
+        Assert.Contains("Outer", Labels(offered));
+        Assert.Contains("protolang.tests.Outer", Labels(offered));
+        Assert.Contains("TopLevelStatus", Labels(offered));
+        Assert.Contains("protolang.tests.TopLevelStatus", Labels(offered));
+    }
+
+    /// <summary>
+    /// Only by descending: FileDescriptor.MessageTypes lists the top level alone, so a nested enum is
+    /// the first thing an independent walk of the descriptors omits.
+    /// </summary>
+    [Fact]
+    public async Task ATypePositionOffersTypesNestedInsideAMessage()
+    {
+        var offered = await OfferedAsync(Typed, "var local: Inn");
+
+        Assert.Contains("Inner", Labels(offered));
+        Assert.Contains("protolang.tests.Outer.Inner", Labels(offered));
+        Assert.Contains("protolang.tests.Outer.Nested", Labels(offered));
+    }
+
+    /// <summary>
+    /// Two packages declaring one simple name make it PL0074 to write unqualified, so offering it
+    /// would offer a name the compiler is about to refuse -- and that diagnostic's own help says to
+    /// qualify it. The simple name stays as filter text so typing it still finds the qualified forms.
+    /// </summary>
+    [Fact]
+    public async Task AnAmbiguousSimpleTypeNameIsOfferedOnlyInItsQualifiedForms()
+    {
+        var offered = await OfferedAsync(
+            "import proto \"ambiguous_enums.proto\";\n\n" + Typed, "var local: Inn");
+
+        Assert.DoesNotContain("Kind", Labels(offered));
+        Assert.Contains("protolang.tests.ambiguous.First.Kind", Labels(offered));
+        Assert.Contains("protolang.tests.ambiguous.Second.Kind", Labels(offered));
+
+        var qualified = Assert.Single(
+            offered, item => item.Label == "protolang.tests.ambiguous.First.Kind");
+
+        Assert.Equal("Kind", qualified.FilterText);
+    }
+
+    [Fact]
+    public async Task AMessageAndAnEnumAreDistinguishableInATypePosition()
+    {
+        var offered = await OfferedAsync(Typed, "var local: Inn");
+
+        Assert.Equal(CompletionItemKind.Class, Assert.Single(offered, item => item.Label == "Outer").Kind);
+        Assert.Equal(
+            CompletionItemKind.Enum, Assert.Single(offered, item => item.Label == "TopLevelStatus").Kind);
+    }
+
+    /// <summary>
+    /// A type position is where the scope query deliberately answers nothing, so a name in scope
+    /// offered here would be one the binder cannot resolve as a type.
+    /// </summary>
+    [Fact]
+    public async Task ATypePositionNeverOffersTheNamesThatAreInScope()
+    {
+        var offered = await OfferedAsync(Typed, "var local: Inn");
+
+        Assert.DoesNotContain("given", Labels(offered));
+        Assert.DoesNotContain("count", Labels(offered));
+        Assert.DoesNotContain("return", Labels(offered));
+    }
+
+    [Fact]
+    public async Task EveryItemOfferedInATypePositionBindsWhenItIsAccepted()
+    {
+        var (provider, uri, text) = Beside(Typed);
+        var carets = new[] { After(text, "var local: Inn"), After(text, "fn f(given: int") };
+
+        var applied = await CompletionProbe.SweepAsync(
+            provider, uri, text, carets, uri.Path!, Loader());
+
+        Assert.True(applied.Count > 20, $"the sweep must apply something; it applied {applied.Count}");
+
+        foreach (var attempt in applied)
+        {
+            var refused = attempt.About
+                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
+                .ToList();
+
+            Assert.True(
+                refused.Count == 0,
+                $"accepting '{attempt.Item.Label}' at offset {attempt.Caret} produced "
+                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+        }
+    }
+
     // ------- a buffer that does not parse is the ordinary case
 
     /// <summary>

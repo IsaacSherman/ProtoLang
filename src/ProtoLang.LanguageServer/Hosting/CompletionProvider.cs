@@ -494,10 +494,95 @@ public sealed class CompletionProvider
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        return subject.PrecededByDot
-            ? Members(ReceiverAt(model, subject), result, subject, asked.Document)
+        if (subject.PrecededByDot)
+        {
+            return Members(ReceiverAt(model, subject), result, subject, asked.Document);
+        }
+
+        // Before the scope query, because a type position is one of the places that query declines on
+        // purpose -- it returns nothing inside a type reference, and taking that for "no names here"
+        // would leave the whole context silent.
+        return TypesAt(model, result, subject, asked.Document) is { } typePosition
+            ? typePosition
             : InScope(model, result, subject, asked.Document);
     }
+
+    /// <summary>The types that could be named where the caret is, or null when it is not a type position.</summary>
+    /// <remarks>
+    /// <para>
+    /// A type position is exactly a caret inside a <c>TypeReference</c>, which is the same question
+    /// <c>ScopeAt</c> asks in order to answer nothing there. Asked of the tree rather than of the
+    /// tokens because the parser knows the four places a type may be written -- a parameter, a
+    /// declared variable, a return type, a cast target -- and a token-level guess would be a fifth
+    /// opinion about the grammar.
+    /// </para>
+    /// <para>
+    /// <b>An ambiguous simple name is offered only qualified.</b> Where two packages declare the same
+    /// simple name, writing it unqualified is <c>PL0074</c>, so offering it would be offering a name
+    /// the compiler is about to refuse -- and the help on that very diagnostic says to qualify it. The
+    /// simple name goes in the filter text instead, so typing it still surfaces the qualified forms.
+    /// Whether a name is ambiguous is asked of the same index the binder resolves against, which is
+    /// what keeps the two answers the same answer.
+    /// </para>
+    /// <para>
+    /// <c>void</c> is offered only as a return type, which is the one place the language accepts it.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<CompletionItem>? TypesAt(
+        SemanticModel model, CompilationResult result, SchemaSubject subject, OpenDocument document)
+    {
+        if (model.SyntaxAt(subject.Start) is not { } at || at.Enclosing<TypeReference>() is not { } reference)
+        {
+            return null;
+        }
+
+        var returning = at.Method?.ReturnType is { } declared && ReferenceEquals(declared, reference);
+
+        return
+        [
+            // The spellings the scalar factory accepts, taken from the one keyword table rather than
+            // written out again -- so a scalar added to the language is offered without this line
+            // being touched, and one that is only a keyword is never offered as a type.
+            .. Lexer.Keywords.Keys
+                .Where(spelling => TypeFactory.TryGetScalar(spelling) is not null
+                    || (returning && spelling == "void"))
+                .Order(StringComparer.Ordinal)
+                .Select(spelling => Member(
+                    spelling, CompletionItemKind.Keyword, "scalar type", null, "0", subject, document)),
+
+            .. result.Types.All.SelectMany(type => Spellings(type, result, subject, document)),
+        ];
+    }
+
+    /// <summary>The ways one schema type may be written here: qualified always, simple when it is unambiguous.</summary>
+    private static IEnumerable<CompletionItem> Spellings(
+        SchemaTypeName type, CompilationResult result, SchemaSubject subject, OpenDocument document)
+    {
+        var kind = type.IsMessage ? CompletionItemKind.Class : CompletionItemKind.Enum;
+        var documentation = Documentation(result, type);
+
+        if (!result.Types.IsAmbiguousAsATypeName(type.SimpleName))
+        {
+            yield return Member(
+                type.SimpleName, kind, type.FullName, documentation, "1", subject, document);
+        }
+
+        yield return Member(type.FullName, kind, type.FullName, documentation, "2", subject, document)
+            with
+            {
+                // So that typing the simple name still surfaces the qualified forms, which is the
+                // whole of what an author can write when the simple one is ambiguous.
+                FilterText = type.SimpleName,
+            };
+    }
+
+    private static string? Documentation(CompilationResult result, SchemaTypeName type)
+        => type switch
+        {
+            SchemaMessageName message => result.Schema?.DeclarationOf(message.Descriptor)?.Documentation.Leading,
+            SchemaEnumName enumeration => result.Schema?.DeclarationOf(enumeration.Descriptor)?.Documentation.Leading,
+            _ => null,
+        };
 
     /// <summary>What a bare identifier could name where the caret is.</summary>
     /// <remarks>

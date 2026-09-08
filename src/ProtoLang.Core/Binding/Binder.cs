@@ -493,9 +493,9 @@ public sealed class Binder
         var messages = _types.MessagesNamed(name);
         var enums = _types.EnumsNamed(name);
 
-        var candidateCount = messages.Count + enums.Count;
-
-        if (candidateCount > 1)
+        // Asked of the index rather than counted here, because completion has to predict exactly this
+        // and a second count is a second rule. The index names it for the position it governs.
+        if (_types.IsAmbiguousAsATypeName(name))
         {
             // Messages and enums share one type name space here, so a name matching one of each is
             // just as ambiguous as a name matching two enums.
