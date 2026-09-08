@@ -856,6 +856,183 @@ public class SchemaCompletionTests
         }
     }
 
+    // ------- what an extend receiver and a test fixture offer
+
+    private const string Fixtured =
+        "extend Outer {\n"
+        + "    fn scaled(factor: int64, other: int64) -> int64 { return count * factor; }\n"
+        + "}\n"
+        + "\n"
+        + "test Outer.scaled \"scales\" {\n"
+        + "    receiver {\n"
+        + "        count = 2;\n"
+        + "    }\n"
+        + "    arg factor = 3;\n"
+        + "    expect return 6;\n"
+        + "}\n";
+
+    [Fact]
+    public async Task AfterExtendOnlyMessageNamesAreOffered()
+    {
+        var offered = await OfferedAsync(Fixtured, "extend Out");
+
+        Assert.Contains("Outer", Labels(offered));
+        Assert.Contains("protolang.tests.Outer", Labels(offered));
+        Assert.All(offered, item => Assert.Equal(CompletionItemKind.Class, item.Kind));
+    }
+
+    /// <summary>
+    /// ResolveMessage never looks at enums, so one offered here would be PL0021 the moment it was
+    /// accepted.
+    /// </summary>
+    [Fact]
+    public async Task AnEnumIsNeverOfferedAfterExtend()
+    {
+        var offered = await OfferedAsync(Fixtured, "extend Out");
+
+        Assert.DoesNotContain("TopLevelStatus", Labels(offered));
+        Assert.DoesNotContain("Nested", Labels(offered));
+    }
+
+    /// <summary>
+    /// A receiver is ambiguous against messages alone, so a message whose simple name an enum shares
+    /// is still unambiguous as a receiver. Answering with the type rule -- which counts enums too --
+    /// would withhold a name the compiler accepts, and this is the one fixture shape that can tell
+    /// the two rules apart at all.
+    /// </summary>
+    [Fact]
+    public async Task AMessageWhoseSimpleNameAnEnumSharesIsStillOfferedAfterExtend()
+    {
+        var offered = await OfferedAsync(
+            "import proto \"shared_name.proto\";\n\n" + Fixtured, "extend Out");
+
+        Assert.Contains("Shape", Labels(offered));
+        Assert.Contains("protolang.tests.shared.Shape", Labels(offered));
+    }
+
+    /// <summary>
+    /// The other half of the same fixture, and the other answer. In a type position messages and
+    /// enums share one name space, so the very name that is unambiguous as a receiver is PL0074 here
+    /// and may only be written qualified.
+    /// </summary>
+    [Fact]
+    public async Task TheSameNameIsAmbiguousInATypePositionAndNotAsAReceiver()
+    {
+        var body = "import proto \"shared_name.proto\";\n\n"
+            + "extend Shape {\n    fn f() -> int64 {\n        var local: Shape = sides;\n"
+            + "        return sides;\n    }\n}\n";
+
+        var asAType = await OfferedAsync(body, "var local: Sha");
+        var asAReceiver = await OfferedAsync(body, "extend Sha");
+
+        Assert.DoesNotContain("Shape", Labels(asAType));
+        Assert.Contains("protolang.tests.shared.Shape", Labels(asAType));
+        Assert.Contains("protolang.tests.shared.Holder.Shape", Labels(asAType));
+
+        Assert.Contains("Shape", Labels(asAReceiver));
+    }
+
+    [Fact]
+    public async Task ATestFixtureOffersTheFieldsOfTheMessageBeingBuilt()
+    {
+        var offered = await OfferedAsync(Fixtured, "        count = 2;\n");
+
+        Assert.Contains("label", Labels(offered));
+        Assert.Contains("inner", Labels(offered));
+        Assert.All(offered, item => Assert.Equal(CompletionItemKind.Field, item.Kind));
+    }
+
+    /// <summary>A singular field written twice is PL0061, so one already given a value is spent.</summary>
+    [Fact]
+    public async Task AFieldAlreadySetInAFixtureIsNotOfferedAgain()
+    {
+        var offered = await OfferedAsync(Fixtured, "        count = 2;\n");
+
+        Assert.DoesNotContain("count", Labels(offered));
+    }
+
+    /// <summary>A map in a fixture is PL0060 rather than PL0038 -- a different code, the same refusal.</summary>
+    [Fact]
+    public async Task ATestFixtureNeverOffersAMapField()
+    {
+        var offered = await OfferedAsync(
+            "extend Mapped {\n    fn f() -> int64 { return count; }\n}\n"
+                + "\ntest Mapped.f \"counts\" {\n    receiver {\n        count = 1;\n    }\n"
+                + "    expect return 1;\n}\n",
+            "        count = 1;\n");
+
+        Assert.DoesNotContain("tags", Labels(offered));
+    }
+
+    [Fact]
+    public async Task AnArgOffersTheParametersOfTheMethodUnderTest()
+    {
+        var offered = await OfferedAsync(Fixtured, "arg fact");
+
+        Assert.Contains("factor", Labels(offered));
+    }
+
+    /// <summary>An argument supplied twice is PL0065, so one already written is spent.</summary>
+    [Fact]
+    public async Task AnArgumentAlreadySuppliedIsNotOfferedAgain()
+    {
+        var offered = await OfferedAsync(
+            Fixtured.Replace("arg factor = 3;", "arg factor = 3;\n    arg o", StringComparison.Ordinal),
+            "    arg o");
+
+        Assert.Contains("other", Labels(offered));
+        Assert.DoesNotContain("factor", Labels(offered));
+    }
+
+    /// <summary>
+    /// BindTest returns null when the target does not resolve, so there is no IrTest at all -- and
+    /// nothing to say until the compiler knows which message and which method the fixture is for.
+    /// </summary>
+    [Fact]
+    public async Task ATestWhoseTargetDoesNotResolveOffersNothingInsideIt()
+    {
+        var offered = await OfferedAsync(
+            "test NoSuchMessage.nothing \"unresolved\" {\n    receiver {\n        cou\n    }\n"
+                + "    expect return 1;\n}\n",
+            "        cou");
+
+        Assert.Empty(offered);
+    }
+
+    [Fact]
+    public async Task EveryItemOfferedInATestOrAfterExtendBindsWhenItIsAccepted()
+    {
+        var (provider, uri, text) = Beside(Fixtured);
+
+        var carets = new[]
+        {
+            After(text, "extend Out"),
+            After(text, "        count = 2;\n"),
+            After(text, "arg fact"),
+
+            // Inside the expectation, which is neither a fixture field nor an argument, and where
+            // bare names resolve against nothing at all: the binder binds a test's expressions with
+            // no scope and no implicit receiver fields.
+            After(text, "expect return 6"),
+        };
+
+        var applied = await CompletionProbe.SweepAsync(provider, uri, text, carets, uri.Path!, Loader());
+
+        Assert.True(applied.Count > 10, $"the sweep must apply something; it applied {applied.Count}");
+
+        foreach (var attempt in applied)
+        {
+            var refused = attempt.About
+                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
+                .ToList();
+
+            Assert.True(
+                refused.Count == 0,
+                $"accepting '{attempt.Item.Label}' at offset {attempt.Caret} produced "
+                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+        }
+    }
+
     // ------- a buffer that does not parse is the ordinary case
 
     /// <summary>

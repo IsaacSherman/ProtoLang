@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Google.Protobuf.Reflection;
 using ProtoLang.Binding;
+using ProtoLang.Diagnostics;
 using ProtoLang.Ir;
 using ProtoLang.Semantics;
 using ProtoLang.Symbols;
@@ -499,6 +500,16 @@ public sealed class CompletionProvider
             return Members(ReceiverAt(model, subject), result, subject, asked.Document);
         }
 
+        if (subject.PrecededByExtend)
+        {
+            return Receivers(result, subject, asked.Document);
+        }
+
+        if (Fixture(model, result, subject, asked.Document) is { } names)
+        {
+            return names;
+        }
+
         // Before the scope query, because a type position is one of the places that query declines on
         // purpose -- it returns nothing inside a type reference, and taking that for "no names here"
         // would leave the whole context silent.
@@ -506,6 +517,127 @@ public sealed class CompletionProvider
             ? typePosition
             : InScope(model, result, subject, asked.Document);
     }
+
+    /// <summary>The messages that could receive an <c>extend</c> block.</summary>
+    /// <remarks>
+    /// Messages alone. <c>ResolveMessage</c> never looks at enums, so an enum offered here would be
+    /// <c>PL0021</c> the moment it was accepted. Ambiguity is the receiver question rather than the
+    /// type question -- a message whose simple name an enum happens to share is still unambiguous as
+    /// a receiver -- so it is asked of the index by that name, and answering it with the type rule
+    /// would withhold a name the compiler accepts.
+    /// </remarks>
+    private static IReadOnlyList<CompletionItem> Receivers(
+        CompilationResult result, SchemaSubject subject, OpenDocument document)
+        =>
+        [
+            .. result.Types.All
+                .Where(type => type.IsMessage)
+                .SelectMany(type => Receiver(type, result, subject, document)),
+        ];
+
+    private static IEnumerable<CompletionItem> Receiver(
+        SchemaTypeName type, CompilationResult result, SchemaSubject subject, OpenDocument document)
+    {
+        var documentation = Documentation(result, type);
+
+        if (!result.Types.IsAmbiguousAsAReceiverName(type.SimpleName))
+        {
+            yield return Member(
+                type.SimpleName, CompletionItemKind.Class, type.FullName, documentation, "0", subject, document);
+        }
+
+        yield return Member(
+            type.FullName, CompletionItemKind.Class, type.FullName, documentation, "1", subject, document)
+            with
+            {
+                FilterText = type.SimpleName,
+            };
+    }
+
+    /// <summary>
+    /// The names a <c>test</c> declaration can write: a field of the message being built, or an
+    /// argument of the method under test. Null when the caret is in neither.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Both sets are known exactly, which is what makes this worth doing at all: the author is typing
+    /// names they did not write, from a schema and a signature that are both in front of the compiler.
+    /// </para>
+    /// <para>
+    /// <b>Nothing is offered until the target resolves.</b> <c>BindTest</c> returns null when it
+    /// cannot, so a half-written <c>test</c> header has no <c>IrTest</c> at all -- and there is
+    /// genuinely nothing to say until the compiler knows which message and which method the fixture
+    /// is for.
+    /// </para>
+    /// <para>
+    /// A field already given a value is dropped, because a singular field written twice is
+    /// <c>PL0061</c>. A map field is dropped as everywhere else, this time because a map in a fixture
+    /// is <c>PL0060</c> rather than <c>PL0038</c> -- a different code for the same unsupported thing.
+    /// Repeated fields stay, since a repeated field may be written as many times as the author likes.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<CompletionItem>? Fixture(
+        SemanticModel model, CompilationResult result, SchemaSubject subject, OpenDocument document)
+    {
+        if (model.IrAt(subject.Start) is not { } at || at.Enclosing<IrTest>() is not { } test)
+        {
+            return null;
+        }
+
+        if (subject.PrecededByArg)
+        {
+            // The one being written does not count as written, whatever it currently reads. The
+            // caret is inside it, so it is the name the author is choosing -- and marking it spent
+            // removes it from the one list where they are deciding whether to keep it. #56 found the
+            // same thing about the import being edited, and it is the same mistake.
+            var written = test.Arguments
+                .Where(argument => !Covers(argument.Span, subject.Start))
+                .Select(argument => argument.Name)
+                .ToHashSet(StringComparer.Ordinal);
+
+            return
+            [
+                .. test.Target.Parameters
+                    .Where(parameter => !written.Contains(parameter.Name))
+                    .Select(parameter => Member(
+                        parameter.Name,
+                        CompletionItemKind.Variable,
+                        parameter.Type.DisplayName,
+                        null,
+                        "0",
+                        subject,
+                        document)),
+            ];
+        }
+
+        if (at.Enclosing<IrTestMessageValue>() is not { } level)
+        {
+            return null;
+        }
+
+        var already = level.Fields
+            .Where(field => !field.Field.IsRepeated && !Covers(field.Span, subject.Start))
+            .Select(field => field.Field.Name)
+            .ToHashSet(StringComparer.Ordinal);
+
+        return
+        [
+            .. level.Descriptor.Fields.InDeclarationOrder()
+                .Where(field => !field.IsMap && !already.Contains(field.Name))
+                .Select(field => Member(
+                    field.Name,
+                    CompletionItemKind.Field,
+                    TypeFactory.FromField(field).DisplayName,
+                    Documentation(result, field),
+                    "0",
+                    subject,
+                    document)),
+        ];
+    }
+
+    /// <summary>Both ends inclusive, so a caret that has just finished typing a name is still in it.</summary>
+    private static bool Covers(SourceSpan span, int offset)
+        => offset >= span.Start.Offset && offset <= span.End.Offset;
 
     /// <summary>The types that could be named where the caret is, or null when it is not a type position.</summary>
     /// <remarks>

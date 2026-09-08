@@ -155,6 +155,19 @@ public sealed class SchemaTypes
     public bool IsAmbiguousAsATypeName(string simpleName)
         => MessagesNamed(simpleName).Count + EnumsNamed(simpleName).Count > 1;
 
+    /// <summary>
+    /// Whether <paramref name="simpleName"/> reaches more than one message, and so cannot be written
+    /// unqualified as the receiver of an <c>extend</c> or a <c>test</c>.
+    /// </summary>
+    /// <remarks>
+    /// The second of the three questions, and deliberately not the first. A receiver must be a
+    /// message, so an enum sharing the name changes nothing here -- which is exactly why answering
+    /// this with <see cref="IsAmbiguousAsATypeName"/> would refuse a name the compiler accepts. The
+    /// diagnostic is <c>PL0020</c>, which counts messages and nothing else.
+    /// </remarks>
+    public bool IsAmbiguousAsAReceiverName(string simpleName)
+        => MessagesNamed(simpleName).Count > 1;
+
     private void IndexMessage(MessageDescriptor message)
     {
         _messagesByFullName[message.FullName] = message;

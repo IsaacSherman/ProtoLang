@@ -304,7 +304,10 @@ public sealed class Binder
 
         if (candidates.Count > 0)
         {
-            if (candidates.Count == 1)
+            // Asked of the index rather than counted here, for the reason ResolveTypeReference asks
+            // its own question there: completion has to predict this exactly, and a receiver is
+            // ambiguous against messages alone rather than against every type.
+            if (!_types.IsAmbiguousAsAReceiverName(name))
             {
                 return candidates[0];
             }
