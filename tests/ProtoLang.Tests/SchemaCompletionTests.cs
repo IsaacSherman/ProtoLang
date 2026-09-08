@@ -1,3 +1,4 @@
+using ProtoLang.Binding;
 using ProtoLang.Diagnostics;
 using ProtoLang.LanguageServer.Hosting;
 using ProtoLang.LanguageServer.Protocol;
@@ -435,6 +436,108 @@ public class SchemaCompletionTests
                 Assert.Equal(start.Column - 1, item.TextEdit.Range.Start.Character);
                 Assert.Equal(end.Column - 1, item.TextEdit.Range.End.Character);
             });
+    }
+
+    // ------- the promise, checked by keeping it
+
+    /// <summary>
+    /// Several receivers of different shapes in one file, including two that must offer nothing, so
+    /// the sweep meets the cases that would be wrong rather than only the ones that are easy.
+    /// </summary>
+    /// <remarks>
+    /// The second <c>extend</c> block is load-bearing rather than decoration. With one receiver in the
+    /// file, "offer the methods of this receiver" and "offer every method in the file" are the same
+    /// list, and a sweep over such a fixture passes whichever one the code does -- which is exactly
+    /// what it did until a mutation went unnoticed and said so.
+    /// </remarks>
+    private const string Reachable =
+        """
+        extend Mapped {
+            fn onlyOnMapped() -> int64 { return count; }
+        }
+
+        extend Outer {
+            fn helper(scale: int64) -> int64 { return count * scale; }
+
+            fn f(other: Outer, mapped: Mapped) -> int64 {
+                var here: Inner = other.inner;
+                return other.count + mapped.count + here.deep + nested_values. + TopLevelStatus. + other.;
+            }
+        }
+        """;
+
+    private static DescriptorLoader Loader()
+    {
+        Assert.True(Pool.Value.TryGet(null, out var loader, out _), "the tests need a protoc to compile against");
+        return loader!;
+    }
+
+    private static async Task<IReadOnlyList<AppliedItem>> SweepAsync(string body)
+    {
+        var (provider, uri, text) = Beside(body);
+
+        return await CompletionProbe.SweepAsync(
+            provider, uri, text, CompletionProbe.AfterEveryDot(text), uri.Path!, Loader());
+    }
+
+    /// <summary>
+    /// The rule the whole feature rests on, checked by keeping it rather than by reading lists: every
+    /// item, accepted, must produce a name that resolves to something.
+    /// </summary>
+    [Fact]
+    public async Task EveryItemOfferedAfterADotBindsWhenItIsAccepted()
+    {
+        var applied = await SweepAsync(Reachable);
+
+        Assert.True(applied.Count > 20, $"the sweep must apply something; it applied {applied.Count}");
+
+        foreach (var attempt in applied)
+        {
+            var refused = attempt.About
+                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
+                .ToList();
+
+            Assert.True(
+                refused.Count == 0,
+                $"accepting '{attempt.Item.Label}' at offset {attempt.Caret} produced "
+                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+        }
+    }
+
+    /// <summary>
+    /// Without this the sweep is a claim rather than a measurement: one recompile per item across a
+    /// corpus is thousands of compilations, and a loader per compilation would turn a suite that
+    /// takes minutes into one that takes hours.
+    /// </summary>
+    [Fact]
+    public async Task TheSweepRunsProtocOnceHoweverManyItemsItApplies()
+    {
+        var before = Loader().ProtocInvocations;
+        var applied = await SweepAsync(Reachable);
+
+        Assert.NotEmpty(applied);
+        Assert.True(
+            Loader().ProtocInvocations - before <= 1,
+            $"the sweep applied {applied.Count} items and started "
+                + $"{Loader().ProtocInvocations - before} protoc processes");
+    }
+
+    /// <summary>
+    /// A buffer mid-edit is the state completion is invoked in, so a sweep that only ever met
+    /// well-formed files would be a sweep over the easy half.
+    /// </summary>
+    [Fact]
+    public async Task EveryItemOfferedInABufferThatDoesNotParseBindsWhenItIsAccepted()
+    {
+        var applied = await SweepAsync(
+            "extend Outer {\n    fn f(other: Outer) -> int64 {\n        return other.");
+
+        Assert.NotEmpty(applied);
+        Assert.All(
+            applied,
+            attempt => Assert.DoesNotContain(
+                attempt.About,
+                diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code)));
     }
 
     // ------- a buffer that does not parse is the ordinary case
