@@ -1033,6 +1033,288 @@ public class SchemaCompletionTests
         }
     }
 
+    // ------- what the text after the caret rules out
+
+    /// <summary>
+    /// A name in front of a dot is a receiver, so only something with members can go there. An int64
+    /// local offered at 'x.field' produces PL0039 the moment it is accepted.
+    /// </summary>
+    [Fact]
+    public async Task OnlySomethingWithMembersIsOfferedInFrontOfADot()
+    {
+        var body = "extend Outer {\n    fn f(other: Outer) -> int64 {\n        var plain: int64 = 1;\n"
+            + "        return other.count;\n    }\n}\n";
+
+        var offered = await OfferedAsync(body, "return oth");
+
+        Assert.Contains("other", Labels(offered));
+        Assert.DoesNotContain("plain", Labels(offered));
+        Assert.DoesNotContain("count", Labels(offered));
+    }
+
+    /// <summary>
+    /// A member in front of another dot is a receiver too, so the same rule applies one level in.
+    /// </summary>
+    [Fact]
+    public async Task OnlyAMessageFieldIsOfferedInFrontOfAFurtherDot()
+    {
+        var body = "extend Outer {\n    fn f(other: Outer) -> int64 {\n"
+            + "        return other.inner.deep;\n    }\n}\n";
+
+        var offered = await OfferedAsync(body, "return other.inn");
+
+        Assert.Contains("inner", Labels(offered));
+        Assert.DoesNotContain("count", Labels(offered));
+        Assert.DoesNotContain("label", Labels(offered));
+    }
+
+    /// <summary>
+    /// Parentheses already written mean a call, so only a method fits -- and it is offered without a
+    /// second pair, which would be as wrong as offering a method that must be called without any.
+    /// </summary>
+    [Fact]
+    public async Task OnlyAMethodIsOfferedWhereParenthesesAlreadyFollow()
+    {
+        var body = "extend Outer {\n    fn helper(scale: int64) -> int64 { return count * scale; }\n\n"
+            + "    fn f() -> int64 {\n        return helper(2);\n    }\n}\n";
+
+        var offered = await OfferedAsync(body, "return help");
+
+        Assert.Contains("helper", Labels(offered));
+        Assert.DoesNotContain("helper()", Labels(offered));
+        Assert.DoesNotContain("count", Labels(offered));
+    }
+
+    /// <summary>
+    /// A qualified type is one name rather than a chain of members, so the edit has to replace all of
+    /// it -- otherwise accepting 'Inner' at 'proto|lang.tests.Outer' writes 'Inner.tests.Outer'.
+    /// </summary>
+    [Fact]
+    public async Task AQualifiedTypeNameIsReplacedWholeRatherThanOneSegmentOfIt()
+    {
+        const string body = "extend Outer {\n    fn f() -> int64 {\n"
+            + "        var local: protolang.tests.Outer.Inner = inner;\n        return count;\n    }\n}\n";
+
+        var (provider, uri, text) = Beside(body);
+        var name = text.IndexOf("protolang.tests.Outer.Inner", StringComparison.Ordinal);
+
+        Assert.True(name > 0, "the fixture must declare a qualified type");
+
+        var asked = provider.Read(At(uri, text, name + 4));
+
+        Assert.NotNull(asked);
+
+        var offered = (await provider.AnswerAsync(asked!, CancellationToken.None)).Items;
+        var lines = new LineMap(text);
+        var end = lines.PositionOf(name + "protolang.tests.Outer.Inner".Length);
+
+        Assert.NotEmpty(offered);
+        Assert.All(
+            offered,
+            item => Assert.Equal(end.Column - 1, item.TextEdit!.Range.End.Character));
+    }
+
+    // ------- review regressions: assert the desired answer, not the current defect
+
+    /// <summary>An enum-valued field is a value, not the type name that owns the constants.</summary>
+    [Fact]
+    [Trait("ReviewRegression", "SchemaCompletion")]
+    public async Task AnEnumValuedFieldDoesNotOfferConstantsAsInstanceMembers()
+    {
+        var offered = await OfferedAsync(
+            "extend Outer { fn f() -> TopLevelStatus { return status.; } }",
+            "return status.");
+
+        Assert.True(
+            offered.Count == 0,
+            "status is an enum-valued field; every status.CONSTANT edit would fail with PL0039");
+    }
+
+    /// <summary>A qualified extend receiver is one name, even when the caret is in its first segment.</summary>
+    [Fact]
+    [Trait("ReviewRegression", "SchemaCompletion")]
+    public async Task AQualifiedExtendReceiverIsReplacedAsOneName()
+    {
+        const string name = "protolang.tests.Outer";
+        var (provider, uri, text) = Beside(
+            $"extend {name} {{ fn f() -> int64 {{ return 1; }} }}");
+
+        var applied = await CompletionProbe.SweepAsync(
+            provider, uri, text, [After(text, "extend proto")], uri.Path!, Loader());
+        var inner = Assert.Single(applied, attempt => attempt.Item.Label == "Inner");
+
+        Assert.True(
+            inner.Applied.Contains("extend Inner {", StringComparison.Ordinal),
+            "accepting Inner must replace the whole receiver, not produce Inner.tests.Outer");
+        Assert.True(inner.Result.Success, "the accepted receiver names a real message and must compile");
+    }
+
+    /// <summary>A fixture's value expressions do not bind against its receiver's fields.</summary>
+    [Fact]
+    [Trait("ReviewRegression", "SchemaCompletion")]
+    public async Task AFixtureValueExpressionDoesNotOfferReceiverFieldNames()
+    {
+        var offered = await OfferedAsync(
+            "extend Outer { fn f() -> int64 { return count; } }\n"
+                + "test Outer.f \"value\" { receiver { count = true; } expect return 1; }",
+            "count = tr");
+
+        Assert.True(
+            offered.All(item => item.Kind != CompletionItemKind.Field),
+            "a field offered after '=' becomes an unresolved value name (PL0037), not a fixture field");
+    }
+
+    /// <summary>Recovery must not turn the whitespace after a local's colon into a value position.</summary>
+    [Fact]
+    [Trait("ReviewRegression", "SchemaCompletion")]
+    public async Task AnEmptyLocalTypePositionOffersTypesInsteadOfValueNames()
+    {
+        var offered = await OfferedAsync(
+            "extend Outer { fn f() -> int64 { var local:  = inner; return count; } }",
+            "var local: ");
+
+        Assert.True(
+            Labels(offered).Contains("int64"),
+            "the caret after the colon needs type names even though recovery placed the type node elsewhere");
+        Assert.DoesNotContain("count", Labels(offered));
+        Assert.DoesNotContain("f()", Labels(offered));
+    }
+
+    /// <summary>A dot inside a type reference must not dispatch to expression-member completion.</summary>
+    [Fact]
+    [Trait("ReviewRegression", "SchemaCompletion")]
+    public async Task TheLastSegmentOfAQualifiedTypeStillOffersWholeTypeNames()
+    {
+        var (provider, uri, text) = Beside(
+            "extend Outer { fn f(other: Outer) -> int64 {\n"
+                + "var local: protolang.tests.Outer = other; return count; } }");
+
+        var applied = await CompletionProbe.SweepAsync(
+            provider, uri, text, [After(text, "var local: protolang.tests.Out")], uri.Path!, Loader());
+        var outer = Assert.Single(applied, attempt => attempt.Item.Label == "Outer");
+
+        Assert.Contains("var local: Outer = other;", outer.Applied, StringComparison.Ordinal);
+        Assert.True(outer.Result.Success, "accepting the same type under its simple spelling must compile");
+    }
+
+    /// <summary>Successfully bound calls and enum constants retain enough information to offer siblings.</summary>
+    [Theory]
+    [InlineData(
+        "extend Outer { fn helper() -> int64 { return count; } "
+            + "fn f(other: Outer) -> int64 { return other.helper(); } }",
+        "return other.hel", "helper")]
+    [InlineData(
+        "extend Outer { fn f() -> TopLevelStatus { return TopLevelStatus.TOP_LEVEL_STATUS_OK; } }",
+        "TopLevelStatus.TOP_LEVEL_ST", "TOP_LEVEL_STATUS_OK")]
+    [Trait("ReviewRegression", "SchemaCompletion")]
+    public async Task AResolvedMethodOrEnumConstantStillOffersItsSiblings(
+        string body, string marker, string expected)
+    {
+        var (provider, uri, text) = Beside(body);
+        var applied = await CompletionProbe.SweepAsync(
+            provider, uri, text, [After(text, marker)], uri.Path!, Loader());
+        var same = Assert.Single(applied, attempt => attempt.Item.Label == expected);
+
+        Assert.Equal(text, same.Applied);
+        Assert.True(same.Result.Success, "reaccepting the existing bound name must preserve valid source");
+    }
+
+    // ------- the whole corpus, before a pull request
+
+    /// <summary>
+    /// Every schema the repository maintains, in one directory, so a corpus source written beside
+    /// them resolves its imports whichever set it came from. The names do not collide.
+    /// </summary>
+    private static readonly Lazy<string> EverySchema = new(() =>
+    {
+        var directory = TestPaths.CreateTempDirectory();
+
+        foreach (var source in new[]
+                 {
+                     TestPaths.FixtureProtoDirectory,
+                     TestPaths.ExampleProtoDirectory,
+                     Path.Combine(TestPaths.RepositoryRoot, "tests", "conformance", "protos"),
+                 })
+        {
+            foreach (var proto in Directory.GetFiles(source, "*.proto"))
+            {
+                File.Copy(proto, Path.Combine(directory, Path.GetFileName(proto)), overwrite: true);
+            }
+        }
+
+        return directory;
+    });
+
+    /// <summary>
+    /// The acceptance criterion in full: every item, at every caret worth asking at, over every
+    /// source the repository maintains -- including the two that do not parse.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Gated the way the long soak is, and for the same reason. It is one recompile per offered item
+    /// across the whole corpus, which is minutes rather than the second its bounded siblings cost,
+    /// and the value of paying that is a release-time or pull-request check rather than a
+    /// per-iteration one. The bounded sweeps over one fixture each run every time and are what catch
+    /// an ordinary mistake; this is what catches a construct the language grew that nothing else met.
+    /// </para>
+    /// <para>
+    /// A theory per source, so a failure names the file it came from rather than the corpus.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [MemberData(nameof(CorpusNames))]
+    public async Task EveryItemOfferedAnywhereInTheCorpusBindsWhenItIsAccepted(string name)
+    {
+        if (Environment.GetEnvironmentVariable("PROTOLANG_SWEEP") is not { Length: > 0 })
+        {
+            Assert.Skip("Set PROTOLANG_SWEEP=1 to sweep the whole corpus. Its bounded siblings run every time.");
+        }
+
+        var source = Assert.Single(CompiledCorpus.All, candidate => candidate.Name == name);
+        var documents = new DocumentStore();
+        var path = Path.Combine(EverySchema.Value, $"corpus-{name}.protolang");
+        var uri = DocumentUri.Parse(new Uri(path).AbsoluteUri);
+
+        documents.Open(uri, "protolang", 1, source.Text);
+
+        var provider = new CompletionProvider(documents, Configuration(), Pool.Value);
+
+        var carets = CompletionProbe.AfterEveryDot(source.Text)
+            .Concat(CompletionProbe.AtEveryNameAndStatementStart(source.Text))
+            .Distinct();
+
+        var applied = await CompletionProbe.SweepAsync(
+            provider, uri, source.Text, carets, path, Loader());
+
+        Assert.True(
+            applied.Count > 50,
+            $"'{name}' must offer something worth checking; it applied {applied.Count} items");
+
+        foreach (var attempt in applied)
+        {
+            var refused = attempt.About
+                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
+                .ToList();
+
+            Assert.True(
+                refused.Count == 0,
+                $"in '{name}', accepting '{attempt.Item.Label}' at offset {attempt.Caret} produced "
+                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+        }
+    }
+
+    public static TheoryData<string> CorpusNames()
+    {
+        var names = new TheoryData<string>();
+
+        foreach (var source in CompiledCorpus.All)
+        {
+            names.Add(source.Name);
+        }
+
+        return names;
+    }
+
     // ------- a buffer that does not parse is the ordinary case
 
     /// <summary>

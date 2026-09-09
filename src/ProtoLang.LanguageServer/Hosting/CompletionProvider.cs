@@ -480,8 +480,19 @@ public sealed class CompletionProvider
 
     /// <summary>What the schema and the binder's own rules allow where the caret is.</summary>
     /// <remarks>
+    /// <para>
     /// The contexts land one at a time; a caret in one that has not landed offers nothing, which is
     /// what it offered before this arm existed.
+    /// </para>
+    /// <para>
+    /// <b>The two name contexts are asked before the dot is read as a member access</b>, because in
+    /// both of them a dot is part of the name rather than a reach into a value. An <c>extend</c>
+    /// receiver and a type reference are each written as one qualified name, so
+    /// <c>protolang.tests.Ou|ter</c> is not a member of <c>protolang.tests</c> -- and a caret there
+    /// dispatched on the dot alone asks for the members of something that is not a value and gets
+    /// nothing, in a position where the whole type universe applies. Both answer null where the caret
+    /// is not in one, which is what leaves an ordinary dot meaning what it usually means.
+    /// </para>
     /// </remarks>
     private IReadOnlyList<CompletionItem> Symbols(
         CompletionRequest asked, SchemaSubject subject, CancellationToken cancellationToken)
@@ -495,14 +506,22 @@ public sealed class CompletionProvider
 
         cancellationToken.ThrowIfCancellationRequested();
 
+        if (ExtendedAt(model, subject) is { } extended)
+        {
+            return Receivers(result, extended, asked.Document);
+        }
+
+        // Before the scope query as well as before the dot, because a type position is one of the
+        // places that query declines on purpose -- it returns nothing inside a type reference, and
+        // taking that for "no names here" would leave the whole context silent.
+        if (TypesAt(model, result, subject, asked.Document) is { } typePosition)
+        {
+            return typePosition;
+        }
+
         if (subject.PrecededByDot)
         {
             return Members(ReceiverAt(model, subject), result, subject, asked.Document);
-        }
-
-        if (subject.PrecededByExtend)
-        {
-            return Receivers(result, subject, asked.Document);
         }
 
         if (Fixture(model, result, subject, asked.Document) is { } names)
@@ -510,13 +529,47 @@ public sealed class CompletionProvider
             return names;
         }
 
-        // Before the scope query, because a type position is one of the places that query declines on
-        // purpose -- it returns nothing inside a type reference, and taking that for "no names here"
-        // would leave the whole context silent.
-        return TypesAt(model, result, subject, asked.Document) is { } typePosition
-            ? typePosition
-            : InScope(model, result, subject, asked.Document);
+        return InScope(model, result, subject, asked.Document);
     }
+
+    /// <summary>
+    /// The caret's subject widened to the whole <c>extend</c> receiver it is writing, or null when it
+    /// is writing something else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The parser is what knows where the receiver begins and ends, because it is what decided that
+    /// <c>protolang.tests.Outer</c> was one qualified name rather than three. Replacing only the
+    /// segment under the caret turns <c>extend proto|lang.tests.Outer</c> into
+    /// <c>extend Inner.tests.Outer</c>, which is <c>PL0021</c> -- the same defect
+    /// <see cref="TypesAt"/> fixes for a type reference, in the one other place a qualified name is
+    /// written.
+    /// </para>
+    /// <para>
+    /// The token fact is kept as the fallback rather than replaced by the tree, and it is not
+    /// redundant: <c>extend |</c> in a buffer that has not parsed at all has no declaration to ask,
+    /// and that is precisely the state the list is requested in.
+    /// </para>
+    /// </remarks>
+    private static SchemaSubject? ExtendedAt(SemanticModel model, SchemaSubject subject)
+    {
+        if (model.SyntaxAt(subject.Start)?.Enclosing<ExtendDeclaration>() is { } extend
+            && Covers(extend.MessageName.Span, subject.Start))
+        {
+            return Replacing(subject, extend.MessageName.Span);
+        }
+
+        return subject.PrecededByExtend ? subject : null;
+    }
+
+    /// <summary>The subject with its edit range moved to the whole of a name already written.</summary>
+    /// <remarks>
+    /// One home for it because both qualified-name contexts need it and the reason is the same in
+    /// each: <see cref="SchemaSubject.Start"/> and <see cref="SchemaSubject.End"/> come from walking
+    /// word characters outward, which stops at a dot, and a name with dots in it is still one name.
+    /// </remarks>
+    private static SchemaSubject Replacing(SchemaSubject subject, SourceSpan name)
+        => subject with { Start = name.Start.Offset, End = name.End.Offset };
 
     /// <summary>The messages that could receive an <c>extend</c> block.</summary>
     /// <remarks>
@@ -575,11 +628,25 @@ public sealed class CompletionProvider
     /// is <c>PL0060</c> rather than <c>PL0038</c> -- a different code for the same unsupported thing.
     /// Repeated fields stay, since a repeated field may be written as many times as the author likes.
     /// </para>
+    /// <para>
+    /// <b>Being inside a fixture is not the same as naming one of its fields</b>, and the values are
+    /// inside it too. A fixture field's value is an ordinary expression bound against an empty scope
+    /// with no implicit receiver, so a field name accepted at <c>count = tr|ue</c> writes
+    /// <c>count = count</c> and is <c>PL0037</c> -- a name that resolves nowhere, offered because the
+    /// enclosing message value was found and nothing asked whether the caret was in a name position
+    /// at all. An expression under the caret is what says it is not, and the value region then
+    /// answers the way every other expression in a test does.
+    /// </para>
     /// </remarks>
     private static IReadOnlyList<CompletionItem>? Fixture(
         SemanticModel model, CompilationResult result, SchemaSubject subject, OpenDocument document)
     {
         if (model.IrAt(subject.Start) is not { } at || at.Enclosing<IrTest>() is not { } test)
+        {
+            return null;
+        }
+
+        if (at.Enclosing<IrExpression>() is not null)
         {
             return null;
         }
@@ -610,7 +677,20 @@ public sealed class CompletionProvider
             ];
         }
 
-        if (at.Enclosing<IrTestMessageValue>() is not { } level)
+        // Which message the caret is naming a field of, and the two ways to get it wrong are opposite.
+        // A value's span covers its fields and not the braces around them, so a caret on the blank
+        // line just inside 'items {' falls outside the nested value and would take the outer
+        // message's fields. But a caret on the word 'items' itself is inside that same field value
+        // and is naming a field of the outer message, not of the nested one. What separates them is
+        // that a field value begins at its own name: sitting there means naming it, and anywhere else
+        // inside it means being within the block it opens.
+        var holder = at.Enclosing<IrTestFieldValue>();
+
+        var level = holder is { MessageValue: { } nested } && Within(holder.Span, subject.Start)
+            ? nested
+            : at.Enclosing<IrTestMessageValue>();
+
+        if (level is null)
         {
             return null;
         }
@@ -639,14 +719,26 @@ public sealed class CompletionProvider
     private static bool Covers(SourceSpan span, int offset)
         => offset >= span.Start.Offset && offset <= span.End.Offset;
 
+    /// <summary>Strictly inside, which is what "in the block this opens" means.</summary>
+    /// <remarks>
+    /// Neither end counts, and each is excluded for its own reason. The start is where the field's
+    /// own name is written, so a caret there is naming that field rather than filling it in. The end
+    /// is the brace that closes it, so a caret there has left the block and is back among the fields
+    /// of the message outside. Containment elsewhere is inclusive at both ends, deliberately, which is
+    /// exactly why this needs saying rather than reusing it.
+    /// </remarks>
+    private static bool Within(SourceSpan span, int offset)
+        => offset > span.Start.Offset && offset < span.End.Offset;
+
     /// <summary>The types that could be named where the caret is, or null when it is not a type position.</summary>
     /// <remarks>
     /// <para>
-    /// A type position is exactly a caret inside a <c>TypeReference</c>, which is the same question
-    /// <c>ScopeAt</c> asks in order to answer nothing there. Asked of the tree rather than of the
-    /// tokens because the parser knows the four places a type may be written -- a parameter, a
-    /// declared variable, a return type, a cast target -- and a token-level guess would be a fifth
-    /// opinion about the grammar.
+    /// A type position is a caret inside a <c>TypeReference</c>, which is the same question
+    /// <c>ScopeAt</c> asks in order to answer nothing there -- or in the gap where one is still to be
+    /// written, which <see cref="TypeSlotAt"/> settles. Asked of the tree rather than of the tokens
+    /// because the parser knows the four places a type may be written -- a parameter, a declared
+    /// variable, a return type, a cast target -- and a token-level guess would be a fifth opinion
+    /// about the grammar.
     /// </para>
     /// <para>
     /// <b>An ambiguous simple name is offered only qualified.</b> Where two packages declare the same
@@ -663,12 +755,23 @@ public sealed class CompletionProvider
     private static IReadOnlyList<CompletionItem>? TypesAt(
         SemanticModel model, CompilationResult result, SchemaSubject subject, OpenDocument document)
     {
-        if (model.SyntaxAt(subject.Start) is not { } at || at.Enclosing<TypeReference>() is not { } reference)
+        if (model.SyntaxAt(subject.Start) is not { } at)
+        {
+            return null;
+        }
+
+        if ((at.Enclosing<TypeReference>() ?? TypeSlotAt(at, subject.Start)) is not { } reference)
         {
             return null;
         }
 
         var returning = at.Method?.ReturnType is { } declared && ReferenceEquals(declared, reference);
+
+        // The whole written name, dots included. A qualified type is one name rather than a chain of
+        // members, so replacing only the segment under the caret turns 'protolang.tests.Outer' into
+        // 'Duration.tests.Outer'. The parser's own idea of where the name starts and ends is used,
+        // because it is the one that decided this was a single qualified name in the first place.
+        subject = Replacing(subject, reference.Name.Span);
 
         return
         [
@@ -685,6 +788,49 @@ public sealed class CompletionProvider
             .. result.Types.All.SelectMany(type => Spellings(type, result, subject, document)),
         ];
     }
+
+    /// <summary>
+    /// The type slot of a declaration the caret is standing in, or null when it is standing anywhere
+    /// else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Recovery is the whole reason this is needed. A type that has not been written leaves a
+    /// <c>TypeReference</c> standing on the token that stopped the parse -- the <c>=</c> of
+    /// <c>var local: = inner;</c> -- so the caret in the gap after the colon is inside no
+    /// <c>TypeReference</c> at all. Reading that as "not a type position" sends the request on to the
+    /// scope query, which offers the locals and fields that cannot be written there: accepting one
+    /// produces <c>var local: count = inner;</c> and <c>PL0025</c>, in the position where the author
+    /// most obviously wants a list of types.
+    /// </para>
+    /// <para>
+    /// The gap is bounded by two things the tree does know, and neither is a guess about the grammar:
+    /// the name the declaration already carries, and the far end of whatever ended up in the type
+    /// slot. Everything between them is the <c>:</c> and the type, so a caret there is in the type and
+    /// a caret before the name or past the type is not. The slot's own node is returned rather than a
+    /// synthetic one, so the range that gets replaced is the parser's -- an empty range at the
+    /// insertion point when nothing was written, which is exactly where the text belongs.
+    /// </para>
+    /// </remarks>
+    private static TypeReference? TypeSlotAt(SyntaxLocation at, int offset)
+    {
+        if (at.Enclosing<ParameterDeclaration>() is { } parameter)
+        {
+            return Slot(parameter.Name, parameter.Type, offset);
+        }
+
+        return at.Enclosing<VariableDeclarationStatement>() is { } local
+            ? Slot(local.Name, local.DeclaredType, offset)
+            : null;
+    }
+
+    /// <inheritdoc cref="TypeSlotAt"/>
+    private static TypeReference? Slot(SyntaxName name, TypeReference? declared, int offset)
+        => declared is not null
+            && offset > name.Span.End.Offset
+            && offset <= declared.Span.End.Offset
+                ? declared
+                : null;
 
     /// <summary>The ways one schema type may be written here: qualified always, simple when it is unambiguous.</summary>
     private static IEnumerable<CompletionItem> Spellings(
@@ -743,33 +889,65 @@ public sealed class CompletionProvider
             return [];
         }
 
+        // What follows the caret decides what may replace what is under it. A name being called can
+        // only be a method; a name in front of a dot can only be something with members. Ignoring
+        // either offers a candidate that is perfectly good on its own and does not bind where it
+        // lands -- 'quantity' over the name in 'case_count(3)', or an int64 local in front of '.'.
+        var methods = result.Module is { } module
+            ? module.MethodsOn(scope.Receiver.Descriptor.FullName)
+            : [];
+
+        if (subject.FollowedByCall)
+        {
+            return
+            [
+                .. methods.Select(method => Member(
+                    // Without parentheses: there are already some, and adding a second pair is the
+                    // same class of mistake as offering the name of a method that must be called.
+                    method.Name,
+                    CompletionItemKind.Method,
+                    method.Signature.DisplayName,
+                    null,
+                    "0",
+                    subject,
+                    document)),
+            ];
+        }
+
         return
         [
-            .. scope.Names.Select(visible => Member(
-                visible.Name,
-                visible.Symbol.Kind is SymbolKind.Field ? CompletionItemKind.Field : CompletionItemKind.Variable,
-                visible.Type.DisplayName,
-                null,
+            .. scope.Names
+                .Where(visible => !subject.FollowedByDot || visible.Type is MessageType)
+                .Select(visible => Member(
+                    visible.Name,
+                    visible.Symbol.Kind is SymbolKind.Field
+                        ? CompletionItemKind.Field
+                        : CompletionItemKind.Variable,
+                    visible.Type.DisplayName,
+                    null,
 
-                // A name the author introduced ahead of one the schema did, because a local written
-                // three lines up is more likely to be what is being typed than a field of the
-                // receiver, and the two are otherwise indistinguishable in a list.
-                rank: visible.Symbol.Kind is SymbolKind.Field ? "1" : "0",
-                subject,
-                document)),
+                    // A name the author introduced ahead of one the schema did, because a local
+                    // written three lines up is more likely to be what is being typed than a field of
+                    // the receiver, and the two are otherwise indistinguishable in a list.
+                    rank: visible.Symbol.Kind is SymbolKind.Field ? "1" : "0",
+                    subject,
+                    document)),
 
-            .. result.Module is { } module
-                ? module.MethodsOn(scope.Receiver.Descriptor.FullName).Select(method => Member(
+            // A call produces a value rather than a receiver, and there is no member access onto one:
+            // 'helper().field' is not something the parser takes, so a method in front of a dot is a
+            // name that cannot go there.
+            .. subject.FollowedByDot
+                ? []
+                : methods.Select(method => Member(
                     method.Name + "()",
                     CompletionItemKind.Method,
                     method.Signature.DisplayName,
                     null,
                     rank: "2",
                     subject,
-                    document))
-                : [],
+                    document)),
 
-            .. Keywords(model, subject, document),
+            .. subject.FollowedByDot ? [] : Keywords(model, subject, document),
         ];
     }
 
@@ -830,39 +1008,64 @@ public sealed class CompletionProvider
 
     private static readonly IReadOnlyList<string> ExpressionStarters = ["has", "not", "true", "false"];
 
-    /// <summary>The type of the value the caret's dot is reaching into, or null when it is unknown.</summary>
+    /// <summary>The type whose members may be written after the caret's dot, or null when there is none.</summary>
     /// <remarks>
     /// <para>
-    /// Two shapes, and the first is the one that matters. <see cref="IrMissingMemberAccess"/> is what
+    /// Four shapes, and the first is the one that matters. <see cref="IrMissingMemberAccess"/> is what
     /// the binder leaves where a member name has not been written yet -- <c>line.</c> with the caret
     /// after the dot, which is the state completion is triggered in -- and it exists precisely so the
     /// receiver's type survives a binding that otherwise failed. Everything else about that
     /// expression is an error; the one thing that is not is the answer.
     /// </para>
     /// <para>
-    /// The second is a member that did resolve, so that invoking completion on a name already written
-    /// offers its siblings rather than nothing.
+    /// The other three are accesses that did resolve, so that invoking completion on a name already
+    /// written offers its siblings rather than nothing. A field access and a method call each keep the
+    /// receiver they resolved against; an enum constant keeps no receiver because it never had one,
+    /// and its own type is what the name before the dot named.
+    /// </para>
+    /// <para>
+    /// <b>An enum-typed receiver is the one case where knowing the type is not enough.</b> Constants
+    /// are reached through the enum's <em>name</em> and never through a value of it, so
+    /// <c>status.TOP_LEVEL_STATUS_OK</c> is <c>PL0039</c> however certainly <c>status</c> is a
+    /// <c>TopLevelStatus</c>. What tells the two apart is the receiver the binder built:
+    /// <c>Binder.BindReceiverAwaitingAMember</c> puts a valueless literal of the enum's type where a
+    /// type name was written, and every actual value of an enum -- a field, a local, a parameter, a
+    /// call -- arrives as the node that produced it. So the literal is the type name and everything
+    /// else is a value, which is the same order of precedence <c>TryResolveEnumReceiver</c> applies
+    /// on the way in.
     /// </para>
     /// <para>
     /// <b>A name written but unresolved is the gap, and it is deliberate for now.</b> The binder
     /// collapses <c>line.nosuch</c> to an error literal and the receiver goes with it, so an explicit
-    /// invocation part-way through typing a member name offers nothing. It is not the path the client
-    /// ordinarily takes -- the list is requested when the dot is typed, when the name is genuinely
-    /// missing, and is declared complete so the client filters the rest locally -- and closing it
-    /// means having the binder keep the receiver here as it already does one branch above, which is a
-    /// change to what the IR preserves rather than to this file.
+    /// invocation part-way through typing a member name that names nothing offers nothing. It is not
+    /// the path the client ordinarily takes -- the list is requested when the dot is typed, when the
+    /// name is genuinely missing, and is declared complete so the client filters the rest locally --
+    /// and closing it means having the binder keep the receiver there as it already does one branch
+    /// above, which is a change to what the IR preserves rather than to this file.
     /// </para>
     /// </remarks>
     private static PlType? ReceiverAt(SemanticModel model, SchemaSubject subject)
     {
-        var at = model.IrAt(subject.Start);
-
-        if (at?.Enclosing<IrMissingMemberAccess>() is { } missing)
+        if (model.IrAt(subject.Start) is not { } at)
         {
-            return missing.Receiver.Type;
+            return null;
         }
 
-        return at?.Enclosing<IrFieldAccess>()?.Receiver.Type;
+        if (at.Enclosing<IrEnumValue>() is { } constant)
+        {
+            return constant.EnumType;
+        }
+
+        var receiver = at.Enclosing<IrMissingMemberAccess>()?.Receiver
+            ?? at.Enclosing<IrFieldAccess>()?.Receiver
+            ?? at.Enclosing<IrMethodCall>()?.Receiver;
+
+        return receiver switch
+        {
+            { Type: MessageType } => receiver.Type,
+            IrLiteral { Value: null, Type: EnumPlType } => receiver.Type,
+            _ => null,
+        };
     }
 
     /// <summary>What may be written after a dot on a value of this type.</summary>
@@ -888,8 +1091,15 @@ public sealed class CompletionProvider
         {
             MessageType message =>
             [
+                // What follows constrains this exactly as it constrains a bare name. A member in
+                // front of another dot is itself a receiver, so only a singular message field can go
+                // there -- 'inner.weight.seconds' asks an int64 for a member it cannot have. And
+                // parentheses already written mean a call, which a field can never be: 'other.count()'
+                // is PL0044, an unknown method, rather than a field read with punctuation after it.
                 .. message.Descriptor.Fields.InDeclarationOrder()
-                    .Where(field => !field.IsMap)
+                    .Where(field => !field.IsMap
+                        && !subject.FollowedByCall
+                        && (!subject.FollowedByDot || TypeFactory.FromField(field) is MessageType))
                     .Select(field => Member(
                         field.Name,
                         CompletionItemKind.Field,
@@ -899,9 +1109,11 @@ public sealed class CompletionProvider
                         subject,
                         document)),
 
-                .. result.Module is { } module
+                // A call in front of a dot is not a receiver either: there is no member access onto
+                // the value a method returns.
+                .. result.Module is { } module && !subject.FollowedByDot
                     ? module.MethodsOn(message.Descriptor.FullName).Select(method => Member(
-                        method.Name + "()",
+                        subject.FollowedByCall ? method.Name : method.Name + "()",
                         CompletionItemKind.Method,
                         method.Signature.DisplayName,
                         null,
@@ -911,7 +1123,10 @@ public sealed class CompletionProvider
                     : [],
             ],
 
-            EnumPlType enumeration =>
+            // A constant has no members of its own and is not callable, so in front of a dot or a
+            // parenthesis there is nothing here to name. That the enum's name rather than a value of
+            // it was written before the dot is settled by ReceiverAt, which is where the reason is.
+            EnumPlType enumeration when !subject.FollowedByDot && !subject.FollowedByCall =>
             [
                 .. enumeration.Descriptor.Values.Select(value => Member(
                     value.Name,

@@ -64,6 +64,26 @@ public sealed record DocumentCompilation(
 /// and every open.
 /// </para>
 /// <para>
+/// <b>Those two are what the editor moved, and they are not everything that can move.</b> A
+/// compilation is a function of three things and the editor owns only one of them: the buffer, the
+/// configuration the buffer resolves to, and the schemas that configuration reaches. The other two
+/// live in files, and a file changes without any keystroke -- a branch switched underneath the
+/// session, an imported <c>.proto</c> edited in another window, a <c>protolang.config.xml</c>
+/// repaired after it was refused. So the pair above is checked and then two more questions are asked,
+/// each of them put to the thing that already owns the answer:
+/// <see cref="DocumentConfiguration.CompilesTheSameWayAs"/> for the settings, and
+/// <see cref="SchemaClosure.IsCurrent"/> -- the very check <see cref="DescriptorCache"/> makes before
+/// it will answer from an entry -- for the schemas. Neither is restated here, because a second
+/// statement of either is one that eventually disagrees with the compiler.
+/// </para>
+/// <para>
+/// <b>What that costs on a hit is one configuration resolution and one hash per schema.</b> The
+/// resolution is a directory walk and an XML parse; the hashing is a handful of small files. Both are
+/// far below the lex, parse and bind a miss costs, and the alternative is not cheaper -- it is
+/// answering a completion with fields the schema no longer has, which is the failure that gets an
+/// editor integration switched off.
+/// </para>
+/// <para>
 /// <b>One entry per document, and no eviction policy.</b> What is held is the lex, parse and bind of
 /// one exact buffer, worthless the moment that buffer moves; and every question is asked about the
 /// document the store is currently holding, so a previous buffer's entry can never be asked for
@@ -86,7 +106,12 @@ public sealed class DocumentSemantics
 {
     private readonly LoaderPool _loaders;
     private readonly ConcurrentDictionary<string, DocumentCompilation> _entries = new();
+
+    /// <summary>Held across publishing an entry and withdrawing one, so the two cannot interleave.</summary>
+    private readonly object _publication = new();
+
     private int _compilations;
+    private int _withdrawals;
 
     public DocumentSemantics(LoaderPool loaders)
         => _loaders = loaders ?? throw new ArgumentNullException(nameof(loaders));
@@ -130,17 +155,22 @@ public sealed class DocumentSemantics
         ArgumentNullException.ThrowIfNull(document);
         ArgumentNullException.ThrowIfNull(configuration);
 
-        if (_entries.TryGetValue(document.Uri.Key, out var held) && Answers(held, document, configuration))
+        // Once, here, rather than on the miss alone: it is both half of what makes an entry answer
+        // and the first thing building one needs, and resolving it twice would be paying for the
+        // walk twice in exchange for two chances to disagree about what it said.
+        var settings = configuration.Resolve(document.Uri);
+
+        if (_entries.TryGetValue(document.Uri.Key, out var held) && Answers(held, document, settings))
         {
             return held;
         }
 
-        var built = Build(document, configuration, cancellationToken);
+        // Read before the compile rather than after it, because what this is watching for is a
+        // withdrawal that lands while the compile runs.
+        var withdrawals = Volatile.Read(ref _withdrawals);
+        var built = Build(document, configuration, settings, cancellationToken);
 
-        // Assigned rather than added conditionally, because the entry this replaces is about a buffer
-        // the store no longer holds and nothing will ask for again. A race between two compiles of the
-        // same buffer leaves whichever finished last, and they are equal.
-        _entries[document.Uri.Key] = built;
+        Publish(document.Uri, built, withdrawals);
 
         return built;
     }
@@ -156,20 +186,82 @@ public sealed class DocumentSemantics
     {
         ArgumentNullException.ThrowIfNull(document);
 
-        _entries.TryRemove(document.Key, out _);
+        lock (_publication)
+        {
+            _withdrawals++;
+            _entries.TryRemove(document.Key, out _);
+        }
     }
 
-    /// <summary>Whether what is held is about this buffer, under settings that still apply.</summary>
+    /// <summary>Keeps a compilation, unless a document was withdrawn while it was being produced.</summary>
+    /// <remarks>
+    /// <para>
+    /// A compile takes long enough for a close to land inside it, and it did: a document closed while
+    /// its own compilation was in flight was forgotten and then put straight back by the assignment
+    /// that finished afterwards, leaving the whole syntax tree and IR module of a buffer the editor
+    /// had shut. Removing an entry and publishing one are therefore one decision under one lock, and
+    /// the counter is what a publisher compares itself against -- a remove that has already happened
+    /// is seen as a higher count, and one that has not cannot slip in between the comparison and the
+    /// assignment.
+    /// </para>
+    /// <para>
+    /// <b>One counter for every document rather than one apiece, and the coarseness is the point.</b>
+    /// What it costs is that closing one document declines to cache a compilation of another that was
+    /// in flight at that instant -- the caller still gets its answer, and the next question rebuilds.
+    /// A close is a person's deliberate action and a compile is milliseconds, so that is a cache miss
+    /// somewhere between rarely and never, bought with a single field. Per-document stamps would buy
+    /// nothing back and would outlive the entries they guard, since a stamp is only safe to drop once
+    /// nothing is building against it.
+    /// </para>
+    /// <para>
+    /// Assigned rather than added conditionally, because the entry it replaces is about a buffer the
+    /// store no longer holds and nothing will ask for again. A race between two compiles of the same
+    /// buffer leaves whichever finished last, and they are equal.
+    /// </para>
+    /// </remarks>
+    private void Publish(DocumentUri document, DocumentCompilation built, int withdrawals)
+    {
+        lock (_publication)
+        {
+            if (_withdrawals == withdrawals)
+            {
+                _entries[document.Key] = built;
+            }
+        }
+    }
+
+    /// <summary>Whether what is held is about this buffer, and still describes what is on disk.</summary>
+    /// <remarks>
+    /// The generation is compared as well as the settings it produced, although the settings are the
+    /// stronger question. It is the caller's contract rather than this one's: a host refuses an answer
+    /// whose generation is not the current one, so an entry stamped with an older generation would be
+    /// handed back only to be thrown away.
+    /// </remarks>
     private static bool Answers(
-        DocumentCompilation held, OpenDocument document, WorkspaceConfiguration configuration)
+        DocumentCompilation held, OpenDocument document, DocumentConfiguration settings)
         => ReferenceEquals(held.Document, document)
-            && held.Configuration.Generation == configuration.Generation;
+            && held.Settings.Generation == settings.Generation
+            && held.Settings.CompilesTheSameWayAs(settings)
+            && SchemasAreUnchanged(held);
+
+    /// <summary>Whether the schemas this compilation read still stand as it read them.</summary>
+    /// <remarks>
+    /// The check <see cref="DescriptorCache"/> makes on its own entries, asked one level up so that a
+    /// document cache cannot answer from a compilation whose descriptors the loader would already
+    /// have refused. True where there is no bundle to check: a compilation that failed before protoc
+    /// produced a closure has nothing to compare against, and recompiling it per keystroke would mean
+    /// running protoc on every keystroke for exactly the workspace whose schemas are broken.
+    /// </remarks>
+    private static bool SchemasAreUnchanged(DocumentCompilation held)
+        => held.Result?.Schema is not { } schema
+            || SchemaClosure.IsCurrent(schema.Closure, held.Result.SearchPaths);
 
     private DocumentCompilation Build(
-        OpenDocument document, WorkspaceConfiguration configuration, CancellationToken cancellationToken)
+        OpenDocument document,
+        WorkspaceConfiguration configuration,
+        DocumentConfiguration settings,
+        CancellationToken cancellationToken)
     {
-        var settings = configuration.Resolve(document.Uri);
-
         _loaders.TryGet(settings.ProtocPath, out var loader, out var failure);
 
         // The two ways a document is stopped before it compiles, in the order the settings settle

@@ -1,6 +1,7 @@
 using ProtoLang.Binding;
 using ProtoLang.Diagnostics;
 using ProtoLang.LanguageServer.Hosting;
+using ProtoLang.Syntax;
 using ProtoLang.LanguageServer.Protocol;
 using ProtoLang.LanguageServer.Protocol.Lsp;
 using ProtoLang.LanguageServer.Workspace;
@@ -98,15 +99,29 @@ internal static class CompletionProbe
         }
     }
 
-    /// <summary>Every offset where a name begins, and every one where a statement could.</summary>
+    /// <summary>Every offset where a name is being written, and every one where a statement could start.</summary>
     /// <remarks>
+    /// <para>
     /// Both, because they are different questions with different answers: a name half-typed is an
     /// expression position, and the blank space after a semicolon is a statement position, and a
     /// keyword legal in one is illegal in the other. Sweeping only the first would leave the whole
     /// statement-keyword set unchecked.
+    /// </para>
+    /// <para>
+    /// <b>A caret inside a written keyword is left out, and that is a statement about the sweep
+    /// rather than about completion.</b> An item accepted there replaces the keyword, and a keyword
+    /// is load-bearing in a way a name is not: replacing the <c>if</c> of an <c>else if</c> strands
+    /// the block that followed it, and parser recovery then swallows declarations further down the
+    /// file -- so the recompile reports that a method is unknown when what actually happened is that
+    /// its declaration was eaten. <em>Every</em> item fails such a caret, correct ones included, so it
+    /// measures the fixture rather than the items. Completion still answers there, and a client may
+    /// still offer it; what is not claimed is that the result compiles.
+    /// </para>
     /// </remarks>
     public static IEnumerable<int> AtEveryNameAndStatementStart(string text)
     {
+        var keywords = KeywordSpans(text);
+
         for (var offset = 0; offset < text.Length; offset++)
         {
             var previous = offset == 0 ? '\0' : text[offset - 1];
@@ -114,7 +129,18 @@ internal static class CompletionProbe
             if (char.IsLetter(text[offset]) && !char.IsLetterOrDigit(previous) && previous != '_')
             {
                 // One character in, so the caret sits inside a name being typed rather than before it.
-                yield return Math.Min(offset + 1, text.Length);
+                var caret = Math.Min(offset + 1, text.Length);
+                var after = EndOfWord(text, offset);
+
+                // A name with a dot after it is one link of a chain, and replacing a link says
+                // nothing about the links that follow: whether 'seconds' is a field of whatever the
+                // receiver has just been changed to is the author's next edit, not this item's fault.
+                // What completion does owe here -- that only something with members is offered in
+                // front of a dot -- is a rule of its own, and has a test of its own.
+                if (!keywords.Contains(offset) && (after >= text.Length || text[after] != '.'))
+                {
+                    yield return caret;
+                }
             }
 
             if (previous is ';' or '{' or '}')
@@ -123,6 +149,26 @@ internal static class CompletionProbe
             }
         }
     }
+
+    /// <summary>One past the last character of the word beginning at <paramref name="start"/>.</summary>
+    private static int EndOfWord(string text, int start)
+    {
+        var end = start;
+
+        while (end < text.Length && (char.IsLetterOrDigit(text[end]) || text[end] == '_'))
+        {
+            end++;
+        }
+
+        return end;
+    }
+
+    /// <summary>Where every keyword in the text begins, taken from the lexer rather than guessed.</summary>
+    private static HashSet<int> KeywordSpans(string text)
+        => [.. new Lexer(text, SourceIdentity.UnsavedName, new DiagnosticBag())
+            .Tokenize()
+            .Where(token => token.Kind.IsKeyword())
+            .Select(token => token.Span.Start.Offset)];
 
     /// <summary>Offers at every caret, accepts every item, and recompiles each result.</summary>
     public static async Task<IReadOnlyList<AppliedItem>> SweepAsync(

@@ -80,7 +80,9 @@ internal sealed record SchemaSubject(
     int End,
     bool PrecededByDot,
     bool PrecededByExtend,
-    bool PrecededByArg) : CompletionSubject
+    bool PrecededByArg,
+    bool FollowedByDot,
+    bool FollowedByCall) : CompletionSubject
 {
     public override CompletionContextKind Kind => CompletionContextKind.Schema;
 
@@ -112,13 +114,21 @@ internal sealed record SchemaSubject(
             return false;
         }
 
-        if (tokens.Any(token => token.Kind is TokenKind.StringLiteral && Covers(token.Span, offset)))
+        // Every literal, not only the quoted kind. A caret between the two halves of '0.0' is inside
+        // a number, and the dot there is part of the literal rather than a member access -- so a
+        // list offered at it replaces a digit and turns the number into a field access on a double.
+        // Found by sweeping the conformance corpus, which is full of floating-point literals; a
+        // fixture written by hand had none.
+        if (tokens.Any(token => token.Kind is TokenKind.StringLiteral or TokenKind.IntegerLiteral
+                or TokenKind.FloatLiteral
+            && Covers(token.Span, offset)))
         {
             return false;
         }
 
         var (start, end) = WordAt(text, offset);
         var preceding = Preceding(tokens, start);
+        var following = Following(tokens, end);
 
         subject = new SchemaSubject(
             offset,
@@ -126,7 +136,9 @@ internal sealed record SchemaSubject(
             end,
             PrecededByDot: preceding is TokenKind.Dot,
             PrecededByExtend: preceding is TokenKind.Extend,
-            PrecededByArg: preceding is TokenKind.Arg);
+            PrecededByArg: preceding is TokenKind.Arg,
+            FollowedByDot: following is TokenKind.Dot,
+            FollowedByCall: following is TokenKind.OpenParen);
 
         return true;
     }
@@ -163,6 +175,32 @@ internal sealed record SchemaSubject(
 
     private static bool IsWordCharacter(char character)
         => char.IsLetterOrDigit(character) || character == '_';
+
+    /// <summary>The kind of the first token beginning at or after the end of the name under the caret.</summary>
+    /// <remarks>
+    /// What comes after constrains what may be written, and the constraint is not the same as the one
+    /// in front. A name followed by <c>(</c> is being called, so only something callable can go there;
+    /// a name followed by <c>.</c> is a receiver, so only something with members can. Accepting an
+    /// item that ignores either produces text that does not bind, however good a candidate the name
+    /// would have been on its own.
+    /// </remarks>
+    private static TokenKind? Following(IReadOnlyList<Token> tokens, int end)
+    {
+        foreach (var token in tokens)
+        {
+            if (token.Kind is TokenKind.EndOfFile)
+            {
+                break;
+            }
+
+            if (token.Span.Start.Offset >= end)
+            {
+                return token.Kind;
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>The kind of the last token that ends at or before <paramref name="start"/>.</summary>
     /// <remarks>
