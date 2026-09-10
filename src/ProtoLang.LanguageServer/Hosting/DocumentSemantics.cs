@@ -34,6 +34,7 @@ public sealed record DocumentCompilation(
     /// work it fronts -- the position search, the reference index -- is deferred until something asks.
     /// </remarks>
     public SemanticModel? Semantics { get; } = Result is null ? null : SemanticModel.For(Result);
+
 }
 
 /// <summary>
@@ -244,17 +245,52 @@ public sealed class DocumentSemantics
             && held.Settings.CompilesTheSameWayAs(settings)
             && SchemasAreUnchanged(held);
 
-    /// <summary>Whether the schemas this compilation read still stand as it read them.</summary>
+    /// <summary>Whether the schemas this compilation rests on still stand as it read them.</summary>
     /// <remarks>
+    /// <para>
     /// The check <see cref="DescriptorCache"/> makes on its own entries, asked one level up so that a
     /// document cache cannot answer from a compilation whose descriptors the loader would already
-    /// have refused. True where there is no bundle to check: a compilation that failed before protoc
-    /// produced a closure has nothing to compare against, and recompiling it per keystroke would mean
-    /// running protoc on every keystroke for exactly the workspace whose schemas are broken.
+    /// have refused -- and asked against the same roots, which is the part that has to be said out
+    /// loud. A compilation publishes the caller's include paths and not the implicit ones the loader
+    /// puts behind them, while the closure it is compared against holds whatever those resolved: one
+    /// import of <c>google/protobuf/timestamp.proto</c> is enough for the re-description to find no
+    /// file where a file was recorded, and then every entry is stale and nothing is ever reused.
+    /// <see cref="DescriptorRequest.RootsFor"/> is where that order lives.
+    /// </para>
+    /// <para>
+    /// <b>A load that failed is not reused at all, which is the layer below's policy rather than a
+    /// new one.</b> A missing import or a malformed <c>.proto</c> leaves no bundle and therefore no
+    /// closure, and there is no honest way to describe what such a compilation depended on: protoc
+    /// blames a use rather than a declaration, so the file the author will edit to fix it is
+    /// routinely one protoc never named and nothing here can name either. Reconstructing the
+    /// dependency graph means reading <c>import</c> declarations out of schema text -- which is this
+    /// process holding a second opinion about protobuf's grammar, and a wrong one, since protoc
+    /// accepts spellings a scan will miss and any bound on the walk turns a missed dependency into a
+    /// permanent refusal. Spec 21.1 already settles the question one layer down: a load that failed
+    /// is not cached at all. Following it here costs a protoc run per question while the workspace is
+    /// broken, and buys the guarantee that fixing a schema is seen however the fix was made.
+    /// </para>
+    /// <para>
+    /// It costs very little else, because such a compilation is nearly empty: no descriptors means no
+    /// module, no types and no scope, so what is being declined is the reuse of an answer that had
+    /// almost nothing in it.
+    /// </para>
     /// </remarks>
     private static bool SchemasAreUnchanged(DocumentCompilation held)
-        => held.Result?.Schema is not { } schema
-            || SchemaClosure.IsCurrent(schema.Closure, held.Result.SearchPaths);
+        => held.Result is not { } result
+            || (result.Schema is { } schema
+                && SchemaClosure.IsCurrent(schema.Closure, RootsOf(result, held.Loader)));
+
+    /// <summary>Every root a schema name resolved against for this compilation, in priority order.</summary>
+    /// <remarks>
+    /// Recomputed at each question rather than stored beside the description, because both halves are
+    /// fixed properties of a compilation that has already run: the include paths it was given and the
+    /// implicit ones belonging to the loader that ran it. Neither can drift between the answer being
+    /// built and the answer being checked, and a stored copy would be a third statement of a list that
+    /// already has one home.
+    /// </remarks>
+    private static IReadOnlyList<string> RootsOf(CompilationResult result, DescriptorLoader? loader)
+        => DescriptorRequest.RootsFor(result.SearchPaths, loader?.ImplicitIncludePaths ?? []);
 
     private DocumentCompilation Build(
         OpenDocument document,

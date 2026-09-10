@@ -48,6 +48,168 @@ public class DocumentSemanticsTests
 
     // ------- what counts as the same question
 
+    /// <summary>A dependency can repair a schema error without being named in protoc's report.</summary>
+    /// <remarks>
+    /// The undefined type is blamed on its use in root.proto, but its declaration belongs in
+    /// types.proto. Only that dependency changes, leaving both the ProtoLang buffer and every file
+    /// named by the failed compilation's diagnostics untouched.
+    /// </remarks>
+    [Fact]
+    [Trait("ReviewRegression", "SchemaCompletionEdgeCases")]
+    public void RepairingAnUnreportedDependencyReleasesACachedSchemaFailure()
+        => AssertDependencyRepairIsVisible("import \"types.proto\";");
+
+    /// <summary>The fallback dependency scan must recognize imports that protoc accepts.</summary>
+    [Theory]
+    [InlineData("import\"types.proto\";")]
+    [InlineData("import 'types.proto';")]
+    [InlineData("import /* dependency */ \"types.proto\";")]
+    [InlineData("import \"types\\x2eproto\";")]
+    [Trait("ReviewRegression", "SchemaCompletionReachability")]
+    public void EveryLegalImportSpellingObservesAnUnreportedDependencyRepair(string declaration)
+        => AssertDependencyRepairIsVisible(declaration);
+
+    /// <summary>A partial dependency walk cannot certify that a cached failure is still current.</summary>
+    /// <remarks>
+    /// Commented examples are not dependencies, but the conservative scan counts them toward its
+    /// limit. Only two real schemas are needed to exhaust that limit before reaching the real import.
+    /// </remarks>
+    [Fact]
+    [Trait("ReviewRegression", "SchemaCompletionReachability")]
+    public void CommentedImportsCannotHideARealDependencyRepairBeyondTheWalkLimit()
+    {
+        var examples = string.Join(
+            "\n", Enumerable.Range(0, 600).Select(index => $"// import \"example{index}.proto\";"));
+
+        AssertDependencyRepairIsVisible(examples + "\nimport \"types.proto\";");
+    }
+
+    /// <summary>Only an unreported dependency is changed, and a cold compile proves the repair works.</summary>
+    private static void AssertDependencyRepairIsVisible(string declaration)
+    {
+        var root = TestPaths.CreateTempDirectory();
+        var dependency = Path.Combine(root, "types.proto");
+        File.WriteAllText(dependency, "syntax = \"proto3\"; message Other {}");
+        File.WriteAllText(
+            Path.Combine(root, "root.proto"),
+            "syntax = \"proto3\"; " + declaration + "\nmessage Counter { Missing value = 1; }");
+
+        var uri = DocumentUri.Parse(new Uri(Path.Combine(root, "unchanged.protolang")).AbsoluteUri);
+        var document = new DocumentStore().Open(
+            uri, "protolang", 1,
+            "import proto \"root.proto\"; extend Counter { fn f() -> int64 { return 1; } }");
+        var configuration = Settings(root);
+        var loaders = Loaders();
+        var semantics = new DocumentSemantics(loaders);
+        var failed = semantics.For(document, configuration, CancellationToken.None);
+
+        Assert.NotNull(failed.Result);
+        Assert.False(failed.Result.Success);
+        Assert.Null(failed.Result.Schema);
+        Assert.Contains(failed.Result.Diagnostics, diagnostic => diagnostic.Code == "PL0003");
+        Assert.NotNull(failed.Result.SchemaFailure);
+        Assert.Contains(failed.Result.SchemaFailure.Output, reported => Path.GetFileName(reported.File) == "root.proto");
+        Assert.DoesNotContain(failed.Result.SchemaFailure.Output, reported => Path.GetFileName(reported.File) == "types.proto");
+
+        File.WriteAllText(dependency, "syntax = \"proto3\"; message Other {} message Missing {}");
+
+        // A cold document cache over the same loader proves that this dependency-only repair suffices.
+        var control = new DocumentSemantics(loaders).For(document, configuration, CancellationToken.None);
+        Assert.True(control.Result?.Success == true, "adding the missing type to the dependency must repair the source");
+
+        var recovered = semantics.For(document, configuration, CancellationToken.None);
+
+        Assert.True(
+            recovered.Result?.Success == true,
+            "repairing types.proto must release the cached failure even though protoc blamed only root.proto");
+        Assert.NotNull(recovered.Result!.Types.FindMessage("Missing"));
+    }
+
+    /// <summary>A failed schema load must recover when only the schema on disk is repaired.</summary>
+    [Theory]
+    [InlineData(null, "PL0002")]
+    [InlineData("syntax = \"proto3\"; message Counter {", "PL0003")]
+    [Trait("ReviewRegression", "SchemaCompletionFollowUp")]
+    public void ARepairedSchemaReleasesACachedFailureWithoutEditingTheDocument(
+        string? brokenSchema, string expectedDiagnostic)
+    {
+        var root = TestPaths.CreateTempDirectory();
+        var schema = Path.Combine(root, "repairable.proto");
+        if (brokenSchema is not null)
+        {
+            File.WriteAllText(schema, brokenSchema);
+        }
+
+        var uri = DocumentUri.Parse(new Uri(Path.Combine(root, "unchanged.protolang")).AbsoluteUri);
+        var document = new DocumentStore().Open(
+            uri, "protolang", 1,
+            "import proto \"repairable.proto\"; extend Counter { fn f() -> int64 { return count; } }");
+        var configuration = Settings(root);
+        var loaders = Loaders();
+        var semantics = new DocumentSemantics(loaders);
+        var failed = semantics.For(document, configuration, CancellationToken.None);
+
+        Assert.NotNull(failed.Result);
+        Assert.False(failed.Result.Success);
+        Assert.Null(failed.Result.Schema);
+        Assert.Contains(failed.Result.Diagnostics, diagnostic => diagnostic.Code == expectedDiagnostic);
+
+        File.WriteAllText(schema, "syntax = \"proto3\"; message Counter { int64 count = 1; }");
+
+        // The same loader must already see the repair, so any stale refusal belongs to the document cache.
+        var control = new DocumentSemantics(loaders).For(document, configuration, CancellationToken.None);
+        Assert.True(control.Result?.Success == true, "the repaired schema and unchanged source must compile");
+
+        var recovered = semantics.For(document, configuration, CancellationToken.None);
+
+        Assert.True(
+            recovered.Result?.Success == true,
+            $"a cached {expectedDiagnostic} must not survive creating or repairing its schema on disk");
+        Assert.NotNull(recovered.Result!.Types.FindMessage("Counter")?.FindFieldByName("count"));
+    }
+
+    /// <summary>Unchanged schemas found through implicit include roots must still permit a cache hit.</summary>
+    /// <remarks>
+    /// Gate on the environment before asking the cache: protoc can ship well-known schemas only as
+    /// built-in descriptors, while this regression needs a closure backed by an implicit-root file.
+    /// </remarks>
+    [Fact]
+    [Trait("ReviewRegression", "SchemaCompletionFollowUp")]
+    public void AWellKnownSchemaFromAnImplicitRootDoesNotRecompileAnUnchangedDocument()
+    {
+        var loaders = Loaders();
+        Assert.True(loaders.TryGet(null, out var loader, out var failure), failure?.Message);
+        Assert.NotNull(loader);
+        if (loader.ImplicitIncludePaths.Count == 0)
+        {
+            Assert.Skip($"'{loader.ProtocPath}' ships no well-known schemas as files.");
+        }
+
+        var root = TestPaths.CreateTempDirectory();
+        var uri = DocumentUri.Parse(new Uri(Path.Combine(root, "well-known.protolang")).AbsoluteUri);
+        var document = new DocumentStore().Open(
+            uri, "protolang", 1,
+            "import proto \"google/protobuf/timestamp.proto\"; "
+                + "extend google.protobuf.Timestamp { fn f() -> int64 { return seconds; } }");
+        var configuration = Settings(root);
+        var semantics = new DocumentSemantics(loaders);
+        var first = semantics.For(document, configuration, CancellationToken.None);
+
+        Assert.True(first.Result?.Success == true, "the well-known schema and source must compile");
+        Assert.NotNull(first.Result!.Schema);
+        var timestamp = Assert.Single(
+            first.Result.Schema.Closure, file => file.Name == "google/protobuf/timestamp.proto");
+        Assert.NotNull(timestamp.Path);
+        Assert.NotNull(timestamp.ContentHash);
+
+        semantics.For(document, configuration, CancellationToken.None);
+        semantics.For(document, configuration, CancellationToken.None);
+
+        Assert.True(
+            semantics.Compilations == 1,
+            $"an unchanged implicit-root schema must reuse one compilation, not {semantics.Compilations}");
+    }
+
     /// <summary>A schema edit changes the answer even when the source buffer has not moved.</summary>
     [Fact]
     [Trait("ReviewRegression", "SchemaCompletion")]

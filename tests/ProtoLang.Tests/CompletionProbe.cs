@@ -201,6 +201,14 @@ internal static class CompletionProbe
     }
 
     /// <summary>Applies one item exactly as a client would, and compiles what it produced.</summary>
+    /// <remarks>
+    /// The range is checked before it is used, because applying it is not the same as honouring it.
+    /// This method takes any range at all and splices it, so a sweep that only ever applied edits
+    /// would go on passing over a range no client would honour. LSP says two things about a
+    /// completion's range -- it contains the position the request was made at, and it begins and ends
+    /// on one line -- and a client is entitled to discard or misapply an item that breaks either.
+    /// Both are asserted of every item at every caret, which is the whole point of having a sweep.
+    /// </remarks>
     private static AppliedItem Accept(
         string text, LineMap lines, int caret, CompletionItem item, string path, DescriptorLoader loader)
     {
@@ -208,6 +216,16 @@ internal static class CompletionProbe
 
         var start = Offset(lines, item.TextEdit!.Range.Start);
         var end = Offset(lines, item.TextEdit.Range.End);
+
+        Assert.True(
+            start <= caret && caret <= end,
+            $"'{item.Label}' offered at offset {caret} replaces [{start},{end}], which does not "
+                + "contain the position the request was made at");
+
+        Assert.True(
+            item.TextEdit.Range.Start.Line == item.TextEdit.Range.End.Line,
+            $"'{item.Label}' offered at offset {caret} edits lines {item.TextEdit.Range.Start.Line} "
+                + $"through {item.TextEdit.Range.End.Line}; a completion range must be on one line");
         var inserted = item.TextEdit.NewText;
         var applied = string.Concat(text.AsSpan(0, start), inserted, text.AsSpan(end));
 

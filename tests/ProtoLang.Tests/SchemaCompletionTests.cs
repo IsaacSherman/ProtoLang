@@ -1180,6 +1180,168 @@ public class SchemaCompletionTests
         Assert.DoesNotContain("f()", Labels(offered));
     }
 
+    /// <summary>Recovery must produce completion edits containing the position the client requested.</summary>
+    /// <remarks>
+    /// Applying an edit and compiling is not enough: LSP requires its single-line range to contain
+    /// the requested caret, even when the parser's missing-name span sits elsewhere in the gap.
+    /// </remarks>
+    [Fact]
+    [Trait("ReviewRegression", "SchemaCompletionFollowUp")]
+    public async Task EveryMissingLocalTypeCompletionEditContainsTheRequestedCaret()
+    {
+        var (provider, uri, text) = Beside(
+            "extend Outer { fn f() -> int64 { var local:  = inner; return count; } }");
+        var parameters = At(uri, text, After(text, "var local: "));
+        var request = provider.Read(parameters);
+        Assert.NotNull(request);
+
+        var offered = (await provider.AnswerAsync(request, CancellationToken.None)).Items;
+
+        Assert.Contains(offered, item => item.Label == "int64");
+        Assert.All(offered, item =>
+        {
+            Assert.NotNull(item.TextEdit);
+            var range = item.TextEdit.Range;
+            var caret = parameters.Position;
+            Assert.Equal(caret.Line, range.Start.Line);
+            Assert.Equal(caret.Line, range.End.Line);
+            Assert.True(
+                range.Start.Character <= caret.Character && caret.Character <= range.End.Character,
+                $"'{item.Label}' edits [{range.Start.Character}, {range.End.Character}], "
+                    + $"which must contain the requested caret at {caret.Character}");
+        });
+    }
+
+    /// <summary>A legal multiline qualified name must not produce a multiline completion edit.</summary>
+    /// <remarks>
+    /// Caret containment is only half the LSP contract: even an edit that replaces the right name
+    /// and produces compilable source must stay on a single line. Both qualified-name contexts
+    /// share the replacement helper, so each must honour that restriction.
+    /// </remarks>
+    [Theory]
+    [InlineData(
+        "extend Outer { fn f(other: protolang.\n tests.Outer) -> int64 { return count; } }",
+        "tests.Out")]
+    [InlineData(
+        "extend protolang.\n tests.Outer { fn f() -> int64 { return count; } }",
+        "tests.Out")]
+    [Trait("ReviewRegression", "SchemaCompletionEdgeCases")]
+    public async Task QualifiedNameCompletionEditsStayOnTheRequestedLine(string body, string marker)
+    {
+        var (provider, uri, text) = Beside(body);
+        var source = new SourceDocument(SourceIdentity.FromPath(uri.Path!), text);
+        var compilation = new Compilation(source, new CompilationOptions { Loader = Loader() });
+        Assert.True(compilation.Compile(CancellationToken.None).Success, "the multiline qualified name must be valid source");
+
+        var parameters = At(uri, text, After(text, marker));
+        var request = provider.Read(parameters);
+        Assert.NotNull(request);
+        var offered = (await provider.AnswerAsync(request, CancellationToken.None)).Items;
+
+        Assert.Contains(offered, item => item.Label == "Outer");
+        Assert.All(offered, item =>
+        {
+            Assert.NotNull(item.TextEdit);
+            var range = item.TextEdit.Range;
+            Assert.True(
+                range.Start.Line == parameters.Position.Line && range.End.Line == parameters.Position.Line,
+                $"'{item.Label}' edits lines {range.Start.Line} through {range.End.Line}; "
+                    + $"a completion edit must stay on the requested line {parameters.Position.Line}");
+        });
+    }
+
+    /// <summary>
+    /// A range that cannot cover the whole name must not offer the items that need it to.
+    /// </summary>
+    /// <remarks>
+    /// The range test above says the edit is one a client will honour; this says the edit is one the
+    /// compiler will accept, and they are different claims. Where only the last segment can be
+    /// replaced, the prefix stays -- so the qualified spelling composes
+    /// <c>protolang.tests.protolang.tests.Outer</c> and a sibling composes a name nothing declares.
+    /// Applied and recompiled rather than inspected, which is how every other offer in this file is
+    /// held to the same promise.
+    /// </remarks>
+    [Theory]
+    [InlineData(
+        "extend Outer { fn f(other: protolang.\n tests.Outer) -> int64 { return count; } }",
+        "tests.Out")]
+    [InlineData(
+        "extend protolang.\n tests.Outer { fn f() -> int64 { return count; } }",
+        "tests.Out")]
+    [Trait("ReviewRegression", "SchemaCompletionReachability")]
+    public async Task EveryItemOfferedInsideAMultilineQualifiedNameBindsWhenItIsAccepted(
+        string body, string marker)
+    {
+        var (provider, uri, text) = Beside(body);
+
+        var applied = await CompletionProbe.SweepAsync(
+            provider, uri, text, [After(text, marker)], uri.Path!, Loader());
+
+        // The name already written stays writable, so this is a filter rather than a silence.
+        Assert.Contains(applied, attempt => attempt.Item.Label == "Outer");
+
+        foreach (var attempt in applied)
+        {
+            var refused = attempt.About
+                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
+                .ToList();
+
+            Assert.True(
+                refused.Count == 0,
+                $"accepting '{attempt.Item.Label}' into one segment of a multiline name produced "
+                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+        }
+    }
+
+    /// <summary>Retained name parts resolve a fragment that need not be a valid standalone type.</summary>
+    [Theory]
+    [InlineData("extend a.\n Common { fn f() -> int64 { return 1; } }", "\n Com")]
+    [InlineData("extend a.Common { fn f(other: a.\n Common) -> int64 { return 1; } }", "\n Com")]
+    [InlineData("extend a.\n Common { fn f() -> int64 { return 1; } }", "extend a")]
+    [InlineData("extend a.Common { fn f(other: a.\n Common) -> int64 { return 1; } }", "other: a")]
+    [Trait("ReviewRegression", "SchemaCompletionQualification")]
+    public async Task RetainedNamePartsKeepQualifiedTypesCompletable(string body, string marker)
+    {
+        var root = TestPaths.CreateTempDirectory();
+        File.WriteAllText(Path.Combine(root, "a.proto"), "syntax = \"proto3\"; package a; message Common {}");
+        File.WriteAllText(Path.Combine(root, "b.proto"), "syntax = \"proto3\"; package b; message Common {}");
+        var text = "import proto \"a.proto\"; import proto \"b.proto\";\n" + body;
+        var uri = DocumentUri.Parse(new Uri(Path.Combine(root, "qualified.protolang")).AbsoluteUri);
+        var documents = new DocumentStore();
+        documents.Open(uri, "protolang", 1, text);
+        var provider = new CompletionProvider(documents, Configuration(), Pool.Value);
+
+        await AssertExistingQualifiedNameCanBeReacceptedAsync(provider, uri, text, marker);
+    }
+
+    /// <summary>Comments retained around a dot are trivia, not part of the qualified name.</summary>
+    [Theory]
+    [InlineData("extend protolang. /* receiver */\n tests.Outer { fn f() -> int64 { return count; } }")]
+    [InlineData("extend Outer { fn f(other: protolang. // parameter\n tests.Outer) -> int64 { return count; } }")]
+    [Trait("ReviewRegression", "SchemaCompletionQualification")]
+    public async Task CommentsInARetainedQualifierDoNotRemoveValidCompletions(string body)
+    {
+        var (provider, uri, text) = Beside(body);
+
+        await AssertExistingQualifiedNameCanBeReacceptedAsync(provider, uri, text, "tests.Out");
+    }
+
+    /// <summary>Reaccepting the written name must remain possible without changing valid source.</summary>
+    private static async Task AssertExistingQualifiedNameCanBeReacceptedAsync(
+        CompletionProvider provider, DocumentUri uri, string text, string marker)
+    {
+        var source = new SourceDocument(SourceIdentity.FromPath(uri.Path!), text);
+        var compilation = new Compilation(source, new CompilationOptions { Loader = Loader() });
+        Assert.True(compilation.Compile(CancellationToken.None).Success, "the qualified name must already bind");
+
+        var applied = await CompletionProbe.SweepAsync(
+            provider, uri, text, [After(text, marker)], uri.Path!, Loader());
+
+        Assert.True(
+            applied.Any(attempt => attempt.Applied == text && attempt.Result.Success),
+            "completion must retain an edit that reaccepts the existing, valid qualified name");
+    }
+
     /// <summary>A dot inside a type reference must not dispatch to expression-member completion.</summary>
     [Fact]
     [Trait("ReviewRegression", "SchemaCompletion")]

@@ -506,9 +506,9 @@ public sealed class CompletionProvider
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (ExtendedAt(model, subject) is { } extended)
+        if (ExtendedAt(model, subject, asked.Document) is { } extended)
         {
-            return Receivers(result, extended, asked.Document);
+            return extended.Writable(Receivers(result, extended.Subject, asked.Document));
         }
 
         // Before the scope query as well as before the dot, because a type position is one of the
@@ -551,25 +551,201 @@ public sealed class CompletionProvider
     /// and that is precisely the state the list is requested in.
     /// </para>
     /// </remarks>
-    private static SchemaSubject? ExtendedAt(SemanticModel model, SchemaSubject subject)
+    private static QualifiedName? ExtendedAt(
+        SemanticModel model, SchemaSubject subject, OpenDocument document)
     {
         if (model.SyntaxAt(subject.Start)?.Enclosing<ExtendDeclaration>() is { } extend
             && Covers(extend.MessageName.Span, subject.Start))
         {
-            return Replacing(subject, extend.MessageName.Span);
+            return Replacing(subject, extend.MessageName.Span, document);
         }
 
-        return subject.PrecededByExtend ? subject : null;
+        return subject.PrecededByExtend ? new QualifiedName(subject, string.Empty, string.Empty) : null;
+    }
+
+    /// <summary>
+    /// Where an item's text will be written, and what of the name around it will still be there
+    /// afterwards.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Both halves travel together because neither is usable alone. A range that replaces the whole
+    /// written name retains nothing, and every candidate spelling may be offered against it. A range
+    /// that replaces one segment of it -- which is all LSP allows when the name is spread over two
+    /// lines -- leaves the rest of the name standing, and an item is then only writable if the name it
+    /// composes with what stayed is itself a name the compiler would accept.
+    /// </para>
+    /// <para>
+    /// The retained text is stripped of whitespace, because within a qualified name whitespace only
+    /// ever sits around a dot: the newline and the indentation of <c>protolang.</c> then
+    /// <c>tests.Outer</c> are between segments of one name, and the name it composes is
+    /// <c>protolang.tests.Outer</c>.
+    /// </para>
+    /// </remarks>
+    private sealed record QualifiedName(SchemaSubject Subject, string Prefix, string Suffix)
+    {
+        /// <summary>
+        /// <paramref name="offered"/> rewritten into what can actually be written here.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Untouched where the edit replaces the whole name -- which is every ordinary caret, so the
+        /// common path allocates nothing and decides nothing.
+        /// </para>
+        /// <para>
+        /// <b>Otherwise each spelling is cut down to the part this edit could write, rather than being
+        /// kept or dropped whole.</b> Filtering was the first attempt and it is wrong in both
+        /// directions at once, because a segment of a name is not a name. Where two packages declare
+        /// <c>Common</c>, no simple spelling is offered at all -- writing it unqualified is
+        /// <c>PL0074</c> -- so a retained <c>a.</c> that makes it unambiguous had nothing left to keep
+        /// and the caret went silent. And a package segment is not a type in any list, so a caret on
+        /// the <c>a</c> of <c>a.Common</c> could never be answered by choosing among type names.
+        /// </para>
+        /// <para>
+        /// What is written here is a fragment of some whole name, so the fragments are taken from the
+        /// whole names: a spelling that begins with what stays in front and ends with what stays
+        /// behind contributes the piece in between. That piece is offered exactly when writing it
+        /// reconstructs that spelling, so it inherits the spelling's own guarantee and this decides
+        /// nothing about what resolves. It also cannot span a dot, because the range is one word.
+        /// </para>
+        /// </remarks>
+        public IReadOnlyList<CompletionItem> Writable(IReadOnlyList<CompletionItem> offered)
+        {
+            if (Prefix.Length == 0 && Suffix.Length == 0)
+            {
+                return offered;
+            }
+
+            var written = new List<CompletionItem>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var item in offered)
+            {
+                if (Fragment(item.Label) is { } fragment && seen.Add(fragment))
+                {
+                    // The inserted text as well as the label, because they are two statements of one
+                    // thing and a client honours the second. Rewriting only the label offers 'Mapped'
+                    // and writes 'protolang.tests.Mapped' into a range holding one segment, which
+                    // composes the qualifier twice -- the very defect this exists to prevent, and it
+                    // reads correctly in the list right up until it is accepted.
+                    //
+                    // The detail keeps the whole name, which is what is being completed to and now the
+                    // only place a reader can see it. The sort text keeps the rank it was given, so
+                    // kinds stay grouped as they do everywhere else.
+                    written.Add(item with
+                    {
+                        Label = fragment,
+                        FilterText = fragment,
+                        TextEdit = item.TextEdit is { } edit ? edit with { NewText = fragment } : null,
+                    });
+                }
+            }
+
+            return written;
+        }
+
+        /// <summary>The part of <paramref name="spelling"/> this edit would write, or null when it
+        /// could not write this spelling at all.</summary>
+        private string? Fragment(string spelling)
+        {
+            if (spelling.Length <= Prefix.Length + Suffix.Length
+                || !spelling.StartsWith(Prefix, StringComparison.Ordinal)
+                || !spelling.EndsWith(Suffix, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var fragment = spelling[Prefix.Length..(spelling.Length - Suffix.Length)];
+
+            return fragment.Contains('.') ? null : fragment;
+        }
     }
 
     /// <summary>The subject with its edit range moved to the whole of a name already written.</summary>
     /// <remarks>
+    /// <para>
     /// One home for it because both qualified-name contexts need it and the reason is the same in
     /// each: <see cref="SchemaSubject.Start"/> and <see cref="SchemaSubject.End"/> come from walking
     /// word characters outward, which stops at a dot, and a name with dots in it is still one name.
+    /// </para>
+    /// <para>
+    /// <b>A range LSP cannot express is refused rather than returned</b>, and both halves of that are
+    /// the protocol's rule rather than a preference: a completion's edit range must contain the
+    /// position the request was made at, and it must begin and end on one line. A client is entitled
+    /// to discard or misapply an item that breaks either, so an item that cannot replace the whole
+    /// name falls back to replacing the word under the caret, which satisfies both by construction --
+    /// it is where the caret is, and a word stops at a newline.
+    /// </para>
+    /// <para>
+    /// Each half has its own case. A name the parser recovered rather than read has an empty span at
+    /// the insertion point where the name would have gone, which for <c>var local: | = inner</c> sits
+    /// back against the colon while the caret is a space further on; there is no written name to
+    /// replace, so the caret's own range was already the right one. A name written across two lines --
+    /// <c>protolang.</c> then <c>tests.Outer</c> -- is legal source that no single-line range can
+    /// cover, and the fallback replaces the last segment instead. <b>That is the one place this file
+    /// offers something whose acceptance may not bind</b>, because no range exists that would: the
+    /// item is a whole name and only part of the name is reachable. Silence was the alternative and is
+    /// worse, since the overwhelmingly common acceptance is the name already written, which the
+    /// fallback reproduces exactly.
+    /// </para>
+    /// <para>
+    /// Enforced here rather than at each caller because it is one invariant about every item this file
+    /// produces, and the sweep asserts it of every one of them. What the fallback then leaves standing
+    /// is reported alongside it, because an item that cannot replace the whole name has to be judged
+    /// against the part of the name that stays; see <see cref="QualifiedName"/>.
+    /// </para>
     /// </remarks>
-    private static SchemaSubject Replacing(SchemaSubject subject, SourceSpan name)
-        => subject with { Start = name.Start.Offset, End = name.End.Offset };
+    private static QualifiedName Replacing(SchemaSubject subject, SourceSpan name, OpenDocument document)
+    {
+        if (name.Start.Line == name.End.Line
+            && name.Start.Offset <= subject.Offset
+            && subject.Offset <= name.End.Offset)
+        {
+            return new QualifiedName(
+                subject with { Start = name.Start.Offset, End = name.End.Offset },
+                string.Empty,
+                string.Empty);
+        }
+
+        var (prefix, suffix) = Qualification(document.Text, name, subject);
+
+        return new QualifiedName(subject, prefix, suffix);
+    }
+
+    /// <summary>The segments of a written name that an edit on one of them leaves standing.</summary>
+    /// <remarks>
+    /// <para>
+    /// Taken from the name's own tokens rather than from the text between its ends, because the text
+    /// between its ends is not the name. Whitespace lives there, which is what makes a name span two
+    /// lines at all -- and so do comments: <c>protolang. /* receiver */ tests.Outer</c> is one
+    /// qualified name and one piece of trivia, and a qualifier reconstructed by copying characters
+    /// carries the comment into it and matches no spelling of anything. Stripping whitespace was the
+    /// first attempt and it fixed the newline while leaving the comment, which is the same mistake
+    /// with a smaller blast radius.
+    /// </para>
+    /// <para>
+    /// The lexer already draws that line and is the one that drew it for the parser, so it is asked
+    /// rather than imitated. It runs over the name alone rather than the buffer, which is why this
+    /// can afford to be a second lex: the region is one qualified name long.
+    /// </para>
+    /// </remarks>
+    private static (string Prefix, string Suffix) Qualification(
+        string text, SourceSpan name, SchemaSubject subject)
+    {
+        var start = name.Start.Offset;
+        var written = new Lexer(
+            text[start..name.End.Offset], SourceIdentity.UnsavedName, new DiagnosticBag()).Tokenize();
+
+        var segments = written.Where(token => token.Kind is TokenKind.Identifier).ToList();
+
+        return (
+            string.Concat(segments
+                .Where(token => start + token.Span.End.Offset <= subject.Start)
+                .Select(token => token.Text + ".")),
+            string.Concat(segments
+                .Where(token => start + token.Span.Start.Offset >= subject.End)
+                .Select(token => "." + token.Text)));
+    }
 
     /// <summary>The messages that could receive an <c>extend</c> block.</summary>
     /// <remarks>
@@ -771,9 +947,11 @@ public sealed class CompletionProvider
         // members, so replacing only the segment under the caret turns 'protolang.tests.Outer' into
         // 'Duration.tests.Outer'. The parser's own idea of where the name starts and ends is used,
         // because it is the one that decided this was a single qualified name in the first place.
-        subject = Replacing(subject, reference.Name.Span);
+        var written = Replacing(subject, reference.Name.Span, document);
 
-        return
+        subject = written.Subject;
+
+        return written.Writable(
         [
             // The spellings the scalar factory accepts, taken from the one keyword table rather than
             // written out again -- so a scalar added to the language is offered without this line
@@ -786,7 +964,7 @@ public sealed class CompletionProvider
                     spelling, CompletionItemKind.Keyword, "scalar type", null, "0", subject, document)),
 
             .. result.Types.All.SelectMany(type => Spellings(type, result, subject, document)),
-        ];
+        ]);
     }
 
     /// <summary>
