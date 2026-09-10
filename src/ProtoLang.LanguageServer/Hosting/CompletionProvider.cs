@@ -511,6 +511,11 @@ public sealed class CompletionProvider
             return extended.Writable(Receivers(result, extended.Subject, asked.Document));
         }
 
+        if (Targeted(model, result, subject, asked.Document) is { } target)
+        {
+            return target;
+        }
+
         // Before the scope query as well as before the dot, because a type position is one of the
         // places that query declines on purpose -- it returns nothing inside a type reference, and
         // taking that for "no names here" would leave the whole context silent.
@@ -745,6 +750,109 @@ public sealed class CompletionProvider
             string.Concat(segments
                 .Where(token => start + token.Span.Start.Offset >= subject.End)
                 .Select(token => "." + token.Text)));
+    }
+
+    /// <summary>
+    /// What the two halves of a <c>test</c> target can name, or null when the caret is in neither.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A target is a message and one of its methods, and both are names the author did not invent:
+    /// the message is in a schema and the method is a few lines above, so this is the context where
+    /// completion has the most to say and said nothing at all until now. It is its own arm rather
+    /// than a case of the scope query because a target is a declaration header, and
+    /// <c>ScopeAt</c> declines in headers on purpose -- the names there are not values.
+    /// </para>
+    /// <para>
+    /// <b>The two halves constrain each other, and that is what keeps either from stranding the
+    /// other.</b> A target binds only when the message resolves <em>and</em> declares the method, so
+    /// an item that replaces one half has to be one the other half survives. The method list is
+    /// therefore the methods of the receiver already written, and the receiver list is the messages
+    /// that declare the method already written -- which is not a filter on top of a general answer
+    /// but the answer itself, since a receiver without that method produces <c>PL0058</c> the moment
+    /// it is accepted.
+    /// </para>
+    /// <para>
+    /// <b>A target with no receiver is left alone.</b> Written without a dot, <c>test f</c> is a
+    /// method and no receiver -- the parser says so, and <see cref="TestTarget"/> explains why it
+    /// reads it that way -- and there is no single name that completes it, because what is missing is
+    /// a name <em>and</em> a dot. Offering a message there produces <c>test EnumCase</c>, which is
+    /// <c>PL0057</c>. Something could be offered that inserts both, and it would not be one of these:
+    /// every item here replaces one name with one name.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<CompletionItem>? Targeted(
+        SemanticModel model, CompilationResult result, SchemaSubject subject, OpenDocument document)
+    {
+        if (model.SyntaxAt(subject.Start)?.Enclosing<TestTarget>() is not { } target
+            || result.Module is not { } module)
+        {
+            return null;
+        }
+
+        // The method first, because a missing method's insertion point is the position just after
+        // the dot, and a missing receiver's is just before the method -- so at 'test Outer.|' both
+        // are empty ranges at nearly the same place, and only one of them is what is being written.
+        if (Covers(target.Method.Span, subject.Start))
+        {
+            return Methods(module, result, target, Replacing(subject, target.Method.Span, document), document);
+        }
+
+        return Covers(target.Receiver.Span, subject.Start) && !target.Receiver.IsMissing
+            ? Receivers(module, result, target, Replacing(subject, target.Receiver.Span, document), document)
+            : null;
+    }
+
+    /// <summary>The methods a test could target on the receiver its header already names.</summary>
+    /// <inheritdoc cref="Targeted" path="/remarks/para[2]"/>
+    private static IReadOnlyList<CompletionItem> Methods(
+        IrModule module,
+        CompilationResult result,
+        TestTarget target,
+        QualifiedName written,
+        OpenDocument document)
+    {
+        if (target.Receiver.IsMissing || result.Types.ResolveReceiver(target.Receiver.Text) is not { } receiver)
+        {
+            return [];
+        }
+
+        return written.Writable(
+        [
+            .. module.MethodsOn(receiver.FullName).Select(method => Member(
+                method.Name,
+                CompletionItemKind.Method,
+                method.Signature.DisplayName,
+                null,
+                "0",
+                written.Subject,
+                document)),
+        ]);
+    }
+
+    /// <summary>The messages a test could target, given the method its header already names.</summary>
+    /// <inheritdoc cref="Targeted" path="/remarks/para[2]"/>
+    private static IReadOnlyList<CompletionItem> Receivers(
+        IrModule module,
+        CompilationResult result,
+        TestTarget target,
+        QualifiedName written,
+        OpenDocument document)
+        => written.Writable(
+        [
+            .. result.Types.All
+                .Where(type => type.IsMessage && Declares(module, type.FullName, target.Method))
+                .SelectMany(type => Receiver(type, result, written.Subject, document)),
+        ]);
+
+    /// <summary>Whether this message declares the method a target names, or any at all when it names none.</summary>
+    private static bool Declares(IrModule module, string receiver, SyntaxName method)
+    {
+        var declared = module.MethodsOn(receiver);
+
+        return method.IsMissing
+            ? declared.Count > 0
+            : declared.Any(candidate => string.Equals(candidate.Name, method.Text, StringComparison.Ordinal));
     }
 
     /// <summary>The messages that could receive an <c>extend</c> block.</summary>
@@ -1196,10 +1304,13 @@ public sealed class CompletionProvider
     /// expression is an error; the one thing that is not is the answer.
     /// </para>
     /// <para>
-    /// The other three are accesses that did resolve, so that invoking completion on a name already
-    /// written offers its siblings rather than nothing. A field access and a method call each keep the
-    /// receiver they resolved against; an enum constant keeps no receiver because it never had one,
-    /// and its own type is what the name before the dot named.
+    /// The others are accesses that did resolve, so that invoking completion on a name already
+    /// written offers its siblings rather than nothing. A field access, a presence test and a method
+    /// call each keep the receiver they resolved against; an enum constant keeps no receiver because
+    /// it never had one, and its own type is what the name before the dot named. A presence test is
+    /// in that list because <c>has inner.stamp</c> is a member access like any other and reads
+    /// nothing like one in the IR: it binds to its own node, so a list of the node kinds that carry a
+    /// receiver is a list that can be, and was, incomplete.
     /// </para>
     /// <para>
     /// <b>An enum-typed receiver is the one case where knowing the type is not enough.</b> Constants
@@ -1236,6 +1347,7 @@ public sealed class CompletionProvider
 
         var receiver = at.Enclosing<IrMissingMemberAccess>()?.Receiver
             ?? at.Enclosing<IrFieldAccess>()?.Receiver
+            ?? at.Enclosing<IrFieldPresence>()?.Receiver
             ?? at.Enclosing<IrMethodCall>()?.Receiver;
 
         return receiver switch

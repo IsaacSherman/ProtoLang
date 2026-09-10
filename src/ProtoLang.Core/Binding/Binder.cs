@@ -295,23 +295,20 @@ public sealed class Binder
 
     private MessageDescriptor? ResolveMessage(string name, SourceSpan span)
     {
-        if (_types.FindMessage(name) is { } byFullName)
+        // Asked of the index rather than worked out here, for the reason ResolveTypeReference asks
+        // its own question there: completion has to reach this same answer, and a receiver is
+        // ambiguous against messages alone rather than against every type. What stays here is which
+        // of the two ways it failed, because that is a choice between two diagnostics and the index
+        // issues none.
+        if (_types.ResolveReceiver(name) is { } resolved)
         {
-            return byFullName;
+            return resolved;
         }
 
         var candidates = _types.MessagesNamed(name);
 
         if (candidates.Count > 0)
         {
-            // Asked of the index rather than counted here, for the reason ResolveTypeReference asks
-            // its own question there: completion has to predict this exactly, and a receiver is
-            // ambiguous against messages alone rather than against every type.
-            if (!_types.IsAmbiguousAsAReceiverName(name))
-            {
-                return candidates[0];
-            }
-
             _diagnostics.Error(
                 "PL0020",
                 "ambiguous message name",

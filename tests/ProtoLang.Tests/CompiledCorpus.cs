@@ -91,13 +91,79 @@ internal static class CompiledCorpus
         Compilation.Compile(TestPaths.WriteTempScript(UnclosedText), [TestPaths.ExampleProtoDirectory]));
 
     /// <summary>
-    /// The example, the broken buffer, the unfinished one, and every conformance vector.
+    /// The shapes a dotted name can take, which the rest of the corpus does not happen to contain.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every source here was written to exercise the language, and between them they do. None was
+    /// written to exercise a <em>name</em>, so the corpus reached this far without one qualified type
+    /// reference, one package-qualified <c>extend</c> receiver, or one name spread over two lines --
+    /// and each of those was a defect found by hand after the sweep had passed over the file that
+    /// should have contained it. A fixture written beside the test that found the defect protects
+    /// that test; a source in the corpus protects every sweep there will ever be.
+    /// </para>
+    /// <para>
+    /// It does not compile, and that is deliberate in one place only: an enum-valued field with a dot
+    /// after it. There is no valid way to write that -- constants are reached through the enum's name
+    /// and never through a value of it -- so the shape exists solely in a buffer someone is midway
+    /// through, which is the state completion is asked about. <see cref="BrokenText"/> is here on the
+    /// same argument.
+    /// </para>
+    /// <para>
+    /// Compiled against the fixture schemas as well as the example ones, because those are where a
+    /// package, a nested type and an enum-valued field all exist together.
+    /// </para>
+    /// </remarks>
+    public const string QualifiedText =
+        """
+        import proto "fixtures.proto";
+
+        extend protolang.tests.Outer {
+            fn qualified(other: protolang.
+                tests.Outer) -> int64 {
+                var level: protolang.tests.TopLevelStatus = other.status;
+                return other.count;
+            }
+
+            fn deep(inner: protolang.tests.Outer.Inner) -> protolang.tests.Outer.Inner.Deep {
+                return inner.deep;
+            }
+
+            fn plain() -> int64 {
+                return count;
+            }
+
+            fn reached() -> int64 {
+                return status.
+            }
+        }
+
+        test protolang.tests.Outer.plain "a package-qualified test target" {
+            receiver {
+                count = 2;
+            }
+            expect return 2;
+        }
+        """;
+
+    /// <inheritdoc cref="QualifiedText"/>
+    public static CorpusSource Qualified { get; } = new(
+        "qualified",
+        QualifiedText,
+        Compilation.Compile(
+            TestPaths.WriteTempScript(QualifiedText),
+            [TestPaths.ExampleProtoDirectory, TestPaths.FixtureProtoDirectory]));
+
+    /// <summary>
+    /// The example, the broken buffer, the unfinished one, the qualified names, and every
+    /// conformance vector.
     /// </summary>
     public static IReadOnlyList<CorpusSource> All { get; } =
     [
         SimpleScript,
         Broken,
         Unclosed,
+        Qualified,
         .. ConformanceVectors.All.Select(vector => new CorpusSource(
             vector.Name,
             File.ReadAllText(vector.SourcePath),

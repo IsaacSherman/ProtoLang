@@ -168,6 +168,42 @@ public sealed class SchemaTypes
     public bool IsAmbiguousAsAReceiverName(string simpleName)
         => MessagesNamed(simpleName).Count > 1;
 
+    /// <summary>
+    /// The message <paramref name="name"/> names as the receiver of an <c>extend</c> or a
+    /// <c>test</c>, or null when it names none or names more than one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The rule rather than a report of it: a full name wins outright, and a simple name resolves
+    /// only where it reaches exactly one message. Which of the two ways it can fail is not said here,
+    /// because the two have different diagnostics and only the binder issues those --
+    /// <c>Binder.ResolveMessage</c> asks this first and then looks at
+    /// <see cref="MessagesNamed"/> to tell <c>PL0020</c> from <c>PL0021</c>.
+    /// </para>
+    /// <para>
+    /// Published because completion has to reach the same answer the binder will. It offers the
+    /// methods of the receiver a half-written <c>test</c> header names, which means resolving that
+    /// name at a moment when the binder has not -- a target whose method is still being typed
+    /// produces no <c>IrTest</c> at all, so there is no bound receiver to read off. Working it out
+    /// there instead would be a second copy of this, and the way two copies of a resolution rule
+    /// disagree is a list offering the methods of a message the compiler is about to refuse.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="name"/> is null.</exception>
+    public MessageDescriptor? ResolveReceiver(string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+
+        if (FindMessage(name) is { } byFullName)
+        {
+            return byFullName;
+        }
+
+        var candidates = MessagesNamed(name);
+
+        return candidates.Count == 1 ? candidates[0] : null;
+    }
+
     private void IndexMessage(MessageDescriptor message)
     {
         _messagesByFullName[message.FullName] = message;

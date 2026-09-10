@@ -964,6 +964,78 @@ public class SchemaCompletionTests
         Assert.DoesNotContain("tags", Labels(offered));
     }
 
+    // ------- what a test's target offers
+
+    /// <summary>
+    /// Two receivers with methods of their own, so that "the methods of this receiver" and "every
+    /// method in the file" are different lists and a test can tell which one was produced.
+    /// </summary>
+    private const string Targeted =
+        "extend Mapped {\n    fn onlyOnMapped() -> int64 { return count; }\n}\n\n"
+        + "extend Outer {\n    fn scaled(factor: int64) -> int64 { return count * factor; }\n\n"
+        + "    fn plain() -> int64 { return count; }\n}\n\n"
+        + "test Outer.plain \"a target names a message and one of its methods\" {\n"
+        + "    receiver {\n        count = 2;\n    }\n    expect return 2;\n}\n";
+
+    [Fact]
+    public async Task ATestTargetOffersTheMethodsOfTheReceiverItAlreadyNames()
+    {
+        var offered = await OfferedAsync(Targeted, "test Outer.pl");
+
+        Assert.Contains("plain", Labels(offered));
+        Assert.Contains("scaled", Labels(offered));
+        Assert.DoesNotContain("onlyOnMapped", Labels(offered));
+        Assert.All(offered, item => Assert.Equal(CompletionItemKind.Method, item.Kind));
+    }
+
+    /// <summary>
+    /// A target binds only when the receiver declares the method, so a message that does not is a
+    /// name that produces PL0058 the moment it is accepted -- and accepting it strands a method the
+    /// author has already written.
+    /// </summary>
+    [Fact]
+    public async Task ATestTargetOffersOnlyTheMessagesThatDeclareTheMethodItAlreadyNames()
+    {
+        var offered = await OfferedAsync(Targeted, "test Out");
+
+        Assert.Contains("Outer", Labels(offered));
+        Assert.Contains("protolang.tests.Outer", Labels(offered));
+        Assert.DoesNotContain("Mapped", Labels(offered));
+    }
+
+    /// <summary>
+    /// Written without a dot, the name is the method and the receiver is missing -- so what is absent
+    /// is a name and a dot together, and no single name completes it.
+    /// </summary>
+    [Fact]
+    public async Task ATestTargetWithNoReceiverOffersNothing()
+        => Assert.Empty(await OfferedAsync(
+            Targeted.Replace("test Outer.plain", "test plain", StringComparison.Ordinal), "test pl"));
+
+    [Fact]
+    public async Task EveryItemOfferedInATestTargetBindsWhenItIsAccepted()
+    {
+        var (provider, uri, text) = Beside(Targeted);
+        var carets = new[] { After(text, "test Outer.pl"), After(text, "test Out") };
+
+        var applied = await CompletionProbe.SweepAsync(
+            provider, uri, text, carets, uri.Path!, Loader());
+
+        Assert.NotEmpty(applied);
+
+        foreach (var attempt in applied)
+        {
+            var refused = attempt.About
+                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
+                .ToList();
+
+            Assert.True(
+                refused.Count == 0,
+                $"accepting '{attempt.Item.Label}' in a test target produced "
+                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+        }
+    }
+
     [Fact]
     public async Task AnArgOffersTheParametersOfTheMethodUnderTest()
     {
