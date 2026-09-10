@@ -143,6 +143,11 @@ projects in both backends rather than asserting about strings. It needs `protoc`
 C++ toolchain on the machine; a test that cannot find what it needs says so and declines rather than
 failing, so a short run with a lot of skips means a missing dependency rather than a passing suite.
 
+The SDK feature band is pinned in [`global.json`](global.json), and CI installs whatever it names, so
+a build here and a build there are the same build. Warnings are errors in this repository, which is
+what makes the pin worth having: an SDK that ships one new analyzer rule would otherwise turn a green
+change red on a schedule nobody here controls.
+
 Two checks are switched off by default, because neither is what a person mid-iteration wants to wait
 for:
 

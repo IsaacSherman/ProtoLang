@@ -62,9 +62,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # From global.json rather than a version written here, so that CI and a developer's machine
+      # cannot disagree about which SDK compiled the code. A floating version is not merely
+      # imprecise: TreatWarningsAsErrors is on, so a feature band that ships one new analyzer
+      # warning turns a green pull request red without anybody having changed anything, on a
+      # schedule this repository does not control.
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
+
+      # Grpc.Tools alone is 79 MB, and it is downloaded for protoc rather than for code: the test
+      # project references it so that ProtocLocator finds a real compiler without depending on what
+      # is on the machine. Downloading it again on every pull request is the largest avoidable part
+      # of a run.
+      #
+      # Keyed on everything that decides what gets restored: the version manifest, every project
+      # file, and the build props that set the target framework -- a framework change restores
+      # different assets while touching no package reference at all. Central package management keeps
+      # the versions in one file, so a bumped dependency invalidates the cache and an unchanged one
+      # does not, and the restore-keys prefix means a bump still starts from the previous cache and
+      # downloads only the difference.
+      - name: Cache packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/Directory.Packages.props', '**/Directory.Build.props', '**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-
 
       # Restore is its own step because it is also what puts protoc on this machine: the test project
       # references Grpc.Tools for exactly that reason, so a restore that failed would otherwise show
