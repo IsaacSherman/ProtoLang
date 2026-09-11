@@ -524,13 +524,15 @@ public sealed class CompletionProvider
             return typePosition;
         }
 
-        // Settled once and handed to both arms, because it is one question about the caret and the
-        // two of them would otherwise each ask it of a different thing.
+        // Settled once and handed to both arms, because each is one question about the caret and the
+        // two arms would otherwise each ask it of a different thing.
         var presence = NamesAPresenceField(model, subject);
+        var writingAReceiver = subject.FollowedByDot || NamesAReceiver(model, subject);
 
         if (subject.PrecededByDot)
         {
-            return Members(ReceiverAt(model, subject), result, subject, presence, asked.Document);
+            return Members(
+                ReceiverAt(model, subject), result, subject, presence, writingAReceiver, asked.Document);
         }
 
         if (Fixture(model, result, subject, asked.Document) is { } names)
@@ -538,7 +540,7 @@ public sealed class CompletionProvider
             return names;
         }
 
-        return InScope(model, result, subject, presence, asked.Document);
+        return InScope(model, result, subject, presence, writingAReceiver, asked.Document);
     }
 
     /// <summary>
@@ -574,17 +576,60 @@ public sealed class CompletionProvider
     /// </remarks>
     private static bool NamesAPresenceField(SemanticModel model, SchemaSubject subject)
         => model.SyntaxAt(subject.Start)?.Enclosing<HasExpression>() is { } has
-            && PresenceField(has) is { } field
+            && EndsAt(has.Operand) is { } field
             && Covers(field, subject.Start);
 
-    /// <summary>Where the field a <c>has</c> tests is written, or null when its operand names none.</summary>
+    /// <summary>
+    /// Whether the caret is writing a name that something else is about to take a member off.
+    /// </summary>
     /// <remarks>
-    /// The two shapes <c>BindHas</c> accepts and no others. An operand of any other shape -- a
-    /// literal, a call, a parenthesized expression with no member taken off it -- is <c>PL0080</c>
-    /// whatever is written in it, so there is no name here that the presence rule governs.
+    /// <para>
+    /// Only a value with members can go in front of a dot, and the two lists both say so by asking
+    /// <see cref="SchemaSubject.FollowedByDot"/> -- which is a fact about the next <b>token</b>. That
+    /// answers for <c>other.count</c> and lies for <c>(other).count</c>, where the token after
+    /// <c>other</c> is a close paren: nothing said it was a receiver, so every scalar field was
+    /// offered, and accepting one wrote <c>(count).count</c> for <c>PL0039</c> -- or, inside a
+    /// <c>has</c>, <c>PL0080</c>. Twelve of the twenty names offered at that caret were invalid.
+    /// </para>
+    /// <para>
+    /// <b>The parser builds no node for a parenthesized expression</b> -- it returns what was inside
+    /// -- so the parentheses are not what has to be recognized. What has to be recognized is that the
+    /// receiver of a member access <i>ends at</i> the name under the caret, whatever was written
+    /// around it. That is the same question <see cref="NamesAPresenceField"/> asks of a <c>has</c>
+    /// operand, so it is the same helper.
+    /// </para>
+    /// <para>
+    /// Every enclosing access is asked rather than the innermost, because parentheses nest:
+    /// <c>(other.inner).count</c> puts the caret on <c>inner</c> inside one member access and at the
+    /// end of another's receiver, and only the outer one knows that a dot is coming.
+    /// </para>
+    /// <para>
+    /// A receiver that is a call ends in no name at all, and that is the answer rather than a gap.
+    /// Neither name in <c>identity(oth|er).count</c> is the receiver: the argument is free to be any
+    /// type the parameter takes, and the method is a call rather than a value, which
+    /// <see cref="SchemaSubject.FollowedByCall"/> already governs. Narrowing either to message-valued
+    /// names would withhold every name that belongs.
+    /// </para>
+    /// <para>
+    /// The token fact is kept beside this rather than replaced by it. <c>other.|</c> mid-keystroke is
+    /// the state completion is usually asked in, and a buffer that has not parsed has no member
+    /// access to find -- so the two are a union, each answering where the other cannot.
+    /// </para>
     /// </remarks>
-    private static SourceSpan? PresenceField(HasExpression has)
-        => has.Operand switch
+    private static bool NamesAReceiver(SemanticModel model, SchemaSubject subject)
+        => model.SyntaxAt(subject.Start) is { } location
+            && location.Path.OfType<MemberAccessExpression>().Any(access
+                => EndsAt(access.Receiver) is { } name && Covers(name, subject.Start));
+
+    /// <summary>Where an expression's trailing name is written, or null when it ends in no name.</summary>
+    /// <remarks>
+    /// Two shapes end in a name -- a bare identifier, and a member taken off something -- and every
+    /// other expression ends in punctuation, a literal, or an operand. That is also exactly the pair
+    /// <c>BindHas</c> accepts, and not by coincidence: a field reference is an expression that ends
+    /// in the field's name, which is the whole of what <c>has</c> is allowed to be handed.
+    /// </remarks>
+    private static SourceSpan? EndsAt(Expression expression)
+        => expression switch
         {
             MemberAccessExpression member => member.Name.Span,
             NameExpression bare => bare.Name.Span,
@@ -1226,6 +1271,7 @@ public sealed class CompletionProvider
         CompilationResult result,
         SchemaSubject subject,
         bool presence,
+        bool writingAReceiver,
         OpenDocument document)
     {
         if (model.ScopeAt(subject.Start) is not { } scope)
@@ -1254,10 +1300,11 @@ public sealed class CompletionProvider
             ];
         }
 
-        // What follows the caret decides what may replace what is under it. A name being called can
-        // only be a method; a name in front of a dot can only be something with members. Ignoring
-        // either offers a candidate that is perfectly good on its own and does not bind where it
-        // lands -- 'quantity' over the name in 'case_count(3)', or an int64 local in front of '.'.
+        // What the caret's name is being used for decides what may replace it. A name being called
+        // can only be a method; a name something takes a member off can only be something with
+        // members. Ignoring either offers a candidate that is perfectly good on its own and does not
+        // bind where it lands -- 'quantity' over the name in 'case_count(3)', or an int64 local in
+        // front of '.'.
         var methods = result.Module is { } module
             ? module.MethodsOn(scope.Receiver.Descriptor.FullName)
             : [];
@@ -1282,7 +1329,7 @@ public sealed class CompletionProvider
         return
         [
             .. scope.Names
-                .Where(visible => !subject.FollowedByDot || visible.Type is MessageType)
+                .Where(visible => !writingAReceiver || visible.Type is MessageType)
                 .Select(visible => Member(
                     visible.Name,
                     visible.Symbol.Kind is SymbolKind.Field
@@ -1298,10 +1345,12 @@ public sealed class CompletionProvider
                     subject,
                     document)),
 
-            // A call produces a value rather than a receiver, and there is no member access onto one:
-            // 'helper().field' is not something the parser takes, so a method in front of a dot is a
-            // name that cannot go there.
-            .. subject.FollowedByDot
+            // No method is offered where a receiver goes, and that is a floor rather than the rule:
+            // 'identity(other).count' compiles, so a method returning a message could stand here. The
+            // one that cannot is a method returning a scalar, and separating them is a question about
+            // a return type that nothing asks yet. Until something does, none is offered -- which
+            // withholds a name that would have bound and never offers one that would not.
+            .. writingAReceiver
                 ? []
                 : methods.Select(method => Member(
                     method.Name + "()",
@@ -1312,7 +1361,7 @@ public sealed class CompletionProvider
                     subject,
                     document)),
 
-            .. subject.FollowedByDot ? [] : Keywords(model, subject, document),
+            .. writingAReceiver ? [] : Keywords(model, subject, document),
         ];
     }
 
@@ -1459,20 +1508,22 @@ public sealed class CompletionProvider
         CompilationResult result,
         SchemaSubject subject,
         bool presence,
+        bool writingAReceiver,
         OpenDocument document)
         => receiver switch
         {
             MessageType message =>
             [
-                // What follows constrains this exactly as it constrains a bare name. A member in
-                // front of another dot is itself a receiver, so only a singular message field can go
-                // there -- 'inner.weight.seconds' asks an int64 for a member it cannot have. And
-                // parentheses already written mean a call, which a field can never be: 'other.count()'
-                // is PL0044, an unknown method, rather than a field read with punctuation after it.
+                // What the caret's name is used for constrains this exactly as it constrains a bare
+                // name. A member something else takes a member off is itself a receiver, so only a
+                // singular message field can go there -- 'inner.weight.seconds' asks an int64 for a
+                // member it cannot have. And parentheses already written mean a call, which a field
+                // can never be: 'other.count()' is PL0044, an unknown method, rather than a field
+                // read with punctuation after it.
                 .. message.Descriptor.Fields.InDeclarationOrder()
                     .Where(field => !field.IsMap
                         && !subject.FollowedByCall
-                        && (!subject.FollowedByDot || TypeFactory.FromField(field) is MessageType))
+                        && (!writingAReceiver || TypeFactory.FromField(field) is MessageType))
                     .Select(field => Member(
                         field.Name,
                         CompletionItemKind.Field,
@@ -1482,11 +1533,11 @@ public sealed class CompletionProvider
                         subject,
                         document)),
 
-                // A call in front of a dot is not a receiver either: there is no member access onto
-                // the value a method returns. Nor is one the operand of 'has', which needs a field:
+                // The same floor as for a bare name, one level in, and for the same reason. A method
+                // is not the operand of 'has' under any circumstances though: that needs a field, so
                 // 'has other.helper()' is PL0080, and a method result is the example its help gives
                 // of something that always holds a value and has nothing to be asked about.
-                .. result.Module is { } module && !subject.FollowedByDot && !presence
+                .. result.Module is { } module && !writingAReceiver && !presence
                     ? module.MethodsOn(message.Descriptor.FullName).Select(method => Member(
                         subject.FollowedByCall ? method.Name : method.Name + "()",
                         CompletionItemKind.Method,
@@ -1498,10 +1549,10 @@ public sealed class CompletionProvider
                     : [],
             ],
 
-            // A constant has no members of its own and is not callable, so in front of a dot or a
-            // parenthesis there is nothing here to name. That the enum's name rather than a value of
-            // it was written before the dot is settled by ReceiverAt, which is where the reason is.
-            EnumPlType enumeration when !subject.FollowedByDot && !subject.FollowedByCall =>
+            // A constant has no members of its own and is not callable, so where a receiver or a call
+            // goes there is nothing here to name. That the enum's name rather than a value of it was
+            // written before the dot is settled by ReceiverAt, which is where the reason is.
+            EnumPlType enumeration when !writingAReceiver && !subject.FollowedByCall =>
             [
                 .. enumeration.Descriptor.Values.Select(value => Member(
                     value.Name,

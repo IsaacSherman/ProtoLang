@@ -182,22 +182,35 @@ internal static class CompletionProbe
     /// still offer it; what is not claimed is that the result compiles.
     /// </para>
     /// <para>
-    /// <b>A caret before a dot is left out only when the dot reaches into a value.</b> There, the
-    /// name is one link of a chain and replacing a link says nothing about the links that follow:
-    /// whether <c>seconds</c> is a field of whatever the receiver has just been changed to is the
-    /// author's next edit rather than this item's fault. Inside a qualified name it is the opposite,
-    /// because there are no links -- <c>protolang.tests.Outer</c> is one name, an item there replaces
-    /// the whole of it, and nothing survives to be broken. Excluding those was the sweep declining to
-    /// look at precisely the region where two defects were then found by hand, so the exclusion is
-    /// now asked of the parser rather than of the character after the word: a dot is a qualifier when
-    /// the parser put it inside a type reference, an <c>extend</c> receiver or a test target, and a
-    /// member access otherwise.
+    /// <b>A caret a value is reached through is left out.</b> There, the name is one link of a chain
+    /// and replacing a link says nothing about the links that follow: whether <c>seconds</c> is a
+    /// field of whatever the receiver has just been changed to is the author's next edit rather than
+    /// this item's fault. Inside a qualified name it is the opposite, because there are no links --
+    /// <c>protolang.tests.Outer</c> is one name, an item there replaces the whole of it, and nothing
+    /// survives to be broken. Excluding those was the sweep declining to look at precisely the region
+    /// where two defects were then found by hand, so the exclusion is now asked of the parser rather
+    /// than of the character after the word: a dot is a qualifier when the parser put it inside a
+    /// type reference, an <c>extend</c> receiver or a test target, and a member access otherwise.
+    /// </para>
+    /// <para>
+    /// <b>Which link is being replaced is asked of the parser too, for the same reason.</b> The
+    /// character after the word answers for <c>other.count</c> and lies for <c>(other).count</c>,
+    /// where a close paren stands between the name and the dot. A caret swept there is a receiver
+    /// caret the paragraph above meant to leave out, so the first corpus source holding two
+    /// message-valued names and a parenthesized receiver would fail this sweep for the one reason it
+    /// promises never to blame an item for. Nothing in the corpus is that source today, which is
+    /// exactly why the exclusion is written now rather than after one arrives.
+    /// </para>
+    /// <para>
+    /// The two questions are kept as a union because they fall short in different places: a buffer
+    /// too broken to build a member access still has a dot sitting after a name, and there the text
+    /// is the only thing left to ask.
     /// </para>
     /// </remarks>
     public static IEnumerable<int> AtEveryNameAndStatementStart(string text)
     {
         var keywords = KeywordSpans(text);
-        var qualified = QualifiedNamesIn(text);
+        var (qualified, receivers) = NamesIn(text);
 
         for (var offset = 0; offset < text.Length; offset++)
         {
@@ -208,8 +221,8 @@ internal static class CompletionProbe
                 // One character in, so the caret sits inside a name being typed rather than before it.
                 var caret = Math.Min(offset + 1, text.Length);
                 var after = EndOfWord(text, offset);
-                var reaches = after < text.Length
-                    && text[after] == '.'
+                var reaches = ((after < text.Length && text[after] == '.')
+                        || receivers.Any(name => Covers(name, offset)))
                     && !qualified.Any(name => Covers(name, offset));
 
                 if (!keywords.Contains(offset) && !reaches)
@@ -228,22 +241,39 @@ internal static class CompletionProbe
     private static bool Covers(SourceSpan span, int offset)
         => offset >= span.Start.Offset && offset <= span.End.Offset;
 
-    /// <summary>Every span the parser decided was one qualified name rather than a chain of members.</summary>
-    /// <remarks>
+    /// <summary>
+    /// The names the caret rule has to recognize: those the parser joined into one qualified name,
+    /// and those something else reaches a member through.
+    /// </summary>
+    /// <param name="Qualified">
     /// The three places the grammar joins dotted identifiers into a single name: a type reference,
     /// which is the four positions a type may be written in; the receiver of an <c>extend</c>; and a
-    /// test's target. Everything else with a dot in it is a member access on a value, and the parser
-    /// is the one that already made that distinction -- taking it from here rather than guessing at
-    /// the token stream is what keeps this sweep from holding a second opinion about the grammar it
-    /// is meant to be probing.
+    /// test's target. Everything else with a dot in it is a member access on a value.
+    /// </param>
+    /// <param name="Receivers">
+    /// Where each member access's receiver ends, which is the name an item accepted there would
+    /// replace. A receiver that ends in no name -- a call, a literal -- contributes nothing, because
+    /// there is no single name in it to strand anything.
+    /// </param>
+    private sealed record NameSpans(
+        IReadOnlyList<SourceSpan> Qualified, IReadOnlyList<SourceSpan> Receivers);
+
+    /// <summary>Both span sets, from one parse of the text.</summary>
+    /// <remarks>
+    /// The parser is the one that already decided which dots join a name and which reach into a
+    /// value, and taking both answers from it rather than guessing at the token stream is what keeps
+    /// this sweep from holding a second opinion about the grammar it is meant to be probing. One walk
+    /// for the two questions, because they are two readings of the same tree and a second walk would
+    /// be a second chance for them to disagree about which nodes exist.
     /// </remarks>
-    private static IReadOnlyList<SourceSpan> QualifiedNamesIn(string text)
+    private static NameSpans NamesIn(string text)
     {
         var diagnostics = new DiagnosticBag();
         var tokens = new Lexer(text, SourceIdentity.UnsavedName, diagnostics).Tokenize();
         var unit = new Parser(tokens, SourceIdentity.UnsavedName, diagnostics).ParseCompilationUnit();
 
-        var names = new List<SourceSpan>();
+        var qualified = new List<SourceSpan>();
+        var receivers = new List<SourceSpan>();
         var pending = new Stack<SyntaxNode>();
 
         pending.Push(unit);
@@ -255,15 +285,19 @@ internal static class CompletionProbe
             switch (node)
             {
                 case TypeReference reference:
-                    names.Add(reference.Name.Span);
+                    qualified.Add(reference.Name.Span);
                     break;
 
                 case ExtendDeclaration extend:
-                    names.Add(extend.MessageName.Span);
+                    qualified.Add(extend.MessageName.Span);
                     break;
 
                 case TestTarget target:
-                    names.Add(SourceSpan.Union(target.Receiver.Span, target.Method.Span));
+                    qualified.Add(SourceSpan.Union(target.Receiver.Span, target.Method.Span));
+                    break;
+
+                case MemberAccessExpression access when EndOf(access.Receiver) is { } name:
+                    receivers.Add(name);
                     break;
             }
 
@@ -273,8 +307,27 @@ internal static class CompletionProbe
             }
         }
 
-        return names;
+        return new NameSpans(qualified, receivers);
     }
+
+    /// <summary>Which name an expression's value comes from, or null when no single name decides it.</summary>
+    /// <remarks>
+    /// A call is followed through to the name being called, which is where this parts company with
+    /// the question completion asks of the same tree. Completion asks whether the caret is writing a
+    /// receiver, and a callee is not one -- <c>identity(oth|er)</c> is writing a call, and what may
+    /// go there is settled by the parentheses. This asks the sweep's question instead: would an item
+    /// accepted here strand what follows? Swapping the method in <c>identity(other).count</c> moves
+    /// the receiver's type exactly as swapping <c>other</c> would, so the answer is the same, and the
+    /// caret is left out for the same reason.
+    /// </remarks>
+    private static SourceSpan? EndOf(Expression expression)
+        => expression switch
+        {
+            InvocationExpression call => EndOf(call.Callee),
+            MemberAccessExpression member => member.Name.Span,
+            NameExpression bare => bare.Name.Span,
+            _ => null,
+        };
 
     /// <summary>One past the last character of the word beginning at <paramref name="start"/>.</summary>
     private static int EndOfWord(string text, int start)

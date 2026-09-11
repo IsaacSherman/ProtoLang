@@ -1259,6 +1259,53 @@ public class SchemaCompletionTests
     }
 
     /// <summary>
+    /// A receiver is what the parser says it is, rather than what the next character suggests. The
+    /// two rules above have to keep holding through parentheses, which leave a close paren standing
+    /// where the dot would otherwise be.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The whole list is the assertion rather than a sample of it. At each caret there is an exact
+    /// set of names that could stand there -- every message-valued name in scope, and nothing else --
+    /// so a scalar creeping back in fails this even if nobody thought to name it.
+    /// </para>
+    /// <para>
+    /// Both carets were wrong before the tree was asked, and wrong in the way that matters. Every
+    /// scalar field of the receiver was offered at each of them, along with the methods and the
+    /// expression keywords, and each one produces <c>PL0039</c> the moment it is accepted -- because
+    /// the token after the caret was a close paren, and the dot behind it was never seen.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("return ((oth", new[] { "other", "inner", "other_inner" })]
+    [InlineData("return ((other).inn", new[] { "inner", "other_inner" })]
+    [Trait("ReviewRegression", "ParenthesizedReceiverCompletion")]
+    public async Task OnlySomethingWithMembersIsOfferedWhereParenthesesStandBeforeTheDot(
+        string marker, string[] expected)
+    {
+        const string body = "extend Outer {\n"
+            + "    fn f(other: Outer) -> bool {\n"
+            + "        if has (other).inner and has (other).other_inner {\n"
+            + "            return ((other).inner).deep == ((other).other_inner).deep;\n"
+            + "        }\n"
+            + "\n"
+            + "        return false;\n"
+            + "    }\n"
+            + "}\n";
+
+        var (_, uri, text) = Beside(body);
+        var source = new SourceDocument(SourceIdentity.FromPath(uri.Path!), text);
+        var compilation = new Compilation(source, new CompilationOptions { Loader = Loader() });
+
+        Assert.True(compilation.Compile(CancellationToken.None).Success,
+            "the parenthesized receivers must already compile, or this is measuring the fixture");
+
+        var offered = await OfferedAsync(body, marker);
+
+        Assert.Equal(expected.Order(), Labels(offered).Order());
+    }
+
+    /// <summary>
     /// Parentheses already written mean a call, so only a method fits -- and it is offered without a
     /// second pair, which would be as wrong as offering a method that must be called without any.
     /// </summary>
