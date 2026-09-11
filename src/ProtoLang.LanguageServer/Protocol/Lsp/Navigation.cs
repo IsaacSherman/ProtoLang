@@ -7,7 +7,7 @@ namespace ProtoLang.LanguageServer.Protocol.Lsp;
 /// for a member name to be wrong -- and a member name wrong in a deserialized shape is not a
 /// compile error, it is a position silently read as line zero.
 /// </remarks>
-public record TextDocumentPositionParams
+public sealed record TextDocumentPositionParams
 {
     public TextDocumentIdentifier TextDocument { get; init; } = new();
 
