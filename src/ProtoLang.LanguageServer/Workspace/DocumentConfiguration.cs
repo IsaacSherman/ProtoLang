@@ -176,6 +176,37 @@ public sealed record DocumentConfiguration
     public bool IsUsable => Config is not null;
 
     /// <summary>
+    /// Whether a compilation run under <paramref name="other"/> would be the same compilation as one
+    /// run under this.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Not equality, and the difference is <see cref="Diagnostics"/>: two resolutions of one
+    /// unchanged workspace produce the same warnings and are not the same objects, and a report
+    /// legitimately cares about those while a compilation cannot see them at all. What this compares
+    /// is exactly what <see cref="TryCreateCompilationOptions"/> hands over, plus the folder a source
+    /// path is made relative to -- so a value that could not change the compiled result cannot make
+    /// this answer no.
+    /// </para>
+    /// <para>
+    /// The question exists because the configuration is resolved from files, and files change while
+    /// nothing in the editor does. A <c>protolang.config.xml</c> that was refused and has since been
+    /// repaired settles differently under settings of the very same generation, and a host holding a
+    /// compilation from before it was fixed has no other way to be told.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="other"/> is null.</exception>
+    public bool CompilesTheSameWayAs(DocumentConfiguration other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+
+        return Config == other.Config
+            && string.Equals(ProtocPath, other.ProtocPath, StringComparison.Ordinal)
+            && PathIdentity.AreSame(Folder?.Path, other.Folder?.Path)
+            && IncludeDirectories.SequenceEqual(other.IncludeDirectories, PathIdentity.Comparer);
+    }
+
+    /// <summary>
     /// The options a compilation of this document runs with, or false when it must not run at all.
     /// </summary>
     /// <param name="loader">

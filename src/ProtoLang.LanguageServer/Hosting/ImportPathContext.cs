@@ -37,8 +37,10 @@ internal sealed record ImportPathContext(
     int Start,
     int End,
     string Directory,
-    IReadOnlyList<string> Imported)
+    IReadOnlyList<string> Imported) : CompletionSubject
 {
+    public override CompletionContextKind Kind => CompletionContextKind.ImportPath;
+
     /// <summary>
     /// The context at <paramref name="offset"/>, or false when the cursor is not inside an import
     /// path.

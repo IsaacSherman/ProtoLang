@@ -1,0 +1,270 @@
+// Conformance vectors for the shapes an author may write around an expression (spec 7.1).
+//
+// Every other vector writes its receivers the short way, because that is how anyone writes them.
+// Nothing in the corpus had a parenthesized one, and the absence was load bearing in the wrong
+// direction: completion decided whether a name was about to be reached through by looking at the
+// next character, a close paren hid the dot behind it, and every scalar field in scope was offered
+// where only a message could go. A sweep over sources that all write '(a).b' as 'a.b' cannot see
+// that, and the same blindness covers the parser, the presence analysis and both backends.
+//
+// So what these vectors pin is that the shape written around an expression does not change what it
+// means. '(inner).weight' and 'inner.weight' are the same read, and so is a dot on the line after
+// the name it reaches through; a guard established through one spelling covers a read written in
+// the other; and the parentheses the grammar needs for an 'on_zero' fallback or a cast operand do
+// not become part of the value.
+
+import proto "conformance.proto";
+
+extend GroupingCase {
+    // The whole point of the file, in one method: a receiver with parentheses around it. There is no
+    // node for them -- the parser returns what was inside -- so this has to compile to exactly what
+    // 'inner.weight' compiles to.
+    fn weight_through_parentheses() -> int64 {
+        if has inner {
+            return (inner).weight;
+        }
+
+        return -1;
+    }
+
+    // The same read with nothing about it on one line. Redundant parentheses nest, and a name may be
+    // surrounded by as many as someone cares to type, across as many lines.
+    fn weight_through_nested_parentheses() -> int64 {
+        if has inner {
+            return ((
+                (inner)
+            )).weight;
+        }
+
+        return -1;
+    }
+
+    // A dot need not touch the receiver it hangs off. Nothing in the corpus had ever separated them,
+    // and the distinction is not cosmetic: the next token after 'inner' is the dot however much
+    // whitespace sits in between, while the next character here is a newline.
+    fn weight_across_a_line_break() -> int64 {
+        if has inner {
+            return inner
+                .weight;
+        }
+
+        return -1;
+    }
+
+    // A guard written with parentheses and a read written without them. The two spellings have to
+    // reach the same field for the second line to compile at all: if the presence analysis compared
+    // what was written rather than the path the parser produced, this would be PL0078.
+    fn depth_guarded_with_parentheses() -> int64 {
+        if has inner and has (inner).leaf {
+            return inner.leaf.depth;
+        }
+
+        return -1;
+    }
+
+    // And the same pair the other way round, so neither direction is resting on the other.
+    fn depth_guarded_without_parentheses() -> int64 {
+        if has inner and has inner.leaf {
+            return ((inner).leaf).depth;
+        }
+
+        return -1;
+    }
+
+    // 'has' takes a field and refuses everything else, and the parentheses do not make this anything
+    // other than the bare name it is testing.
+    fn tuned_through_parentheses() -> bool {
+        return has (tuning);
+    }
+
+    // A presence test as a parenthesized operand of 'and', beside a parenthesized comparison. Both
+    // are expressions the grammar allows to be grouped and that nothing in the corpus grouped.
+    fn tuned_and_counted() -> bool {
+        return (has tuning) and ((count) > 0);
+    }
+
+    // Parentheses where the grammar actually requires them. The 'on_zero' fallback parses at unary
+    // precedence, so a fallback that is more than a literal, a name or a call has to be wrapped --
+    // and the operands around it may be wrapped too, which is what makes this worth executing.
+    fn ratio_or_bias() -> int64 {
+        return (count) / (scale) on_zero ((count) + 1);
+    }
+
+    // A cast whose operand is parenthesized, and a unary minus applied to the parenthesized result.
+    // Both are places the grammar takes an expression that is not a bare name.
+    fn negated_narrow() -> int32 {
+        return -(((count)) as int32);
+    }
+
+    // Grouping that changes what the arithmetic means, which is the one case here where the
+    // parentheses are not redundant -- and the condition itself stays unparenthesized, because the
+    // grammar has no place for parentheses there.
+    fn banded() -> int64 {
+        if (count + scale) * 2 > 20 {
+            return (count + scale) * 2;
+        }
+
+        return count + (scale * 2);
+    }
+}
+
+test GroupingCase.weight_through_parentheses "a parenthesized receiver reads the field it names" {
+    receiver {
+        inner {
+            weight = 12;
+        }
+    }
+
+    expect return 12;
+}
+
+test GroupingCase.weight_through_parentheses "and still takes the other branch when unset" {
+    receiver {
+        count = 1;
+    }
+
+    expect return -1;
+}
+
+test GroupingCase.weight_through_nested_parentheses "redundant parentheses nest and span lines" {
+    receiver {
+        inner {
+            weight = 12;
+        }
+    }
+
+    expect return 12;
+}
+
+test GroupingCase.weight_across_a_line_break "a dot reaches its receiver across a line break" {
+    receiver {
+        inner {
+            weight = 12;
+        }
+    }
+
+    expect return 12;
+}
+
+test GroupingCase.depth_guarded_with_parentheses "a guard with parentheses covers a read without" {
+    receiver {
+        inner {
+            leaf {
+                depth = 4;
+            }
+            weight = 1;
+        }
+    }
+
+    expect return 4;
+}
+
+test GroupingCase.depth_guarded_with_parentheses "an unset leaf takes the guard's other branch" {
+    receiver {
+        inner {
+            weight = 1;
+        }
+    }
+
+    expect return -1;
+}
+
+test GroupingCase.depth_guarded_without_parentheses "a guard without parentheses covers a read with" {
+    receiver {
+        inner {
+            leaf {
+                depth = 4;
+            }
+            weight = 1;
+        }
+    }
+
+    expect return 4;
+}
+
+test GroupingCase.depth_guarded_without_parentheses "and the unset leaf again, from the other spelling" {
+    receiver {
+        inner {
+            weight = 1;
+        }
+    }
+
+    expect return -1;
+}
+
+test GroupingCase.tuned_through_parentheses "an optional scalar set to zero is still set" {
+    receiver {
+        tuning = 0;
+    }
+
+    expect return true;
+}
+
+test GroupingCase.tuned_through_parentheses "an optional scalar never set" {
+    receiver {
+        count = 1;
+    }
+
+    expect return false;
+}
+
+test GroupingCase.tuned_and_counted "both halves true" {
+    receiver {
+        tuning = 0;
+        count = 3;
+    }
+
+    expect return true;
+}
+
+test GroupingCase.tuned_and_counted "the grouped comparison decides it" {
+    receiver {
+        tuning = 0;
+        count = 0;
+    }
+
+    expect return false;
+}
+
+test GroupingCase.ratio_or_bias "a parenthesized divisor divides" {
+    receiver {
+        count = 9;
+        scale = 2;
+    }
+
+    expect return 4;
+}
+
+test GroupingCase.ratio_or_bias "a parenthesized fallback answers for a zero divisor" {
+    receiver {
+        count = 9;
+    }
+
+    expect return 10;
+}
+
+test GroupingCase.negated_narrow "a parenthesized cast operand narrows before it is negated" {
+    receiver {
+        count = 5;
+    }
+
+    expect return -5;
+}
+
+test GroupingCase.banded "grouping that changes the answer, above the band" {
+    receiver {
+        count = 8;
+        scale = 4;
+    }
+
+    expect return 24;
+}
+
+test GroupingCase.banded "grouping that changes the answer, below the band" {
+    receiver {
+        count = 1;
+        scale = 2;
+    }
+
+    expect return 5;
+}

@@ -12,6 +12,24 @@ namespace ProtoLang.Ir;
 /// </summary>
 public sealed record IrModule(IReadOnlyList<IrMethod> Methods, IReadOnlyList<IrTest> Tests)
 {
+    /// <summary>The methods this file declares on one receiver, in declaration order.</summary>
+    /// <remarks>
+    /// <para>
+    /// The binder answers this privately when it resolves a call, keyed by the receiver's full name
+    /// compared ordinally. Anything else that has to know what a receiver offers -- what may follow
+    /// a dot, where a call leads -- has to key it the same way, and a caller that reached for
+    /// <see cref="MessageDescriptor"/> identity instead would be right only as long as one
+    /// descriptor pool is in play.
+    /// </para>
+    /// <para>
+    /// Methods are not indexed, because a file declares few of them and the alternative is a
+    /// dictionary built for every compilation whether or not anything asks.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<IrMethod> MethodsOn(string receiverFullName)
+        => [.. Methods.Where(method
+            => string.Equals(method.Receiver.FullName, receiverFullName, StringComparison.Ordinal))];
+
     /// <summary>
     /// Every place a name was written and resolved to a symbol, in
     /// <see cref="SymbolReference.InSourceOrder">source order</see>.
@@ -115,6 +133,32 @@ public sealed record IrMethodSignature(
 
     /// <summary>What identifies this method, and every call that resolves to it.</summary>
     public SymbolId Id => Declaration.Id;
+
+    /// <summary>This method written out the way its declaration reads: <c>fn total(scale: int64) -&gt;
+    /// int64</c>.</summary>
+    /// <remarks>
+    /// <para>
+    /// Rendered here rather than by each surface that shows a method, for the reason
+    /// <see cref="PlType.DisplayName"/> is rendered on the type: a signature shown one way in a
+    /// completion list and another in a hover is two spellings of one fact, and the reader is the
+    /// one who has to reconcile them.
+    /// </para>
+    /// <para>
+    /// The return type is always written, including <c>void</c>, although an author who wants
+    /// nothing back may leave the arrow off entirely. What a call produces is exactly what decides
+    /// whether it may be used as a value, so a rendering that omitted it would be silent about the
+    /// thing most worth knowing before writing the call.
+    /// </para>
+    /// <para>
+    /// <c>virtual</c> is absent because it is not part of the signature -- <see cref="IrMethod"/>
+    /// carries it, since it says how a method is dispatched rather than how it is called.
+    /// </para>
+    /// </remarks>
+    public string DisplayName
+        => $"fn {Name}({string.Join(", ", Parameters.Select(Describe))}) -> {ReturnType.DisplayName}";
+
+    private static string Describe(IrParameter parameter)
+        => $"{parameter.Name}: {parameter.Type.DisplayName}";
 }
 
 public sealed record IrParameter(DeclarationSite Declaration, PlType Type)

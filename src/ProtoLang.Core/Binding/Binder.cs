@@ -16,10 +16,7 @@ namespace ProtoLang.Binding;
 public sealed class Binder
 {
     private readonly DiagnosticBag _diagnostics;
-    private readonly Dictionary<string, MessageDescriptor> _messagesByFullName = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, List<MessageDescriptor>> _messagesBySimpleName = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, EnumDescriptor> _enumsByFullName = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, List<EnumDescriptor>> _enumsBySimpleName = new(StringComparer.Ordinal);
+    private readonly SchemaTypes _types;
     /// <summary>What a call can resolve to: one entry per name a receiver actually offers.</summary>
     private readonly Dictionary<(string Receiver, string Method), IrMethodSignature> _methods = new();
 
@@ -80,57 +77,16 @@ public sealed class Binder
         _policy = policy ?? new NumericPolicy(_config);
         _document = document ?? SourceIdentity.Unsaved();
 
-        foreach (var file in files)
-        {
-            foreach (var message in file.MessageTypes)
-            {
-                IndexMessage(message);
-            }
-
-            foreach (var enumType in file.EnumTypes)
-            {
-                IndexEnum(enumType);
-            }
-        }
+        _types = SchemaTypes.From(files);
     }
 
-    private void IndexMessage(MessageDescriptor message)
-    {
-        _messagesByFullName[message.FullName] = message;
-
-        if (!_messagesBySimpleName.TryGetValue(message.Name, out var list))
-        {
-            list = [];
-            _messagesBySimpleName[message.Name] = list;
-        }
-
-        list.Add(message);
-
-        // Enums nested in a message are only reachable through this walk, so they are indexed here
-        // rather than in the constructor's top-level loop.
-        foreach (var nested in message.EnumTypes)
-        {
-            IndexEnum(nested);
-        }
-
-        foreach (var nested in message.NestedTypes)
-        {
-            IndexMessage(nested);
-        }
-    }
-
-    private void IndexEnum(EnumDescriptor enumType)
-    {
-        _enumsByFullName[enumType.FullName] = enumType;
-
-        if (!_enumsBySimpleName.TryGetValue(enumType.Name, out var list))
-        {
-            list = [];
-            _enumsBySimpleName[enumType.Name] = list;
-        }
-
-        list.Add(enumType);
-    }
+    /// <summary>The types the imported schemas made nameable, as this binder resolved against them.</summary>
+    /// <remarks>
+    /// Published so a host predicting what the binder would accept in a type position asks the index
+    /// the binder actually used, rather than walking the descriptors a second time. The nested cases
+    /// are what make a second walk wrong rather than merely redundant.
+    /// </remarks>
+    public SchemaTypes Types => _types;
 
     /// <summary>Binds a compilation unit to typed IR, whether or not it parsed cleanly.</summary>
     /// <remarks>
@@ -339,18 +295,20 @@ public sealed class Binder
 
     private MessageDescriptor? ResolveMessage(string name, SourceSpan span)
     {
-        if (_messagesByFullName.TryGetValue(name, out var byFullName))
+        // Asked of the index rather than worked out here, for the reason ResolveTypeReference asks
+        // its own question there: completion has to reach this same answer, and a receiver is
+        // ambiguous against messages alone rather than against every type. What stays here is which
+        // of the two ways it failed, because that is a choice between two diagnostics and the index
+        // issues none.
+        if (_types.ResolveReceiver(name) is { } resolved)
         {
-            return byFullName;
+            return resolved;
         }
 
-        if (_messagesBySimpleName.TryGetValue(name, out var candidates))
-        {
-            if (candidates.Count == 1)
-            {
-                return candidates[0];
-            }
+        var candidates = _types.MessagesNamed(name);
 
+        if (candidates.Count > 0)
+        {
             _diagnostics.Error(
                 "PL0020",
                 "ambiguous message name",
@@ -522,40 +480,39 @@ public sealed class Binder
 
         // A fully qualified name is unambiguous by construction, so it is tried before any
         // simple-name lookup that could report a false ambiguity.
-        if (_messagesByFullName.TryGetValue(name, out var messageByFullName))
+        if (_types.FindMessage(name) is { } messageByFullName)
         {
             return NamedMessage(messageByFullName);
         }
 
-        if (_enumsByFullName.TryGetValue(name, out var enumByFullName))
+        if (_types.FindEnum(name) is { } enumByFullName)
         {
             return NamedEnum(enumByFullName);
         }
 
-        _messagesBySimpleName.TryGetValue(name, out var messages);
-        _enumsBySimpleName.TryGetValue(name, out var enums);
+        var messages = _types.MessagesNamed(name);
+        var enums = _types.EnumsNamed(name);
 
-        var candidateCount = (messages?.Count ?? 0) + (enums?.Count ?? 0);
-
-        if (candidateCount > 1)
+        // Asked of the index rather than counted here, because completion has to predict exactly this
+        // and a second count is a second rule. The index names it for the position it governs.
+        if (_types.IsAmbiguousAsATypeName(name))
         {
             // Messages and enums share one type name space here, so a name matching one of each is
             // just as ambiguous as a name matching two enums.
-            var fullNames = (messages ?? Enumerable.Empty<MessageDescriptor>()).Select(m => m.FullName)
-                .Concat((enums ?? Enumerable.Empty<EnumDescriptor>()).Select(e => e.FullName));
+            var fullNames = messages.Select(m => m.FullName).Concat(enums.Select(e => e.FullName));
 
             ReportAmbiguousTypeName(name, reference.Span, fullNames);
             return ErrorType.Instance;
         }
 
-        if (messages is { Count: 1 })
+        if (messages is [var onlyMessage])
         {
-            return NamedMessage(messages[0]);
+            return NamedMessage(onlyMessage);
         }
 
-        if (enums is { Count: 1 })
+        if (enums is [var onlyEnum])
         {
-            return NamedEnum(enums[0]);
+            return NamedEnum(onlyEnum);
         }
 
         _diagnostics.Error(
@@ -1780,14 +1737,16 @@ public sealed class Binder
 
         // A fully qualified name is unambiguous by construction, so it is tried before the
         // simple-name lookup that could report a false ambiguity.
-        if (_enumsByFullName.TryGetValue(typeName, out var byFullName))
+        if (_types.FindEnum(typeName) is { } byFullName)
         {
             descriptor = byFullName;
             Use(SymbolId.ForType(descriptor), receiver.Span);
             return true;
         }
 
-        if (!_enumsBySimpleName.TryGetValue(typeName, out var candidates))
+        var candidates = _types.EnumsNamed(typeName);
+
+        if (candidates.Count == 0)
         {
             // Not an enum. Whatever this is, the ordinary path reports it.
             return false;

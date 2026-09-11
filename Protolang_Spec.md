@@ -1439,6 +1439,19 @@ Implementation Note:
   is a schema like any other; what differs between installations is whether a file backs it at all,
   since `protoc` resolves those schemas from descriptors compiled into the binary from version 33
   onwards and from files shipped beside the binary before that.
+- **The names a schema makes reachable are published as one index rather than left to be
+  re-derived.** A compilation reports every message and enum the imported schemas declare, nested
+  declarations included, under both the full name and the simple one, as `CompilationResult.Types`.
+  Type references are resolved against exactly that index, so a host predicting what a type position
+  will accept asks it rather than walking the descriptors a second time. A second walk is not merely
+  redundant. Enums and messages nested inside a message are reachable only by descending, so the
+  first thing an independent walk omits is the nested enum; and what a caller must know about an
+  ambiguous simple name is three different questions, not one. A receiver after `extend` is ambiguous
+  only against other messages (`PL0020`). A type position takes messages and enums as a single name
+  space, so a name matching one of each is as ambiguous as one matching two enums (`PL0074`). An enum
+  in front of a dot is ambiguous only against other enums. An index that answered a single "is this
+  ambiguous" would be wrong at two of those three sites, and wrong silently -- offering a name the
+  compiler then refuses, or withholding one it would have accepted.
 - A descriptor-load failure preserves `protoc`'s own report line by line, with the file and position
   each line names kept separate from its message, rather than only as prose inside a `PL0003`
   message. Publishing a schema error against the schema is only possible if that structure survives.
@@ -1997,6 +2010,35 @@ Normative Requirements:
   request was read against is therefore identified as a thing rather than as a number, which answers
   editing, closing and reopening at once. The configuration a request was resolved under is settled
   and checked the same way.
+- **A compilation kept and answered from again is checked against everything it was computed from,
+  and the buffer is only one of those things.** A host that answers questions between keystrokes
+  keeps the compilation it built, because lexing, parsing and binding one file per keystroke is what
+  it is avoiding. Three things decide that compilation and the editor owns one: the buffer, the
+  configuration the document resolves to, and the schemas that configuration reaches. The other two
+  live in files, and a file changes with no keystroke to notice it -- an imported `.proto` edited in
+  another window, a branch switched underneath the session, a `protolang.config.xml` repaired after
+  it was refused. So a kept compilation answers only while the configuration still resolves the same
+  way and the schemas still stand as they were read; the second is the check a descriptor load
+  already makes on its own entries (21.1), asked one level up, because a host that skips it answers
+  from a compilation the loader would itself have refused. Without this the cache is observable in
+  exactly the way 21.1 forbids, and it is observable as the worst kind of wrong answer: a completion
+  offering a field the schema no longer has, which goes on being offered until the user happens to
+  type in this buffer.
+- **A compilation whose schemas failed to load is not reused at all**, which is 21.1's rule applied
+  at a second layer rather than a new one. There is no closure to compare against, because `protoc`
+  never reported one, and treating that as "nothing to check" makes the refusal permanent: the author
+  creates the missing schema or corrects the malformed one, and every answer still comes out of the
+  failure until they edit the ProtoLang buffer -- which is the one thing they have no reason to do
+  while waiting to be told the import is fixed. Neither may the dependencies be reconstructed to
+  stand in for the closure. `protoc` blames a use rather than a declaration, so the file the author
+  edits to fix it is routinely one nothing named; recovering the rest means reading `import`
+  declarations out of schema text, which is this compiler holding a second opinion about another
+  language's grammar, and a wrong one, since `protoc` accepts spellings a scan will miss and any
+  bound on such a walk turns a missed dependency back into a permanent refusal. 21.1 already settles
+  it one layer down -- a load that failed is not cached at all -- and a host that kept one would be
+  reintroducing at its own layer precisely what the layer below refuses. What that costs is a load
+  per question while the workspace is broken. What it costs otherwise is very little: no descriptors
+  means no module, no types and no scope, so the answer being declined had almost nothing in it.
 - **Closing a document withdraws what it published and abandons what is outstanding for it.** Work
   already under way may finish, since some of it is shared and cannot be recalled, but nothing it
   produces is published, and **work not yet started is not started**. The second half is not a
@@ -2229,3 +2271,5 @@ Use this table to record decisions as the language stabilizes.
 | 2026-09-06 | Editor support | Import completion is answered from the lexed buffer and the file system, without compiling, and is refused with the protocol's content-modified when the buffer moved while it was being answered (5.2, 26.1) | Waiting on a schema load would make the answer arrive after the keystroke that invalidated it, and none of what makes a path importable needs descriptors -- so a document whose configuration file was refused still completes, which matters because being unable to fix an import while the policy file is broken would be a second problem caused by the first. It is also the first request in this server that can genuinely go stale: classification reads and answers in one instant, while this one goes to the file system in between. 26.1 already requires the refusal; the stakes here are higher than for diagnostics, because a stale completion does not merely mislead, it inserts text at an offset that has stopped meaning what it meant | Draft |
 | 2026-09-06 | Editor support | A host may answer a request that leaves the process -- one that reads the file system, or waits on a tool -- concurrently with the messages queued behind it, and owes the freshness rule (26.1) in return (26.1) | A server reads one stream and acts on it in order, which is what makes `initialize`, `shutdown` and the document notifications mean what they say. Holding that ordering across a handler that opens a directory holds it across the outside world: every edit, every close, and the cancellation that would have shortened it wait behind an answer the user may already have dismissed, and on a network-mounted include path the buffer stops syncing while they type. JSON-RPC permits responses in any order, so what is given up is an ordering the protocol never promised. It is opt-in per method rather than general, because the ordering is load-bearing for everything that does not leave the process. What a handler that opts in owes is stated in 26.1 and is more than it looks: it must settle which buffer the request is about before it yields -- deferring that lookup lets the edit behind the request land first and every later check then agrees about the wrong document -- it must identify that buffer and its configuration as objects rather than as a version and a generation, and it must bound its own outstanding work, since a per-answer budget bounds one answer and says nothing about how many there are | Draft |
 | 2026-09-07 | Editor support | A request waiting its turn is abandoned when the buffer it describes closes or moves on, rather than taking its turn and being refused at the end (26.1) | Bounded concurrency is what makes the queue safe, and it is also what makes this matter: the few slots are the resource, and one spent on a buffer nobody is looking at is one a live buffer is waiting for. A close is the likely case rather than the exotic one, because waiting behind a slow walk is exactly how long a person has to lose interest and shut the file. So a close cancels what is outstanding for its document -- the same obligation the compile queue already discharged, and stated once in 26.1 for both -- and freshness is asked when a request reaches the front of the queue as well as when it finishes, because an edit is the one reason for abandonment that carries no cancellation to notice. The waiting itself is part of the request and not part of the queue: it is cancelled the same way, retired through the same cleanup, and gives back only a slot it actually took, since releasing one it never held would raise the limit by one for every completion a client thought better of | Draft |
+| 2026-09-09 | Editor support | A compilation a host keeps between keystrokes is reused only while the configuration still resolves the same way and the schemas it read still stand, not merely while the buffer is the same object (21.1, 26.1) | Keying reuse on the buffer and the settings generation keys it on the one input the editor happens to own. The other two arrive from the file system, and the cases are ordinary rather than exotic: a schema edited in the window next door, a branch switched under the session, a policy file repaired after it was refused -- none of which moves a buffer or bumps a generation, so a stale entry survives until the user types in this file, which is the one thing they have no reason to do while reading a completion list. Neither check is written here: the settings are re-resolved and compared, and the closure is handed to the check the descriptor cache already makes, because a second statement of either rule is one that eventually disagrees with the compiler it is meant to be predicting. What it costs on a hit is a directory walk, an XML parse and a hash per schema, all of them far below the lex, parse and bind they stand in for -- and the thing bought is 21.1's promise that a cache is never observable, which a completion offering a field the schema no longer has breaks in the most visible way an editor integration can | Draft |
+| 2026-09-09 | Editor support | A kept compilation whose schema load failed is discarded rather than described, and its dependency graph is never reconstructed from schema text (21.1, 26.1) | The rule that a kept compilation is checked against the schemas it read has no closure to check when protoc rejected them, and the obvious repair -- describe what the compilation named instead -- is wrong twice over. protoc blames a use rather than a declaration, so the file an author edits to fix a missing type is routinely one no diagnostic mentions and no import names; and recovering the rest means scanning `import` declarations out of `.proto` text, which is this compiler asserting a grammar for another language. That assertion loses: protoc accepts `import"x";`, single quotes, comments between the tokens and escapes inside the path, and each spelling a scan misses is a repair that never releases the failure. Bounding the walk makes it worse rather than safer, because a truncated graph reports itself complete and certifies a stale entry -- six hundred commented examples ahead of one real import is enough. 21.1 already refuses to cache a failed load; doing the same one layer up costs a load per question in a workspace that is already failing to build, and gives up almost nothing, since a compilation with no descriptors has no module, no types and no scope to reuse | Draft |

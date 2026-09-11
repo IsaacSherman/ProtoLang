@@ -107,6 +107,28 @@ public sealed record CompilationResult(
     public SchemaLoadFailure? SchemaFailure { get; init; }
 
     /// <summary>
+    /// The messages and enums the imported schemas made nameable, indexed the way the binder resolved
+    /// against them. Empty when binding never ran.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Init-only and beside the positional members for the reason <see cref="Schema"/> gives: the
+    /// constructor keeps the shape every existing caller builds and destructures it by.
+    /// </para>
+    /// <para>
+    /// <see cref="Descriptors"/> holds the same files, so this adds no information -- it adds the one
+    /// reading of them the compiler itself used. A host predicting what the binder would accept in a
+    /// type position has to walk into nested messages and nested enums, apply the ordinal comparison,
+    /// and distinguish three different ambiguity rules; deriving that a second time from the
+    /// descriptor list is how a completion list comes to offer a name the compiler then refuses.
+    /// </para>
+    /// <para>
+    /// Empty rather than null when there is no module, so a caller asks one question of one shape.
+    /// </para>
+    /// </remarks>
+    public SchemaTypes Types { get; init; } = SchemaTypes.Empty;
+
+    /// <summary>
     /// What protoc reported about the schemas, one entry per line it wrote, empty when it reported
     /// nothing or was never reached.
     /// </summary>
@@ -590,8 +612,8 @@ public sealed class Compilation
             };
         }
 
-        var module = new Binder(schema.Descriptors, diagnostics, new NumericPolicy(config), config, source.Identity)
-            .Bind(unit);
+        var binder = new Binder(schema.Descriptors, diagnostics, new NumericPolicy(config), config, source.Identity);
+        var module = binder.Bind(unit);
 
         // Carried out whether or not anything went wrong, because a module built from a broken tree
         // is exactly what an editor came for and is no use to anyone else. Nothing can mistake it
@@ -601,6 +623,7 @@ public sealed class Compilation
         return new CompilationResult(module, unit, schema.Descriptors, diagnostics, config, SearchPaths, imports)
         {
             Schema = schema,
+            Types = binder.Types,
         };
     }
 

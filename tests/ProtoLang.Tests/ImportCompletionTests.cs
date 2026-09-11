@@ -439,19 +439,27 @@ public class ImportCompletionTests
     // ------------------------------------------------------- where nothing is offered
 
     /// <summary>
-    /// The sweep: for every position in a file, completion answers exactly where an import path can
-    /// be typed and nowhere else. The regions are computed from the text rather than written down, so
+    /// The sweep: for every position in a file, a schema path is offered exactly where one can be
+    /// typed and nowhere else. The regions are computed from the text rather than written down, so
     /// the test still means something after the fixture is edited.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The fixture holds the two things that look like an import path and are not: a comment naming
     /// one, which the lexer discards as trivia, and a string literal in expression position, which it
     /// does not. The second is the one that matters -- a token stream scanned for string literals
     /// alone finds it, and offering schema paths inside a return value is completion firing in a
     /// place no schema path can go.
+    /// </para>
+    /// <para>
+    /// About schema paths rather than about items in general, because the other contexts now answer
+    /// too: a type position offers types, a bare identifier offers what is in scope. What must stay
+    /// true, and is the whole of what this sweep was ever holding in place, is that the answer for an
+    /// import path is confined to an import path.
+    /// </para>
     /// </remarks>
     [Fact]
-    public async Task OnlyACaretInsideAnImportPathCompletesAtAll()
+    public async Task OnlyACaretInsideAnImportPathOffersSchemaPaths()
     {
         const string Source =
             "// nothing here is a \"path.proto\"\nimport proto \"\";\nimport proto \"billing/\";\n"
@@ -467,10 +475,13 @@ public class ImportCompletionTests
             var offered = await CompleteAsync(client, uri, PositionOf(text, offset));
             var wanted = inside.Contains(offset);
 
+            var paths = offered.Items
+                .Count(item => item.Kind is CompletionItemKind.File or CompletionItemKind.Folder);
+
             Assert.True(
-                wanted == (offered.Items.Count > 0),
+                wanted == (paths > 0),
                 $"offset {offset} is {(wanted ? "inside" : "outside")} an import path and offered "
-                    + $"{offered.Items.Count} candidates");
+                    + $"{paths} schema paths");
         }
     }
 
@@ -551,15 +562,21 @@ public class ImportCompletionTests
         Assert.Null(silent.Capabilities.CompletionProvider);
     }
 
-    /// <summary>The two characters that open a path segment, which is when a client should ask.</summary>
+    /// <summary>Every character after which a client should ask without being asked to.</summary>
+    /// <remarks>
+    /// One flat list serving every context, because the protocol cannot scope a trigger character to
+    /// a position. The quote and the separator open a path segment; the dot is member completion's,
+    /// and is asserted here rather than only beside the members because what is published is one list
+    /// and a context that quietly dropped another context's character would be found nowhere else.
+    /// </remarks>
     [Fact]
-    public async Task TheTriggerCharactersAreTheOnesThatOpenAPathSegment()
+    public async Task TheTriggerCharactersAreTheOnesAfterWhichAnAnswerWouldHaveChanged()
     {
         await using var client = LanguageServerClient.Create();
 
         var offered = await client.InitializeAsync(LanguageServerClient.FullCapabilities, null);
 
-        Assert.Equal(["\"", "/"], offered.Capabilities.CompletionProvider!.TriggerCharacters);
+        Assert.Equal(["\"", "/", "."], offered.Capabilities.CompletionProvider!.TriggerCharacters);
     }
 
     // ------------------------------------------------------- answering about text that is still there

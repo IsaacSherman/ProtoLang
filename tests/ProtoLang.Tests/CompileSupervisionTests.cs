@@ -339,18 +339,20 @@ public class CompileSupervisionTests
     /// and no cache larger than it is allowed to be.
     /// </summary>
     /// <remarks>
-    /// Small enough to belong in the unfiltered run, which is the only run there is -- a soak behind
-    /// a switch is a soak nobody performs, and this repository has no CI to perform it. Its longer
-    /// sibling is the one that runs deliberately.
+    /// Small enough to belong in the unfiltered run, which is the run every change gets. Its longer
+    /// sibling is behind a switch, and the switch is thrown for every pull request.
     /// </remarks>
     [Fact]
     public Task SustainedEditingLeavesNoBacklogProcessesOrTemporaryFiles() => SoakAsync(documents: 3, edits: 50);
 
     /// <inheritdoc cref="SustainedEditingLeavesNoBacklogProcessesOrTemporaryFiles"/>
     /// <remarks>
-    /// The same properties over a session long enough for a slow leak to show. Gated, because minutes
-    /// of typing is not what a person waiting on a build wants from the suite, and run before a
-    /// release rather than before a commit.
+    /// The same properties over a session long enough for a slow leak to show. Gated because a
+    /// session of that length is not what a person mid-iteration wants to wait for -- not because it
+    /// is slow, which it turns out not to be: the scheduler supersedes almost every edit, so three
+    /// thousand of them cost about what fifty do, and being cheap is the property under test rather
+    /// than a reason to stop gating it. What the switch buys is that the local suite stays about one
+    /// thing. CI throws it on every pull request.
     /// </remarks>
     [Fact]
     public Task ALongSessionOfEditingLeavesNoBacklogProcessesOrTemporaryFiles()

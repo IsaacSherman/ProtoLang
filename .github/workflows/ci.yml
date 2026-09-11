@@ -1,0 +1,120 @@
+# The unfiltered run, performed rather than described.
+#
+# The suite has always been the gate, and both of its switches were off by default because neither
+# is what a person mid-iteration wants to wait for: the corpus sweep applies every item completion
+# offers at every caret worth asking at over every source the repository maintains, and the long
+# soak simulates a session of editing long enough for a slow leak to show. A switch nobody throws is
+# a check nobody performs, so both are thrown here. They stay off locally, where the argument for
+# gating them was always about the person waiting.
+name: build and test
+
+# Two events and no others, and the branch filters are what keep it that way.
+#
+# 'pull_request.branches' filters the branch being merged *into*, so this is every proposal to change
+# main and nothing else. 'push.branches' filters the branch being pushed *to*, so it catches a commit
+# landed on main directly and does not fire for work pushed to a feature branch. Ordinary pushes
+# therefore cost nothing at all: the suite is what a person runs before they propose a change, and
+# this is the same suite run where the proposal is judged rather than a second opinion on every
+# keystroke of the way there.
+on:
+  pull_request:
+    branches: [main]
+    # 'ready_for_review' is not a default and is needed because of the draft condition below: without
+    # it, a pull request opened as a draft and later marked ready would have declined every run it was
+    # offered and then never be offered another.
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A pull request that is pushed to twice does not need the first run finished. The default branch is
+# excluded from cancellation, since a push to main is the record of what main was.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    # A draft is a proposal that is not being proposed yet, and validating one spends minutes on a
+    # branch whose author has said out loud that they are not finished. Marking it ready is the event
+    # that asks the question, and that is the event this then answers.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+
+    strategy:
+      # Both legs report, because "the other one failed too" and "only this one failed" are different
+      # facts about a change and the second is the interesting one.
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+
+    env:
+      PROTOLANG_SWEEP: 1
+      PROTOLANG_SOAK: 1
+      DOTNET_NOLOGO: 1
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # From global.json rather than a version written here, so that CI and a developer's machine
+      # cannot disagree about which SDK compiled the code. A floating version is not merely
+      # imprecise: TreatWarningsAsErrors is on, so a feature band that ships one new analyzer
+      # warning turns a green pull request red without anybody having changed anything, on a
+      # schedule this repository does not control.
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # Grpc.Tools alone is 79 MB, and it is downloaded for protoc rather than for code: the test
+      # project references it so that ProtocLocator finds a real compiler without depending on what
+      # is on the machine. Downloading it again on every pull request is the largest avoidable part
+      # of a run.
+      #
+      # Keyed on everything that decides what gets restored: the version manifest, every project
+      # file, and the build props that set the target framework -- a framework change restores
+      # different assets while touching no package reference at all. Central package management keeps
+      # the versions in one file, so a bumped dependency invalidates the cache and an unchanged one
+      # does not, and the restore-keys prefix means a bump still starts from the previous cache and
+      # downloads only the difference.
+      - name: Cache packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/Directory.Packages.props', '**/Directory.Build.props', '**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-
+
+      # Restore is its own step because it is also what puts protoc on this machine: the test project
+      # references Grpc.Tools for exactly that reason, so a restore that failed would otherwise show
+      # up as several dozen tests quietly declining to run.
+      - name: Restore
+        run: dotnet restore ProtoLang.slnx
+
+      - name: Build
+        run: dotnet build ProtoLang.slnx --no-restore
+
+      - name: Test
+        run: >
+          dotnet test ProtoLang.slnx --no-build
+          --logger "trx;LogFileName=results.trx"
+          --results-directory artifacts/test
+
+      # Runs even when the tests failed, because what did not run is worth knowing either way -- and
+      # on a red build it is often the explanation.
+      - name: Report what did not run
+        if: always()
+        shell: pwsh
+        run: ./.github/workflows/report.ps1 -Results artifacts/test
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: artifacts/test
+          if-no-files-found: warn
