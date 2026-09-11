@@ -2,7 +2,7 @@
 
 ProtoLang compiles methods written against protobuf messages into equivalent C# and C++.
 
-Read [ARCHITECTURE.md](ARCHITECTURE.md) for the lay of the land, [Protolang_Spec.md](Protolang_Spec.md)
+Read [ARCHITECTURE.md](ARCHITECTURE.md) for the lay of the land, [Protolang_Spec/](Protolang_Spec/README.md)
 for the language, and [docs/epic-47-workflow.md](docs/epic-47-workflow.md) for the per-issue process
 of the editor-support epic.
 
@@ -103,7 +103,7 @@ A test that cannot fail is worse than no test: it costs a run and buys confidenc
 
 ## Keep the spec current
 
-[Protolang_Spec.md](Protolang_Spec.md) is the language, not a description of it. Anything that
+[Protolang_Spec/](Protolang_Spec/README.md) is the language, not a description of it. Anything that
 changes what an author can write, what it means, or what the compiler tells them about it changes
 the spec too, and that edit belongs in the **same commit as the code**. A spec that lags is still
 consulted, and being trusted is exactly what makes a stale one expensive.

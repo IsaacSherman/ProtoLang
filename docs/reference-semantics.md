@@ -10,7 +10,7 @@ reader is most likely to already hold, and the .NET runtime is the baseline the 
 rules were derived from. Where ProtoLang does *not* take C#'s answer, the row says so and the
 [Departures](#departures-from-c) section says why.
 
-This file is a reference table, not a normative document. [`Protolang_Spec.md`](../Protolang_Spec.md)
+This file is a reference table, not a normative document. [`Protolang_Spec/`](../Protolang_Spec/README.md)
 is normative; each row cites the section that decides it. Where the two disagree, the spec wins and
 this file has a bug.
 
@@ -156,7 +156,8 @@ A row earns its place here when a behavior is *decided* -- when the spec pins it
 implement it. Before then it belongs in the spec's open questions, or in this file as a *Not yet
 pinned* row if the gap is worth tracking.
 
-1. Write the normative rule in `Protolang_Spec.md` first, and record the decision in section 31.
+1. Write the normative rule in the appropriate `Protolang_Spec/§N-*.md` file first, and record the
+   decision in `Protolang_Spec/§31-Decision Log.md`.
 2. Add the row here, citing that section. Fill in the **C# behavior** column from what C# actually
    does, not from what it is commonly said to do -- the overflow row above is there because the two
    differ.

@@ -92,7 +92,7 @@ The typed IR is important. It gives the project a place to define semantics once
 
 The current draft specification template is in:
 
-[Protolang_Spec.md](Protolang_Spec.md)
+[Protolang_Spec/](Protolang_Spec/README.md), one file per numbered section
 
 That document separates:
 

@@ -81,7 +81,7 @@ checklist — the issues state requirements sentence by sentence and each one is
 
 ### 4. Update the spec, if the change reached the language
 
-[Protolang_Spec.md](../Protolang_Spec.md) is the language rather than a description of it, so a change
+[Protolang_Spec/](../Protolang_Spec/README.md) is the language rather than a description of it, so a change
 to what an author can write, what it means, what the compiler reports, or what the IR promises to
 preserve is a change to the spec as much as to the code. Settle it here, before the commit, because
 [CLAUDE.md](../CLAUDE.md) asks for it in the **same commit as the code**: an edit deferred to the end

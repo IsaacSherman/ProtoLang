@@ -1,7 +1,7 @@
 # ProtoLang architecture
 
 A map for a cold start: what exists, where it lives, and which invariants constrain a change. The
-language itself is specified in [Protolang_Spec.md](Protolang_Spec.md); how to write code here is in
+language itself is specified in [Protolang_Spec/](Protolang_Spec/README.md); how to write code here is in
 [CLAUDE.md](CLAUDE.md); the per-issue process for the editor-support epic is in
 [docs/epic-47-workflow.md](docs/epic-47-workflow.md).
 
