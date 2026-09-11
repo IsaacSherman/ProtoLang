@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Google.Protobuf.Reflection;
 using ProtoLang.Binding;
 using ProtoLang.Diagnostics;

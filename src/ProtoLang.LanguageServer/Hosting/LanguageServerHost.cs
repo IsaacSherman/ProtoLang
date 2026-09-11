@@ -160,8 +160,15 @@ public sealed class LanguageServerHost : IDisposable
         _connection.OnRequest(Methods.Shutdown, (_, _) => Shutdown());
         _connection.OnRequest(Methods.SemanticTokensFull, (parameters, _) => Answer<SemanticTokensParams>(parameters, Classify));
         _connection.OnRequest(Methods.Completion, Complete, concurrent: true);
-        _connection.OnRequest(Methods.Hover, Describe, concurrent: true);
-        _connection.OnRequest(Methods.Definition, Define, concurrent: true);
+        _connection.OnRequest(
+            Methods.Hover,
+            (parameters, token) => AtPosition(parameters, _hover.Read, _hover.AnswerAsync, token),
+            concurrent: true);
+
+        _connection.OnRequest(
+            Methods.Definition,
+            (parameters, token) => AtPosition(parameters, _definition.Read, _definition.AnswerAsync, token),
+            concurrent: true);
         _connection.OnRequest(
             Methods.DocumentSymbol, (parameters, _) => Answer<DocumentSymbolParams>(parameters, Outline));
 
@@ -236,32 +243,30 @@ public sealed class LanguageServerHost : IDisposable
         return await _completion.AnswerAsync(asked, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Answers a hover: read here, in order with everything else, and compiled anywhere.</summary>
-    /// <inheritdoc cref="Complete" path="/remarks"/>
-    private async Task<object?> Describe(JsonElement? parameters, CancellationToken cancellationToken)
+    /// <summary>
+    /// Answers a request about one caret: read here, in order with everything else, and produced
+    /// anywhere.
+    /// </summary>
+    /// <remarks>
+    /// One method for hover and go-to-definition, and for whatever #51 adds beside them, because
+    /// what differs between them is which provider answers and what does not differ is the part
+    /// that must not move: <paramref name="read"/> runs before this returns and therefore before the
+    /// next message is dequeued. See <see cref="Complete"/> for why, at length.
+    /// </remarks>
+    private async Task<object?> AtPosition<T>(
+        JsonElement? parameters,
+        Func<TextDocumentPositionParams, PositionRequest?> read,
+        Func<PositionRequest, CancellationToken, Task<T>> answer,
+        CancellationToken cancellationToken)
     {
         RequireRunning();
 
         var message = LspJson.Read<TextDocumentPositionParams>(parameters)
             ?? throw Missing<TextDocumentPositionParams>();
 
-        return _hover.Read(message) is not { } asked
+        return read(message) is not { } asked
             ? null
-            : await _hover.AnswerAsync(asked, cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>Answers a go-to-definition, on the same terms as a hover.</summary>
-    /// <inheritdoc cref="Complete" path="/remarks"/>
-    private async Task<object?> Define(JsonElement? parameters, CancellationToken cancellationToken)
-    {
-        RequireRunning();
-
-        var message = LspJson.Read<TextDocumentPositionParams>(parameters)
-            ?? throw Missing<TextDocumentPositionParams>();
-
-        return _definition.Read(message) is not { } asked
-            ? null
-            : await _definition.AnswerAsync(asked, cancellationToken).ConfigureAwait(false);
+            : await answer(asked, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Runs a notification handler, dropping the message when it arrives out of turn.</summary>

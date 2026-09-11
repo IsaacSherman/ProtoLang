@@ -70,9 +70,15 @@ internal static class HoverCard
             return null;
         }
 
-        return DeclaredSymbol.At(compiled, offset) is { } symbol
+        // The symbol arm first, and the expression arm as the fallback rather than the alternative.
+        // Every arm below can produce nothing -- a schema element from another load, a field whose
+        // descriptor is on no node this knows -- and the type of the expression standing there is
+        // still worth saying. Silence is for a caret that is on nothing.
+        var card = DeclaredSymbol.At(compiled, offset) is { } symbol
             ? Card(AboutSymbol(model, result, symbol), symbol.Span)
-            : AboutExpression(model, offset);
+            : null;
+
+        return card ?? AboutExpression(model, offset);
     }
 
     // ------------------------------------------------------- what the caret is on

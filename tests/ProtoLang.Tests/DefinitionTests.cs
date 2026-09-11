@@ -242,6 +242,49 @@ public class DefinitionTests
         Assert.Equal(RangeOf(Source, "doubled"), answer.Range);
     }
 
+    /// <summary>
+    /// A declaration in the buffer the client asked about is returned under the URI the client sent,
+    /// not under this server's own spelling of the same path.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The case in the wild is a drive letter: an editor sends <c>file:///c%3A/Users/...</c> and
+    /// <c>DocumentUri.FromPath</c> produces <c>file:///C:/Users/...</c>, so a client matching the
+    /// target against its own open documents by string opens a second editor onto the file the caret
+    /// is already in. That spelling is platform-specific, so what is written here is a redundant path
+    /// segment, which is the same property -- two strings, one file -- on every platform.
+    /// </para>
+    /// <para>
+    /// Asserted as string equality rather than as URI equivalence, because string equality is what a
+    /// client does.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task ADeclarationInTheAskedDocumentKeepsTheUriTheClientSent()
+    {
+        var (documents, canonical) = EditorFixture.Open(Source);
+        var file = Path.GetFileName(canonical.Path)!;
+        var spelled = DocumentUri.Parse(
+            canonical.Text[..^file.Length] + "./" + file);
+
+        Assert.NotEqual(canonical.Text, spelled.Text);
+        Assert.Equal(canonical.Key, spelled.Key);
+
+        documents.Open(spelled, "protolang", 1, Source);
+
+        var provider = new DefinitionProvider(
+            documents, EditorFixture.Configuration(), EditorFixture.Loaders()) { LinkSupport = true };
+
+        var asked = provider.Read(
+            EditorFixture.Ask(spelled, Source, EditorFixture.After(Source, "return doubl")));
+
+        Assert.NotNull(asked);
+
+        var link = Assert.Single((LocationLink[])(await provider.AnswerAsync(asked!, CancellationToken.None))!);
+
+        Assert.Equal(spelled.Text, link.TargetUri);
+    }
+
     // ------- when the rest of the file is broken
 
     /// <summary>

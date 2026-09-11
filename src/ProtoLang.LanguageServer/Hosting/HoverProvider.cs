@@ -70,26 +70,9 @@ public sealed class HoverProvider
     /// <inheritdoc cref="DeferredAnswers.PeakInFlight"/>
     public int PeakInFlight => _deferred.PeakInFlight;
 
-    /// <summary>
-    /// Which buffer a request is about and where in it -- settled while messages are still being
-    /// read in order -- or null when the document is not open.
-    /// </summary>
-    /// <inheritdoc cref="CompletionProvider.Read" path="/remarks"/>
+    /// <inheritdoc cref="PositionRequest.Read"/>
     public PositionRequest? Read(TextDocumentPositionParams message)
-    {
-        ArgumentNullException.ThrowIfNull(message);
-
-        if (!DocumentUri.TryParse(message.TextDocument.Uri, out var uri)
-            || _documents.Find(uri) is not { } document)
-        {
-            // Closed before it was read, or never opened. Nothing rather than an error: the client
-            // has done nothing wrong, and there is genuinely nothing to say.
-            return null;
-        }
-
-        return new PositionRequest(
-            uri!, document, _configuration.Current, EditorPositions.OffsetOf(document.Lines, message.Position));
-    }
+        => PositionRequest.Read(_documents, _configuration, message);
 
     /// <summary>What to say about the position <see cref="Read"/> settled, or null for nothing.</summary>
     /// <inheritdoc cref="DeferredAnswers.AnswerAsync" path="/exception"/>

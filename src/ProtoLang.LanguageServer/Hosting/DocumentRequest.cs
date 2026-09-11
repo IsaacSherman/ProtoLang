@@ -1,3 +1,4 @@
+using ProtoLang.LanguageServer.Protocol.Lsp;
 using ProtoLang.LanguageServer.Workspace;
 
 namespace ProtoLang.LanguageServer.Hosting;
@@ -62,4 +63,49 @@ public sealed class PositionRequest(
 {
     /// <inheritdoc cref="PositionRequest(DocumentUri, OpenDocument, WorkspaceConfiguration, int)" path="/param[@name='offset']"/>
     public int Offset { get; } = offset;
+
+    /// <summary>
+    /// Which buffer a request is about and where in it -- settled while messages are still being
+    /// read in order -- or null when the document is not open.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This must not be deferred.</b> Everything after it is allowed to take as long as compiling
+    /// does, and none of it is allowed to decide <em>which text</em> the answer is about: a
+    /// <c>didChange</c> sitting behind this request in the queue would otherwise be applied first,
+    /// and the offset would be measured against a buffer the client had not sent when it asked. The
+    /// configuration is captured here for the same reason and by the same means -- it is immutable
+    /// and stamped with a generation, so holding the object holds the answer.
+    /// </para>
+    /// <para>
+    /// On this type rather than on each provider, because it is that rule and every position request
+    /// obeys the same one. A second copy of it is the copy that eventually reads the buffer a
+    /// keystroke later.
+    /// </para>
+    /// <para>
+    /// Null when the document is not open -- closed before the request was read, or never opened.
+    /// Nothing rather than an error: the client has done nothing wrong, and there is genuinely
+    /// nothing to say about a buffer this server does not hold.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">Any argument is null.</exception>
+    public static PositionRequest? Read(
+        DocumentStore documents, ConfigurationSync configuration, TextDocumentPositionParams message)
+    {
+        ArgumentNullException.ThrowIfNull(documents);
+        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(message);
+
+        if (!DocumentUri.TryParse(message.TextDocument.Uri, out var uri)
+            || documents.Find(uri) is not { } document)
+        {
+            return null;
+        }
+
+        return new PositionRequest(
+            uri!,
+            document,
+            configuration.Current,
+            EditorPositions.OffsetOf(document.Lines, message.Position));
+    }
 }
