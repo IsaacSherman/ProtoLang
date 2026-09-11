@@ -1,4 +1,5 @@
 using Google.Protobuf.Reflection;
+using ProtoLang.Symbols;
 
 namespace ProtoLang.Binding;
 
@@ -65,6 +66,7 @@ public sealed record SchemaEnumName(EnumDescriptor Descriptor)
 /// </remarks>
 public sealed class SchemaTypes
 {
+    private readonly Dictionary<SymbolId, SchemaTypeName> _byIdentity = [];
     private readonly Dictionary<string, MessageDescriptor> _messagesByFullName = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<MessageDescriptor>> _messagesBySimpleName = new(StringComparer.Ordinal);
     private readonly Dictionary<string, EnumDescriptor> _enumsByFullName = new(StringComparer.Ordinal);
@@ -105,6 +107,27 @@ public sealed class SchemaTypes
 
         return types;
     }
+
+    /// <summary>
+    /// The type <paramref name="symbol"/> identifies, or null when no schema here declares it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The lookup a caret needs, because a caret gives an identity and nothing else. A name in type
+    /// position resolves to a type and leaves no IR node behind -- <c>fn f(x: Money)</c> mentions
+    /// <c>Money</c> nowhere in the IR -- so the only thing standing there is the
+    /// <see cref="SymbolReference"/> the binder recorded, and the only handle it carries is a
+    /// <see cref="SymbolId"/>. Answered from the walk this type already performs rather than from a
+    /// second one, which is the whole reason it belongs here: the first thing a hand-rolled lookup
+    /// omits is the enum nested in a message.
+    /// </para>
+    /// <para>
+    /// Both name spaces in one index, unlike the three ambiguity questions above, because an
+    /// identity is not a spelling: a <see cref="SymbolId"/> already says whether it identifies a
+    /// message or an enum and cannot reach both.
+    /// </para>
+    /// </remarks>
+    public SchemaTypeName? Find(SymbolId symbol) => _byIdentity.GetValueOrDefault(symbol);
 
     /// <summary>The message with this exact full name, or null if no schema declares one.</summary>
     public MessageDescriptor? FindMessage(string fullName)
@@ -206,6 +229,7 @@ public sealed class SchemaTypes
 
     private void IndexMessage(MessageDescriptor message)
     {
+        _byIdentity[SymbolId.ForType(message)] = new SchemaMessageName(message);
         _messagesByFullName[message.FullName] = message;
 
         if (!_messagesBySimpleName.TryGetValue(message.Name, out var list))
@@ -231,6 +255,7 @@ public sealed class SchemaTypes
 
     private void IndexEnum(EnumDescriptor enumType)
     {
+        _byIdentity[SymbolId.ForType(enumType)] = new SchemaEnumName(enumType);
         _enumsByFullName[enumType.FullName] = enumType;
 
         if (!_enumsBySimpleName.TryGetValue(enumType.Name, out var list))

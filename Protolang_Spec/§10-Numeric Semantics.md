@@ -283,6 +283,15 @@ Normative Requirements:
   what it does without re-running the compiler to find out. Every backend states the same facts
   about the same build, and no path is included: an absolute path would make otherwise identical
   output differ between machines.
+- **A host that explains an operation states the policy governing it, and states it nowhere else.**
+  The header serves a reader of the generated code; a reader of the ProtoLang source has no such
+  line, and `total * scale` looks the same whichever mode is in force. So an explanation of an
+  operation the policy governs -- integer arithmetic, integer division and its zero divisor, an
+  explicit conversion -- says what it does, and an explanation of anything else says nothing about
+  configuration at all. The rule is mechanical rather than editorial: the behavior is read off the
+  annotation the binder stamped on the IR node, so what is described is what will be emitted, and an
+  operation carrying no annotation has nothing to say. A host that recited the project's policy on
+  every explanation would be one nobody reads by the third.
 
 Settings with a single legal value are listed anyway. The file's purpose is to enumerate every
 language-dependent preference, including the settled ones, so the whole contract is readable in one

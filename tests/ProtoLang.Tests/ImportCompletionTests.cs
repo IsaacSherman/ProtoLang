@@ -1222,12 +1222,7 @@ public class ImportCompletionTests
     /// A configuration that has never spoken to a client: no folders, no settings, so the only
     /// include root is the document's own directory.
     /// </summary>
-    private static ConfigurationSync Configuration()
-    {
-        var log = new ServerLog();
+    private static ConfigurationSync Configuration() => EditorFixture.Configuration();
 
-        return new ConfigurationSync(new JsonRpcConnection(Stream.Null, Stream.Null, log), log);
-    }
-
-    private static LoaderPool Loaders() => new(new ServerLog());
+    private static LoaderPool Loaders() => EditorFixture.Loaders();
 }

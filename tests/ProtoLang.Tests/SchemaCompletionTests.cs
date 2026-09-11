@@ -46,14 +46,9 @@ public class SchemaCompletionTests
         }
         """;
 
-    private static ConfigurationSync Configuration()
-    {
-        var log = new ServerLog();
+    private static ConfigurationSync Configuration() => EditorFixture.Configuration();
 
-        return new ConfigurationSync(new JsonRpcConnection(Stream.Null, Stream.Null, log), log);
-    }
-
-    private static LoaderPool Loaders() => new(new ServerLog());
+    private static LoaderPool Loaders() => EditorFixture.Loaders();
 
     private static (CompletionProvider Provider, DocumentStore Documents, DocumentUri Uri) Open(string text)
     {

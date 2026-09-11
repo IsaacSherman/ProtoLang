@@ -139,8 +139,8 @@ public sealed class DocumentStore
         }
 
         var lines = new LineMap(text);
-        var start = lines.OffsetOf(range.Start.Line + 1, range.Start.Character + 1);
-        var end = lines.OffsetOf(range.End.Line + 1, range.End.Character + 1);
+        var start = EditorPositions.OffsetOf(lines, range.Start);
+        var end = EditorPositions.OffsetOf(lines, range.End);
 
         if (end < start)
         {

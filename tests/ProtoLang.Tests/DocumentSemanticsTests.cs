@@ -26,7 +26,7 @@ public class DocumentSemanticsTests
 {
     private const string Source = "import proto \"fixtures.proto\";\n\nextend Outer {\n    fn f() -> int64 { return count; }\n}\n";
 
-    private static LoaderPool Loaders() => new(new ServerLog());
+    private static LoaderPool Loaders() => EditorFixture.Loaders();
 
     private static WorkspaceConfiguration Settings(string root)
         => WorkspaceConfiguration.Empty with

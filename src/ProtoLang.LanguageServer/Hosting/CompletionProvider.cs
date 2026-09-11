@@ -11,6 +11,7 @@ using ProtoLang.LanguageServer.Protocol;
 using ProtoLang.LanguageServer.Protocol.Lsp;
 using ProtoLang.LanguageServer.Workspace;
 using Range = ProtoLang.LanguageServer.Protocol.Lsp.Range;
+using SymbolKind = ProtoLang.Symbols.SymbolKind;
 
 namespace ProtoLang.LanguageServer.Hosting;
 
@@ -24,27 +25,15 @@ namespace ProtoLang.LanguageServer.Hosting;
 /// long as it takes without changing what the answer is about, and can be checked against these two
 /// before it is sent.
 /// </remarks>
-public sealed class CompletionRequest
+public sealed class CompletionRequest : DocumentRequest
 {
     internal CompletionRequest(
         DocumentUri uri,
         OpenDocument document,
         WorkspaceConfiguration configuration,
         CompletionSubject context)
-    {
-        Uri = uri;
-        Document = document;
-        Configuration = configuration;
-        Context = context;
-    }
-
-    public DocumentUri Uri { get; }
-
-    /// <summary>The buffer this is about, as an object rather than as a version.</summary>
-    public OpenDocument Document { get; }
-
-    /// <summary>The settings this is about, as an object rather than as a generation.</summary>
-    public WorkspaceConfiguration Configuration { get; }
+        : base(uri, document, configuration)
+        => Context = context;
 
     /// <summary>Which kind of place the caret turned out to be in.</summary>
     public CompletionContextKind Kind => Context.Kind;
@@ -119,24 +108,14 @@ public sealed class CompletionRequest
 /// </remarks>
 public sealed class CompletionProvider
 {
-    /// <summary>How many completions may be walking the file system at once.</summary>
-    /// <remarks>
-    /// The same figure and the same reasoning as <see cref="CompileScheduler.DefaultConcurrency"/>:
-    /// ten open documents must not mean ten simultaneous walks of an include root. #57 pins it, and
-    /// <see cref="PeakInFlight"/> is what shows whether whatever it is pinned to is honoured.
-    /// </remarks>
-    public const int DefaultConcurrency = 4;
+    /// <inheritdoc cref="DeferredAnswers.DefaultConcurrency"/>
+    public const int DefaultConcurrency = DeferredAnswers.DefaultConcurrency;
 
     private readonly DocumentStore _documents;
     private readonly ConfigurationSync _configuration;
     private readonly LoaderPool _loaders;
     private readonly DocumentSemantics _semantics;
-    private readonly SemaphoreSlim _concurrency;
-
-    private readonly ConcurrentDictionary<string, CancellationTokenSource> _outstanding = new(StringComparer.Ordinal);
-
-    private int _inFlight;
-    private int _peakInFlight;
+    private readonly DeferredAnswers _deferred;
 
     public CompletionProvider(
         DocumentStore documents,
@@ -154,7 +133,7 @@ public sealed class CompletionProvider
         // compile. A caller with no interest in that gets one of its own.
         _semantics = semantics ?? new DocumentSemantics(loaders);
 
-        _concurrency = new SemaphoreSlim(concurrency, concurrency);
+        _deferred = new DeferredAnswers("completion", documents, configuration, concurrency);
     }
 
     /// <summary>The characters that should make a client ask without being asked to.</summary>
@@ -187,19 +166,15 @@ public sealed class CompletionProvider
             => SchemaCatalog.Enumerate(directory, roots, cancellationToken: cancellationToken);
 
     /// <summary>Documents with a completion still outstanding.</summary>
-    /// <remarks>
-    /// At most one per document, because a newer request for a document replaces the entry the last
-    /// one left. The bound is therefore the number of open documents however fast anybody types --
-    /// the same bound, for the same reason, as <see cref="CompileScheduler.Pending"/>.
-    /// </remarks>
-    public int Outstanding => _outstanding.Count;
+    /// <inheritdoc cref="DeferredAnswers.Outstanding" path="/remarks"/>
+    public int Outstanding => _deferred.Outstanding;
 
     /// <summary>Walks that are past the gate and have not yet returned.</summary>
-    public int InFlight => Volatile.Read(ref _inFlight);
+    public int InFlight => _deferred.InFlight;
 
     /// <summary>The most walks that have ever been past the gate at one moment.</summary>
     /// <inheritdoc cref="CompileScheduler.PeakInFlight" path="/remarks"/>
-    public int PeakInFlight => Volatile.Read(ref _peakInFlight);
+    public int PeakInFlight => _deferred.PeakInFlight;
 
     /// <summary>Nothing to offer, which is not the same as a failure to offer it.</summary>
     public static CompletionList Nothing { get; } = new() { Items = [] };
@@ -227,7 +202,7 @@ public sealed class CompletionProvider
             return null;
         }
 
-        var offset = document.Lines.OffsetOf(message.Position.Line + 1, message.Position.Character + 1);
+        var offset = EditorPositions.OffsetOf(document.Lines, message.Position);
 
         // Import first, and nothing currently depends on that. What keeps the two apart is that a
         // caret inside an import path is inside a string literal, and the general probe declines
@@ -253,183 +228,36 @@ public sealed class CompletionProvider
     /// The client withdrew the request, or a newer one for the same document superseded it. Either
     /// way nobody is waiting on the answer, and finishing the walk is work spent on nothing.
     /// </exception>
-    public async Task<CompletionList> AnswerAsync(CompletionRequest asked, CancellationToken cancellationToken)
+    public Task<CompletionList> AnswerAsync(CompletionRequest asked, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(asked);
 
-        var work = Supersede(asked.Uri, cancellationToken);
-        var token = work.Token;
-        var acquired = false;
-
-        try
-        {
-            // Inside the cleanup, because waiting is where a request spends most of its life and
-            // cancelling one is the ordinary case: withdrawn by the client, superseded by the next
-            // keystroke, or abandoned because the document closed. Left outside, every one of those
-            // leaves its entry behind, and an entry nothing will ever retire makes this document look
-            // permanently busy to anything that counts what is outstanding.
-            await _concurrency.WaitAsync(token).ConfigureAwait(false);
-            acquired = true;
-
-            // Task.Run rather than trusting the await above to have yielded. A semaphore with a slot
-            // free completes synchronously, and the continuation would then run the walk on whichever
-            // thread called this -- which is the one reading the wire, and the whole reason this is
-            // two methods.
-            return await Task.Run(() => Answer(asked, token), token).ConfigureAwait(false);
-        }
-        finally
-        {
-            // Only what was taken is given back. Releasing unconditionally would hand the pool a slot
-            // for a wait that never succeeded, and the limit would climb by one for every request the
-            // client withdrew.
-            if (acquired)
-            {
-                _concurrency.Release();
-            }
-
-            Retire(asked.Uri, work);
-        }
+        return _deferred.AnswerAsync(asked, token => Answer(asked, token), cancellationToken);
     }
 
+    /// <remarks>
+    /// Runs behind <see cref="DeferredAnswers"/>, which has already checked that the buffer is still
+    /// the one this was read against and will check again before the list is sent. What is left here
+    /// is the arm the type's remarks promised.
+    /// </remarks>
     private CompletionList Answer(CompletionRequest asked, CancellationToken cancellationToken)
     {
-        // Before the walk as well as after it. A request that queued behind a slow one may have been
-        // waiting for a while, and a buffer that moved in the meantime has already decided the answer:
-        // walking a root to produce something that will be refused spends the slot a live request is
-        // waiting for. Cancellation covers the cases that have a token -- withdrawal, supersession, a
-        // close -- and an edit is the one that does not.
-        Require(asked);
-
-        Enter();
-
-        try
+        // Each context produces its own candidates and says for itself whether the list is finished,
+        // because the two answers are one decision: a list is incomplete exactly when typing another
+        // character would widen it.
+        var (items, incomplete) = asked.Context switch
         {
-            // The arm the type's remarks promised. Each context produces its own candidates and says
-            // for itself whether the list is finished, because the two answers are one decision: a
-            // list is incomplete exactly when typing another character would widen it.
-            var (items, incomplete) = asked.Context switch
-            {
-                ImportPathContext path => (Schemas(asked, path, cancellationToken), true),
-                SchemaSubject subject => (Symbols(asked, subject, cancellationToken), false),
-                _ => ([], true),
-            };
+            ImportPathContext path => (Schemas(asked, path, cancellationToken), true),
+            SchemaSubject subject => (Symbols(asked, subject, cancellationToken), false),
+            _ => ([], true),
+        };
 
-            Require(asked);
-
-            return new CompletionList { Items = items, IsIncomplete = incomplete };
-        }
-        finally
-        {
-            Interlocked.Decrement(ref _inFlight);
-        }
+        return new CompletionList { Items = items, IsIncomplete = incomplete };
     }
-
-    /// <summary>Refuses an answer about a document, or a configuration, that has moved on.</summary>
-    /// <remarks>
-    /// Object identity rather than a version number, and the difference is not academic: closing a
-    /// document and reopening it starts the client's numbering again at one, so a request read at
-    /// version one and answered after a close and a reopen compares equal to a buffer that may hold
-    /// something else entirely. The store hands out a fresh <see cref="OpenDocument"/> for every edit
-    /// and every open, so "is this still the object I read?" answers editing, closing and reopening in
-    /// one question, and spec 26.1's rule about a closed document falls out of it.
-    /// </remarks>
-    private void Require(CompletionRequest asked)
-    {
-        if (!ReferenceEquals(_documents.Find(asked.Uri), asked.Document))
-        {
-            throw Refuse(
-                $"'{asked.Uri}' was edited, closed or reopened while this completion was being "
-                    + "answered, so the answer describes text that is no longer there.");
-        }
-
-        // The same question the compile scheduler asks, and for the same reason: an include path
-        // removed while this ran would otherwise be advertised as a place to import from.
-        if (_configuration.Current.Generation != asked.Configuration.Generation)
-        {
-            throw Refuse(
-                $"The configuration for '{asked.Uri}' changed while this completion was being "
-                    + "answered, so the roots it searched are not the ones that now apply.");
-        }
-    }
-
-    private static JsonRpcException Refuse(string reason)
-        => new(new ResponseError(ErrorCodes.ContentModified, reason + " Ask again."));
 
     /// <summary>Abandons a document's outstanding completion, because it is no longer open.</summary>
-    /// <remarks>
-    /// The same obligation <see cref="CompileScheduler.ForgetAsync"/> already discharges for compiles,
-    /// and spec 26.1 states it once for both: what is outstanding for a document is abandoned when the
-    /// document closes. Without it a completion queued behind a slow one still takes its turn, walks a
-    /// root for a buffer the editor has shut, and is refused at the end -- having spent one of the few
-    /// slots a live request was waiting for. Refusing it later is correct and too late.
-    /// </remarks>
-    public void Forget(DocumentUri document)
-    {
-        ArgumentNullException.ThrowIfNull(document);
-
-        if (_outstanding.TryRemove(document.Key, out var work))
-        {
-            Cancel(work);
-        }
-    }
-
-    /// <summary>
-    /// Takes this document's outstanding slot, cancelling whoever had it, and links the client's own
-    /// withdrawal to it.
-    /// </summary>
-    /// <inheritdoc cref="CompileScheduler.Supersede" path="/remarks"/>
-    private CancellationTokenSource Supersede(DocumentUri document, CancellationToken cancellationToken)
-    {
-        var work = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-
-        _outstanding.AddOrUpdate(
-            document.Key,
-            work,
-            (_, previous) =>
-            {
-                Cancel(previous);
-                return work;
-            });
-
-        return work;
-    }
-
-    /// <remarks>
-    /// Both halves of "remove it only if it is still mine" in one operation, because a newer request
-    /// lands between a look and a remove and this would then retire that one instead -- leaving a walk
-    /// nothing holds a handle to, which no later keystroke can supersede.
-    /// </remarks>
-    private void Retire(DocumentUri document, CancellationTokenSource work)
-        => _outstanding.TryRemove(KeyValuePair.Create(document.Key, work));
-
-    private static void Cancel(CancellationTokenSource work)
-    {
-        try
-        {
-            work.Cancel();
-        }
-        catch (ObjectDisposedException)
-        {
-        }
-    }
-
-    /// <inheritdoc cref="CompileScheduler.Enter" path="/remarks"/>
-    private void Enter()
-    {
-        var current = Interlocked.Increment(ref _inFlight);
-
-        var peak = Volatile.Read(ref _peakInFlight);
-        while (current > peak)
-        {
-            var seen = Interlocked.CompareExchange(ref _peakInFlight, current, peak);
-            if (seen == peak)
-            {
-                return;
-            }
-
-            peak = seen;
-        }
-    }
+    /// <inheritdoc cref="DeferredAnswers.Forget" path="/remarks"/>
+    public void Forget(DocumentUri document) => _deferred.Forget(document);
 
     /// <summary>What the include roots hold at the directory the cursor is in.</summary>
     /// <remarks>
@@ -1653,12 +1481,8 @@ public sealed class CompletionProvider
     /// the tail of what was already there.
     /// </remarks>
     private static Range Replacing(ImportPathContext context, OpenDocument document)
-        => new(At(document, context.Start), At(document, context.End));
+        => EditorPositions.Between(document.Lines, context.Start, context.End);
 
     private static Position At(OpenDocument document, int offset)
-    {
-        var position = document.Lines.PositionOf(offset);
-
-        return new Position(position.Line - 1, position.Column - 1);
-    }
+        => EditorPositions.PositionAt(document.Lines, offset);
 }
