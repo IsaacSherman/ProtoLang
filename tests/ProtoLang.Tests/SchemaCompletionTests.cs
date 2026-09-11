@@ -493,14 +493,10 @@ public class SchemaCompletionTests
 
         foreach (var attempt in applied)
         {
-            var refused = attempt.About
-                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
-                .ToList();
-
             Assert.True(
-                refused.Count == 0,
+                attempt.Refused.Count == 0,
                 $"accepting '{attempt.Item.Label}' at offset {attempt.Caret} produced "
-                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+                    + attempt.Describe());
         }
     }
 
@@ -533,11 +529,7 @@ public class SchemaCompletionTests
             "extend Outer {\n    fn f(other: Outer) -> int64 {\n        return other.");
 
         Assert.NotEmpty(applied);
-        Assert.All(
-            applied,
-            attempt => Assert.DoesNotContain(
-                attempt.About,
-                diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code)));
+        Assert.All(applied, attempt => Assert.Empty(attempt.Refused));
     }
 
     // ------- what a bare identifier offers
@@ -719,14 +711,10 @@ public class SchemaCompletionTests
 
         foreach (var attempt in applied)
         {
-            var refused = attempt.About
-                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
-                .ToList();
-
             Assert.True(
-                refused.Count == 0,
+                attempt.Refused.Count == 0,
                 $"accepting '{attempt.Item.Label}' at offset {attempt.Caret} produced "
-                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+                    + attempt.Describe());
         }
     }
 
@@ -845,14 +833,10 @@ public class SchemaCompletionTests
 
         foreach (var attempt in applied)
         {
-            var refused = attempt.About
-                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
-                .ToList();
-
             Assert.True(
-                refused.Count == 0,
+                attempt.Refused.Count == 0,
                 $"accepting '{attempt.Item.Label}' at offset {attempt.Caret} produced "
-                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+                    + attempt.Describe());
         }
     }
 
@@ -964,6 +948,121 @@ public class SchemaCompletionTests
         Assert.DoesNotContain("tags", Labels(offered));
     }
 
+    /// <summary>
+    /// A resolved presence check retains its receiver, but its operand must still name a field.
+    /// Accepting a method here produces PL0080 rather than an ordinary return-type mismatch.
+    /// </summary>
+    [Fact]
+    [Trait("ReviewRegression", "PresenceCompletion")]
+    public async Task CompletionInAResolvedPresenceCheckNeverOffersAMethodResult()
+    {
+        const string body = "extend Outer {\n"
+            + "    fn helper() -> bool { return true; }\n"
+            + "    fn present(other: Outer) -> bool { return has other.optional_count; }\n}\n";
+        var (provider, uri, text) = Beside(body);
+        var source = new SourceDocument(SourceIdentity.FromPath(uri.Path!), text);
+        var compilation = new Compilation(source, new CompilationOptions { Loader = Loader() });
+        Assert.True(compilation.Compile(CancellationToken.None).Success,
+            "the fixture must start with a valid presence check and a callable method");
+
+        var applied = await CompletionProbe.SweepAsync(
+            provider, uri, text, [After(text, "has other.optional_c")], uri.Path!, Loader());
+
+        Assert.Contains(applied, attempt => attempt.Item.Label == "optional_count");
+        foreach (var attempt in applied)
+        {
+            Assert.True(
+                !attempt.About.Any(diagnostic => diagnostic.Code == "PL0080"),
+                $"accepting '{attempt.Item.Label}' as a presence operand produced PL0080; "
+                    + "completion must offer fields here, not method results");
+        }
+    }
+
+    // ------- what the operand of 'has' offers
+
+    /// <summary>
+    /// A receiver reached through a parameter, and a method beside the fields, so that "only fields"
+    /// and "everything a dot can reach" are different lists here.
+    /// </summary>
+    private const string Presence =
+        "extend Outer {\n    fn helper() -> int64 { return count; }\n\n"
+        + "    fn f(other: Outer) -> int64 {\n"
+        + "        if has other.optional_count {\n            return 1;\n        }\n\n"
+        + "        if has optional_label {\n            return 2;\n        }\n\n"
+        + "        return count;\n    }\n}\n";
+
+    /// <summary>
+    /// PL0080 says it outright: a local, a parameter and a method result always hold a value, so
+    /// there is nothing to ask about. Only a field can be the operand.
+    /// </summary>
+    [Fact]
+    public async Task ThePresenceOperandAfterADotOffersFieldsAndNotMethods()
+    {
+        var offered = await OfferedAsync(Presence, "if has other.optional_c");
+
+        Assert.Contains("optional_count", Labels(offered));
+        Assert.Contains("count", Labels(offered));
+        Assert.DoesNotContain("helper()", Labels(offered));
+        Assert.DoesNotContain("helper", Labels(offered));
+    }
+
+    /// <summary>
+    /// The same rule for the bare form, where the names in scope include the locals and parameters
+    /// that a presence test can never be asked about.
+    /// </summary>
+    [Fact]
+    public async Task ABarePresenceOperandOffersOnlyFieldsOfTheReceiver()
+    {
+        var offered = await OfferedAsync(Presence, "if has optional_l");
+
+        Assert.Contains("optional_label", Labels(offered));
+        Assert.DoesNotContain("other", Labels(offered));
+        Assert.DoesNotContain("helper()", Labels(offered));
+        Assert.DoesNotContain("has", Labels(offered));
+        Assert.All(offered, item => Assert.Equal(CompletionItemKind.Field, item.Kind));
+    }
+
+    /// <summary>
+    /// Everything before the last name is a receiver rather than the field being tested, so the
+    /// ordinary rule applies there and a message-valued parameter is a perfectly good operand prefix.
+    /// </summary>
+    [Fact]
+    public async Task ThePresenceRuleAppliesToTheLastNameAndNotTheReceiverBeforeIt()
+    {
+        var offered = await OfferedAsync(Presence, "if has oth");
+
+        Assert.Contains("other", Labels(offered));
+    }
+
+    [Fact]
+    public async Task EveryItemOfferedInAPresenceOperandBindsWhenItIsAccepted()
+    {
+        var (provider, uri, text) = Beside(Presence);
+
+        // The last name of the operand and the two ways of reaching it, and deliberately not the
+        // receiver in front of the dot: replacing 'other' strands the field after it, which is the
+        // case AtEveryNameAndStatementStart leaves out of the sweep for every receiver, not this one.
+        var carets = new[]
+        {
+            After(text, "if has other.optional_c"),
+            After(text, "if has other."),
+            After(text, "if has optional_l"),
+        };
+
+        var applied = await CompletionProbe.SweepAsync(
+            provider, uri, text, carets, uri.Path!, Loader());
+
+        Assert.NotEmpty(applied);
+
+        foreach (var attempt in applied)
+        {
+            Assert.True(
+                attempt.Refused.Count == 0,
+                $"accepting '{attempt.Item.Label}' as a presence operand produced "
+                    + attempt.Describe());
+        }
+    }
+
     // ------- what a test's target offers
 
     /// <summary>
@@ -1025,14 +1124,10 @@ public class SchemaCompletionTests
 
         foreach (var attempt in applied)
         {
-            var refused = attempt.About
-                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
-                .ToList();
-
             Assert.True(
-                refused.Count == 0,
+                attempt.Refused.Count == 0,
                 $"accepting '{attempt.Item.Label}' in a test target produced "
-                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+                    + attempt.Describe());
         }
     }
 
@@ -1094,14 +1189,10 @@ public class SchemaCompletionTests
 
         foreach (var attempt in applied)
         {
-            var refused = attempt.About
-                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
-                .ToList();
-
             Assert.True(
-                refused.Count == 0,
+                attempt.Refused.Count == 0,
                 $"accepting '{attempt.Item.Label}' at offset {attempt.Caret} produced "
-                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+                    + attempt.Describe());
         }
     }
 
@@ -1354,14 +1445,10 @@ public class SchemaCompletionTests
 
         foreach (var attempt in applied)
         {
-            var refused = attempt.About
-                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
-                .ToList();
-
             Assert.True(
-                refused.Count == 0,
+                attempt.Refused.Count == 0,
                 $"accepting '{attempt.Item.Label}' into one segment of a multiline name produced "
-                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+                    + attempt.Describe());
         }
     }
 
@@ -1526,14 +1613,10 @@ public class SchemaCompletionTests
 
         foreach (var attempt in applied)
         {
-            var refused = attempt.About
-                .Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))
-                .ToList();
-
             Assert.True(
-                refused.Count == 0,
+                attempt.Refused.Count == 0,
                 $"in '{name}', accepting '{attempt.Item.Label}' at offset {attempt.Caret} produced "
-                    + string.Join(", ", refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}")));
+                    + attempt.Describe());
         }
     }
 

@@ -32,6 +32,39 @@ internal sealed record AppliedItem(
     public IEnumerable<Diagnostic> About
         => Result.Diagnostics.Where(diagnostic
             => diagnostic.Span.Start.Offset <= InsertedEnd && diagnostic.Span.End.Offset >= InsertedStart);
+
+    /// <summary>What the compiler said that means this item did not bind where it landed.</summary>
+    /// <remarks>
+    /// <para>
+    /// The judgement itself, rather than the list of codes it consults, because every sweep in the
+    /// suite was asking the same question in the same six lines and the question has since grown a
+    /// case. One home for it, and the case is stated once.
+    /// </para>
+    /// <para>
+    /// <b>A grammar keyword is applied and not judged, which is the mirror of the caret rule.</b>
+    /// <see cref="CompletionProbe.AtEveryNameAndStatementStart"/> leaves out a caret inside a written
+    /// keyword because every item fails there; this leaves out a keyword <em>item</em> because no
+    /// keyword is a complete expression. Accepting one replaces a name with the start of a construct,
+    /// and what the construct needed is exactly the name that was replaced: <c>return count * scale</c>
+    /// with <c>has</c> accepted over <c>count</c> is <c>has * scale</c>, which is <c>PL0080</c> for
+    /// the same reason <c>var</c> accepted there is a syntax error. The sweep has always tolerated the
+    /// syntax errors, and recognizing <c>PL0080</c> made one keyword out of five fail for a reason
+    /// that is about keywords rather than about that keyword.
+    /// </para>
+    /// <para>
+    /// A scalar type spelling is <em>not</em> exempt, although it is published with the same kind. It
+    /// is a name -- <c>int64</c> in a type position is as complete an answer as <c>Outer</c> is -- and
+    /// the two are told apart by what completion says they are, which is the detail a reader sees.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<Diagnostic> Refused
+        => Item is { Kind: CompletionItemKind.Keyword, Detail: "keyword" }
+            ? []
+            : [.. About.Where(diagnostic => CompletionProbe.DidNotBind.Contains(diagnostic.Code))];
+
+    /// <summary>The refusals rendered for an assertion message.</summary>
+    public string Describe()
+        => string.Join(", ", Refused.Select(diagnostic => $"{diagnostic.Code} {diagnostic.Message}"));
 }
 
 /// <summary>
@@ -73,29 +106,50 @@ internal static class CompletionProbe
     /// (<c>PL0037</c>), a member that is not there or cannot be reached (<c>PL0038</c> to
     /// <c>PL0041</c>), a call that cannot resolve (<c>PL0042</c> to <c>PL0044</c>), a test target
     /// that names no method of its receiver or no receiver at all (<c>PL0057</c>, <c>PL0058</c>), an
-    /// unknown enum value (<c>PL0076</c>), and a fixture field or argument that names nothing
-    /// (<c>PL0059</c>, <c>PL0068</c>). Codes for contexts not yet built are here from the start,
-    /// because the cost of listing one early is nothing and the cost of forgetting one is a sweep
-    /// that passes over exactly the defect it exists to find.
+    /// unknown enum value (<c>PL0076</c>), a fixture field or argument that names nothing
+    /// (<c>PL0059</c>, <c>PL0068</c>), and an operand of <c>has</c> that is not a field at all
+    /// (<c>PL0080</c>). Codes for contexts not yet built are here from the start, because the cost of
+    /// listing one early is nothing and the cost of forgetting one is a sweep that passes over
+    /// exactly the defect it exists to find.
     /// </para>
     /// <para>
-    /// The two target codes were the case that proved that sentence. They were missing while nothing
-    /// answered in a test header, so a receiver offered there could have stranded the method after it
-    /// -- <c>test Outer.levels_match</c>, where the message is real and the method is not -- and the
-    /// sweep would have applied it, recompiled, seen <c>PL0058</c>, and not recognized the code.
+    /// <b>Three of them are here because that sentence turned out to be about this list rather than
+    /// about the future.</b> The two target codes were missing while nothing answered in a test
+    /// header, so a receiver offered there could have stranded the method after it --
+    /// <c>test Outer.levels_match</c>, where the message is real and the method is not -- and the
+    /// sweep would have applied it, recompiled, seen <c>PL0058</c> and not recognized the code. And
+    /// <c>PL0080</c> was missing while <c>has</c> had no rule of its own, so the sweep watched every
+    /// method in scope being offered as the operand of a presence test and called it clean.
     /// </para>
     /// <para>
-    /// <c>PL0078</c> is deliberately absent. A message field with no established presence is a name
-    /// that resolved and then drew a diagnostic about its <em>value</em>, and withholding it would
-    /// hide the field from the author who has to write the guard -- the same judgement
-    /// <c>ScopeSearch.ReachableFields</c> already makes.
+    /// What is deliberately absent is in <see cref="AboutTheValueRatherThanTheName"/>, which says
+    /// why.
     /// </para>
     /// </remarks>
     public static readonly IReadOnlyList<string> DidNotBind =
     [
         "PL0020", "PL0021", "PL0025", "PL0037", "PL0038", "PL0039", "PL0040", "PL0041",
         "PL0042", "PL0043", "PL0044", "PL0057", "PL0058", "PL0059", "PL0068", "PL0074", "PL0076",
+        "PL0080",
     ];
+
+    /// <summary>Codes deliberately absent, and the rule that keeps them apart from the list above.</summary>
+    /// <remarks>
+    /// <para>
+    /// <c>PL0078</c> and <c>PL0079</c> are both about a field that resolved perfectly well, and both
+    /// are left out on the same judgement <c>ScopeSearch.ReachableFields</c> already makes: the name
+    /// is right, the diagnostic is about whether its value can be relied on or asked about, and
+    /// withholding it would hide the field from the author who has to act on exactly that. Each
+    /// carries help saying what to do -- write a guard, or declare the field <c>optional</c> in the
+    /// <c>.proto</c> -- which is only useful to somebody who was allowed to write the name first.
+    /// </para>
+    /// <para>
+    /// The line between them and <c>PL0080</c> above is whether the name could ever have been right
+    /// there. A method offered as the operand of <c>has</c> could not be, at any moment, under any
+    /// schema; a field whose presence is implicit could be, the moment its declaration changes.
+    /// </para>
+    /// </remarks>
+    public static readonly IReadOnlyList<string> AboutTheValueRatherThanTheName = ["PL0078", "PL0079"];
 
     /// <summary>Every offset at which a client would ask because a dot was just typed.</summary>
     public static IEnumerable<int> AfterEveryDot(string text)

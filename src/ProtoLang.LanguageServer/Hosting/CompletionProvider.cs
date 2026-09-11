@@ -524,9 +524,13 @@ public sealed class CompletionProvider
             return typePosition;
         }
 
+        // Settled once and handed to both arms, because it is one question about the caret and the
+        // two of them would otherwise each ask it of a different thing.
+        var presence = NamesAPresenceField(model, subject);
+
         if (subject.PrecededByDot)
         {
-            return Members(ReceiverAt(model, subject), result, subject, asked.Document);
+            return Members(ReceiverAt(model, subject), result, subject, presence, asked.Document);
         }
 
         if (Fixture(model, result, subject, asked.Document) is { } names)
@@ -534,8 +538,35 @@ public sealed class CompletionProvider
             return names;
         }
 
-        return InScope(model, result, subject, asked.Document);
+        return InScope(model, result, subject, presence, asked.Document);
     }
+
+    /// <summary>
+    /// Whether the caret is writing the name that has to be a field for a <c>has</c> to mean
+    /// anything.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>has</c> takes a field and nothing else. <c>BindHas</c> accepts two shapes -- a bare name
+    /// that is a field of the implicit receiver, and a member access whose member is a field -- and
+    /// refuses everything else with <c>PL0080</c>, whose help says why: a local, a parameter and a
+    /// method result always hold a value, so there is nothing to ask about. So the ordinary answer is
+    /// wrong here in a way that is invisible to the sweep, which was not told that <c>PL0080</c> is a
+    /// name failing to bind.
+    /// </para>
+    /// <para>
+    /// <b>Only the last name, which is why this asks whether a dot follows.</b> Everything before one
+    /// is a receiver rather than the field being tested, and <c>has other.inner.stamp</c> reaches
+    /// through a parameter and a message field to get there -- both perfectly good, and neither a
+    /// field of the thing <c>has</c> is finally asked about. The existing rule that only something
+    /// with members is offered in front of a dot already covers those; this covers the one at the
+    /// end.
+    /// </para>
+    /// </remarks>
+    private static bool NamesAPresenceField(SemanticModel model, SchemaSubject subject)
+        => !subject.FollowedByDot
+            && model.SyntaxAt(subject.Start)?.Enclosing<HasExpression>() is { } has
+            && Covers(has.Operand.Span, subject.Start);
 
     /// <summary>
     /// The caret's subject widened to the whole <c>extend</c> receiver it is writing, or null when it
@@ -1168,11 +1199,36 @@ public sealed class CompletionProvider
     /// </para>
     /// </remarks>
     private static IReadOnlyList<CompletionItem> InScope(
-        SemanticModel model, CompilationResult result, SchemaSubject subject, OpenDocument document)
+        SemanticModel model,
+        CompilationResult result,
+        SchemaSubject subject,
+        bool presence,
+        OpenDocument document)
     {
         if (model.ScopeAt(subject.Start) is not { } scope)
         {
             return [];
+        }
+
+        // The operand of 'has' is a field or it is PL0080, so everything else this would otherwise
+        // offer here is a name that resolves and then refuses: a local and a parameter because they
+        // always hold a value, a call because its result does, and a keyword because 'has true' names
+        // nothing at all. A field of the implicit receiver is the whole of what is left.
+        if (presence)
+        {
+            return
+            [
+                .. scope.Names
+                    .Where(visible => visible.Symbol.Kind is SymbolKind.Field)
+                    .Select(visible => Member(
+                        visible.Name,
+                        CompletionItemKind.Field,
+                        visible.Type.DisplayName,
+                        null,
+                        rank: "0",
+                        subject,
+                        document)),
+            ];
         }
 
         // What follows the caret decides what may replace what is under it. A name being called can
@@ -1376,7 +1432,11 @@ public sealed class CompletionProvider
     /// </para>
     /// </remarks>
     private static IReadOnlyList<CompletionItem> Members(
-        PlType? receiver, CompilationResult result, SchemaSubject subject, OpenDocument document)
+        PlType? receiver,
+        CompilationResult result,
+        SchemaSubject subject,
+        bool presence,
+        OpenDocument document)
         => receiver switch
         {
             MessageType message =>
@@ -1400,8 +1460,10 @@ public sealed class CompletionProvider
                         document)),
 
                 // A call in front of a dot is not a receiver either: there is no member access onto
-                // the value a method returns.
-                .. result.Module is { } module && !subject.FollowedByDot
+                // the value a method returns. Nor is one the operand of 'has', which needs a field:
+                // 'has other.helper()' is PL0080, and a method result is the example its help gives
+                // of something that always holds a value and has nothing to be asked about.
+                .. result.Module is { } module && !subject.FollowedByDot && !presence
                     ? module.MethodsOn(message.Descriptor.FullName).Select(method => Member(
                         subject.FollowedByCall ? method.Name : method.Name + "()",
                         CompletionItemKind.Method,
