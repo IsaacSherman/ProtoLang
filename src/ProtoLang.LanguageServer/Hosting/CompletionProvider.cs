@@ -555,18 +555,41 @@ public sealed class CompletionProvider
     /// name failing to bind.
     /// </para>
     /// <para>
-    /// <b>Only the last name, which is why this asks whether a dot follows.</b> Everything before one
-    /// is a receiver rather than the field being tested, and <c>has other.inner.stamp</c> reaches
-    /// through a parameter and a message field to get there -- both perfectly good, and neither a
-    /// field of the thing <c>has</c> is finally asked about. The existing rule that only something
-    /// with members is offered in front of a dot already covers those; this covers the one at the
-    /// end.
+    /// <b>One name in the operand is constrained and the rest are not.</b> Everything before the
+    /// field is computing the receiver it hangs off, and that may be any message-valued expression at
+    /// all: <c>has other.inner.stamp</c> reaches through a parameter and a message field,
+    /// <c>has (other).optional_count</c> through a parenthesized one, and
+    /// <c>has identity(other).optional_count</c> through a call. None of those is a field of the
+    /// thing <c>has</c> is finally asked about, and all of them are perfectly good where they stand.
+    /// </para>
+    /// <para>
+    /// <b>So the question is asked of the operand's shape, not of the token after the caret.</b>
+    /// Looking for a following dot was a proxy for "the last name", and it is a proxy that a
+    /// parenthesis or an argument list breaks: the token after <c>other</c> in
+    /// <c>has (other).optional_count</c> is a close paren, so the proxy called it the field being
+    /// tested and withheld every name that could compute it. <c>BindHas</c> names the field in
+    /// exactly two places -- a bare operand, or the member of a member access -- and those two are
+    /// what this reads, so the answer here is the same one the binder is about to reach.
     /// </para>
     /// </remarks>
     private static bool NamesAPresenceField(SemanticModel model, SchemaSubject subject)
-        => !subject.FollowedByDot
-            && model.SyntaxAt(subject.Start)?.Enclosing<HasExpression>() is { } has
-            && Covers(has.Operand.Span, subject.Start);
+        => model.SyntaxAt(subject.Start)?.Enclosing<HasExpression>() is { } has
+            && PresenceField(has) is { } field
+            && Covers(field, subject.Start);
+
+    /// <summary>Where the field a <c>has</c> tests is written, or null when its operand names none.</summary>
+    /// <remarks>
+    /// The two shapes <c>BindHas</c> accepts and no others. An operand of any other shape -- a
+    /// literal, a call, a parenthesized expression with no member taken off it -- is <c>PL0080</c>
+    /// whatever is written in it, so there is no name here that the presence rule governs.
+    /// </remarks>
+    private static SourceSpan? PresenceField(HasExpression has)
+        => has.Operand switch
+        {
+            MemberAccessExpression member => member.Name.Span,
+            NameExpression bare => bare.Name.Span,
+            _ => null,
+        };
 
     /// <summary>
     /// The caret's subject widened to the whole <c>extend</c> receiver it is writing, or null when it

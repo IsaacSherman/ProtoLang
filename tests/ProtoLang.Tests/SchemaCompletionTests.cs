@@ -1034,6 +1034,33 @@ public class SchemaCompletionTests
         Assert.Contains("other", Labels(offered));
     }
 
+    /// <summary>
+    /// Only the final field is a presence operand; names used to compute its receiver still have
+    /// their ordinary meaning, even when a closing parenthesis separates them from the dot.
+    /// </summary>
+    [Theory]
+    [InlineData("(other).optional_count", "return has (oth", "other")]
+    [InlineData("identity(other).optional_count", "return has identity(oth", "other")]
+    [InlineData("identity(other).optional_count", "return has ident", "identity")]
+    [Trait("ReviewRegression", "PresenceReceiverCompletion")]
+    public async Task NamesThatComputeAPresenceReceiverRemainCompletable(
+        string operand, string marker, string expected)
+    {
+        var body = "extend Outer {\n"
+            + "    fn identity(value: Outer) -> Outer { return value; }\n"
+            + "    fn present(other: Outer) -> bool { return has " + operand + "; }\n}\n";
+        var (_, uri, text) = Beside(body);
+        var source = new SourceDocument(SourceIdentity.FromPath(uri.Path!), text);
+        var compilation = new Compilation(source, new CompilationOptions { Loader = Loader() });
+        Assert.True(compilation.Compile(CancellationToken.None).Success,
+            "the receiver expression and its presence check must already compile");
+
+        var offered = await OfferedAsync(body, marker);
+
+        Assert.True(Labels(offered).Contains(expected),
+            $"'{expected}' computes the receiver, not the field being tested; completion must retain it");
+    }
+
     [Fact]
     public async Task EveryItemOfferedInAPresenceOperandBindsWhenItIsAccepted()
     {
