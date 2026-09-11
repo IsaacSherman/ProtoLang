@@ -51,7 +51,7 @@ identifier = (.NET letter | "_") { .NET letter-or-digit | "_" }
 ```
 
 Identifiers are case-sensitive. ProtoLang does not impose a naming convention on source names.
-Backends may map method names to target conventions when emitting public APIs (24).
+Backends may map method names to target conventions when emitting public APIs ([24](./§24-Generated API Strategy.md#24-generated-api-strategy)).
 
 Open Question:
 
@@ -126,8 +126,8 @@ Normative Requirements:
 - The published category set is the standard LSP token type set, in its standard order, and the
   standard modifier set with it. Every category is declared whether or not anything currently
   produces it.
-- A keyword (6.4) is `keyword`, a string literal is `string`, an integer or floating-point literal is
-  `number`, and a comment (6.2) is `comment`.
+- A keyword ([6.4](#64-keywords)) is `keyword`, a string literal is `string`, an integer or floating-point literal is
+  `number`, and a comment ([6.2](#62-comments)) is `comment`.
 - `->`, `+`, `-`, `*`, `/`, `%`, `=`, `==`, `!=`, `!`, `<`, `<=`, `>`, `>=`, `&&` and `||` are
   `operator`.
 - **Every identifier is `variable`, whatever it names.** Distinguishing a local from a parameter from

@@ -20,7 +20,7 @@ The conformance suite should include:
 ### 25.2 Conformance Vector Format
 
 Decided. A conformance vector is not a separate file format at all: it is a ProtoLang `test`
-declaration (25.3) in a `.protolang` file, paired with the `.proto` it imports.
+declaration ([25.3](#253-author-written-protolang-unit-tests)) in a `.protolang` file, paired with the `.proto` it imports.
 
 - **Format.** The `test` declaration, rather than YAML, JSON, or text format. It is already parsed,
   name-resolved, and type-checked against protobuf descriptors, so a fixture field that does not

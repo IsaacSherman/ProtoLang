@@ -17,7 +17,7 @@ codegen: the generated messages may live in a different assembly, and nothing de
 being partial. Method names are PascalCased to match the C# protobuf generator, so
 `line_total_cents` becomes `LineTotalCents` and reads the same as a hand-written member.
 
-This choice may need revisiting if mutation (18) is allowed, since extension methods cannot access
+This choice may need revisiting if mutation ([18](./§18-Mutability.md#18-mutability)) is allowed, since extension methods cannot access
 anything the public surface does not already expose.
 
 Questions:
@@ -42,7 +42,7 @@ insertion points, and behaves the same whether the protobuf codegen is regenerat
 All declarations are emitted before any definition so methods may call one another in any order.
 
 Const-correctness follows from the read-only method model: every receiver is `const T&` and every
-message-typed parameter is `const T&`. If mutation (18) is allowed, that decision has to be
+message-typed parameter is `const T&`. If mutation ([18](./§18-Mutability.md#18-mutability)) is allowed, that decision has to be
 revisited along with the free-function shape.
 
 Questions:

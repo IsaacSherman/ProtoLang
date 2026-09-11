@@ -96,12 +96,12 @@ Normative Requirements:
 
 | Field kind | Presence | Unset reads as |
 |---|---|---|
-| Singular message | Yes, always | Nothing -- the read requires a guard (13.1) |
+| Singular message | Yes, always | Nothing -- the read requires a guard ([13.1](./§13-Messages.md#131-field-access)) |
 | proto3 singular scalar or enum | **No** | The type's zero, indistinguishable from a set zero |
 | proto3 `optional` scalar or enum | Yes | The type's zero, distinguishable by `has` |
 | proto2 singular field | Yes | The field's declared default |
 | Repeated field | No | An empty collection |
-| Map field | No | Not supported at all (14.2) |
+| Map field | No | Not supported at all ([14.2](./§14-Repeated Fields and Collections.md#142-maps)) |
 
 - An `optional` scalar set to its zero value, or an `optional` string set to empty, is **set**.
   `has` reports presence, not difference from the default.

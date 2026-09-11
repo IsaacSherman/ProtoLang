@@ -31,8 +31,8 @@ Code ranges:
 | `PL0001`–`PL0999` | The compiler front end: lexer, parser, binder |
 | `PL1001`–`PL1099` | The C# backend |
 | `PL1101`–`PL1199` | The C++ backend |
-| `PL2001`–`PL2099` | The driver and the configuration file (10.4) |
-| `PL2100`–`PL2199` | Host configuration: settings, scopes, and precedence (10.4.1) |
+| `PL2001`–`PL2099` | The driver and the configuration file ([10.4](./§10-Numeric Semantics.md#104-compile-time-policy)) |
+| `PL2100`–`PL2199` | Host configuration: settings, scopes, and precedence ([10.4.1](./§10-Numeric Semantics.md#1041-host-configuration)) |
 
 A configuration diagnostic names `protolang.config.xml` and the line and column inside it, rather
 than a position in a `.protolang` source. A host-configuration diagnostic has no file and no
@@ -77,7 +77,7 @@ Normative Requirements:
   named file cannot be resolved to a document, the diagnostic goes to the document being compiled at
   its start rather than at that position: a range that is honestly wrong is worse than one that admits
   it knows nothing, and the message names the file either way.
-- A configuration diagnostic with no position (10.4.1) is published against **every** open document,
+- A configuration diagnostic with no position ([10.4.1](./§10-Numeric Semantics.md#1041-host-configuration)) is published against **every** open document,
   because that is the extent of what it affects. The ones with positions belong to the configuration
   file, and are published once however many documents that file governs.
 - **A `protoc` failure is published in the `.proto` it names, at the position it gave, and summarized
@@ -123,7 +123,7 @@ Normative Requirements:
   another window, a branch switched underneath the session, a `protolang.config.xml` repaired after
   it was refused. So a kept compilation answers only while the configuration still resolves the same
   way and the schemas still stand as they were read; the second is the check a descriptor load
-  already makes on its own entries (21.1), asked one level up, because a host that skips it answers
+  already makes on its own entries ([21.1](./§21-Interoperability With Protobuf.md#211-descriptor-input)), asked one level up, because a host that skips it answers
   from a compilation the loader would itself have refused. Without this the cache is observable in
   exactly the way 21.1 forbids, and it is observable as the worst kind of wrong answer: a completion
   offering a field the schema no longer has, which goes on being offered until the user happens to

@@ -43,7 +43,7 @@ level regardless of context. `/` and `%` therefore require helpers in C# as well
 
 **Decided: the overflow rule is selectable per project, and wrapping is the default.**
 
-`Arithmetic/Overflow` in `protolang.config.xml` (10.4) selects one of three answers. Every mode is
+`Arithmetic/Overflow` in `protolang.config.xml` ([10.4](#104-compile-time-policy)) selects one of three answers. Every mode is
 reproduced identically by every backend; no mode means "whatever this target does natively".
 
 | Mode | Signed `+` `-` `*`, unary `-` | `MIN / -1` | `MIN % -1` |
@@ -98,7 +98,7 @@ Normative Requirements:
 - Integer `/` and `%` are a compile error (`PL0054`) without an `on_zero` clause, unless the divisor
   is a literal that is provably non-zero.
 - `on_zero <expression>` substitutes that value. It must already have the type the division
-  produces; no implicit conversion is applied (10.3).
+  produces; no implicit conversion is applied ([10.3](#103-numeric-conversions)).
 - `on_zero fail` terminates the program deterministically, with a diagnostic naming the operation
   written to standard error. It is not catchable and not recoverable. The process exit code is
   **70** (`EX_SOFTWARE`) in every backend.
@@ -141,7 +141,7 @@ Open Questions:
   expression rather than a literal? Today only literal `0` is caught, and only because it fails the
   proven-non-zero test rather than by any dedicated analysis.
 - `on_zero fail` gives generated library code the ability to terminate the host process. That is
-  intentional, but it is a larger capability than anything else the language permits (20), and a
+  intentional, but it is a larger capability than anything else the language permits ([20](./§20-I-O, Threading, and Side Effects.md#20-io-threading-and-side-effects)), and a
   server embedding ProtoLang behavior has no way to opt out.
 - Python's `/` produces a float and `//` floors, so neither maps to truncating division, and Python
   raises on float division by zero rather than yielding `inf`. The Python backend will need explicit
@@ -226,7 +226,7 @@ Each conversion carries a behavior annotation in the typed IR, resolved by a sin
 policy rather than hard-coded at each site, so the alternatives in the open question below are a
 front-end change and a backend change with no new plumbing.
 
-`Arithmetic/Conversion` in `protolang.config.xml` (10.4) names this behavior. It has one legal
+`Arithmetic/Conversion` in `protolang.config.xml` ([10.4](#104-compile-time-policy)) names this behavior. It has one legal
 value today, `WrapOrSaturate`, which is the table above. It is stated rather than left implicit so
 that the whole language-dependent contract is readable in one file, and so that a second value is
 an addition rather than a discovery.
@@ -291,7 +291,7 @@ and which of them are C#'s own behavior rather than something ProtoLang invented
 
 Open Questions:
 
-- Whether a language version (27.1) belongs in this file rather than in each source file.
+- Whether a language version ([27.1](./§27-Versioning and Compatibility.md#271-language-versioning)) belongs in this file rather than in each source file.
 - Whether a backend may add settings of its own, and if so how a third-party backend's settings
   avoid colliding with the language's.
 
