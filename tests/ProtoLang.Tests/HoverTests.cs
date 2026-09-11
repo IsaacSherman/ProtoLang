@@ -206,12 +206,78 @@ public class HoverTests
         Assert.Contains("declared `on_zero` value", card, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task AConversionStatesWhatAnUnrepresentableValueDoes()
+    /// <summary>
+    /// Every row of spec 10.3's conversion table says something different, and the card has to say
+    /// the row the conversion is actually on.
+    /// </summary>
+    /// <remarks>
+    /// This was one case asserting one sentence, and the sentence belonged to a row the fixture was
+    /// not on: <c>small_count as int64</c> is integer to integer, which takes the low bits and never
+    /// truncates a fraction. Asserting one row is how a card that recites one row passes. So every
+    /// row reachable from the fixture schema is here, each with the words that distinguish it from
+    /// its neighbours.
+    /// </remarks>
+    [Theory]
+    [InlineData("int64", "small_count as int64", "as int64", "low bits")]
+    [InlineData("double", "count as double", "as double", "Rounds to nearest, ties to even")]
+    [InlineData("double", "ratio as double", "as double", "exact")]
+    [InlineData("float", "amount as float", "as float", "infinity")]
+    [InlineData("int64", "amount as int64", "as int64", "Truncates toward zero")]
+    public async Task AConversionStatesWhatItsOwnRowOfTheTableSays(
+        string type, string expression, string marker, string expected)
         => Assert.Contains(
-            "truncates toward zero",
-            await TextAsync(Source, EditorFixture.At(Source, "as int64")),
+            expected,
+            await ValidExpressionCardAsync(type, expression, marker),
             StringComparison.Ordinal);
+
+    /// <summary>Floating-point arithmetic does not inherit the integer overflow policy.</summary>
+    [Theory]
+    [InlineData("float", "ratio + ratio", "+ ratio")]
+    [InlineData("double", "amount / amount", "/ amount")]
+    [InlineData("float", "-ratio", "-ratio")]
+    [InlineData("double", "-amount", "-amount")]
+    [Trait("ReviewRegression", "HoverFloatingArithmetic")]
+    public async Task FloatingPointOperationsDoNotClaimIntegerOverflowSemantics(
+        string type, string expression, string marker)
+    {
+        var card = await ValidExpressionCardAsync(type, expression, marker);
+
+        Assert.DoesNotContain("Overflow wraps, two's complement", card, StringComparison.Ordinal);
+    }
+
+    /// <summary>A floating-point target preserves NaN and does not truncate a fraction to an integer.</summary>
+    [Theory]
+    [InlineData("double", "ratio as double", "as double")]
+    [InlineData("float", "amount as float", "as float")]
+    [Trait("ReviewRegression", "HoverFloatingConversion")]
+    public async Task FloatingPointConversionsDoNotClaimIntegerTargetSemantics(
+        string type, string expression, string marker)
+    {
+        var card = await ValidExpressionCardAsync(type, expression, marker);
+
+        Assert.DoesNotContain("truncates toward zero", card, StringComparison.Ordinal);
+        Assert.DoesNotContain("maps NaN to zero", card, StringComparison.Ordinal);
+    }
+
+    /// <summary>Check the fixture before judging the explanation of its operation.</summary>
+    private static async Task<string> ValidExpressionCardAsync(string type, string expression, string marker)
+    {
+        var text = "import proto \"fixtures.proto\";\n"
+            + "extend Outer { fn f() -> " + type + " { return " + expression + "; } }";
+        var (documents, uri) = EditorFixture.Open(text);
+        var configuration = EditorFixture.Configuration();
+        var loaders = EditorFixture.Loaders();
+        var semantics = new DocumentSemantics(loaders);
+        var compiled = semantics.For(documents.Find(uri)!, configuration.Current, CancellationToken.None);
+        Assert.True(compiled.Result?.Success is true, "the operation must compile before its hover is tested");
+        var provider = new HoverProvider(documents, configuration, loaders, semantics: semantics);
+        var asked = provider.Read(EditorFixture.Ask(uri, text, EditorFixture.At(text, marker)));
+        Assert.NotNull(asked);
+        var card = await provider.AnswerAsync(asked!, CancellationToken.None);
+        Assert.NotNull(card);
+        Assert.Contains(Fenced(type), card!.Contents.Value, StringComparison.Ordinal);
+        return card.Contents.Value;
+    }
 
     /// <summary>
     /// The policy a project chose, not the one this repository defaults to. A card that always said

@@ -40,7 +40,7 @@ for item in collection {
 Normative Requirements:
 
 - A `while` condition is an expression of type `bool`, under the same rule as 15.1.
-- `for` iterates a protobuf repeated field in field order ([14](./§14-Repeated Fields and Collections.md#14-repeated-fields-and-collections)).
+- `for` iterates a protobuf repeated field in field order ([14](./§14-Repeated%20Fields%20and%20Collections.md#14-repeated-fields-and-collections)).
 - `break` exits the innermost enclosing loop and `continue` advances it to its next iteration.
   Either one outside a loop is a diagnostic (PL0072, PL0073).
 - The compiler performs no termination analysis. `while true` is legal, and a method whose only

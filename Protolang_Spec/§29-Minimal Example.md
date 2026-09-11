@@ -41,6 +41,6 @@ extend Invoice {
 
 Expected semantic behavior:
 
-- `line_total_cents` returns `quantity * unit_price_cents` with wrapping overflow ([10.1](./§10-Numeric Semantics.md#101-integer-overflow)).
+- `line_total_cents` returns `quantity * unit_price_cents` with wrapping overflow ([10.1](./§10-Numeric%20Semantics.md#101-integer-overflow)).
 - `total_cents` iterates over `items` in protobuf repeated-field order.
 - The method performs no I/O and uses no target-language-specific collection helpers.

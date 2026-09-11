@@ -230,28 +230,41 @@ internal static class HoverCard
 
     /// <summary>What the project's policy makes this operation do, where it makes it do anything.</summary>
     /// <remarks>
+    /// <para>
     /// Read off the node rather than off the configuration, so that what is described is what will
     /// be emitted. <see cref="NumericPolicy"/> is the one place the configuration becomes a
     /// behavior, and it has already run by the time anything here is asked.
+    /// </para>
+    /// <para>
+    /// <b>Where it governs nothing, nothing is said.</b> Every arithmetic node carries an
+    /// <see cref="ArithmeticBehavior"/> and only an integer one is governed by it, which is what
+    /// <see cref="IrUnary.OverflowingType"/> answers -- asked rather than re-derived, because the
+    /// two backends already ask it and a fourth opinion is how a reader came to be told that
+    /// <c>double</c> arithmetic wraps in two's complement. A floating-point operation is left to its
+    /// type line: IEEE-754 is not a choice this project made, and a card that implied it was would
+    /// be inventing a policy to have something to say.
+    /// </para>
     /// </remarks>
     private static IEnumerable<string> Policy(IrExpression expression)
     {
         switch (expression)
         {
+            // Integer by construction -- float division is an IrBinary -- so the annotation always
+            // governs, and the zero divisor 10.2.1 requires an answer for always applies.
             case IrIntegerDivision division:
                 yield return $"Integer division. {Overflow(division.Behavior)} {OnZero(division)}";
                 break;
 
-            case IrBinary { IsArithmetic: true } binary:
+            case IrBinary { OverflowingType: not null } binary:
                 yield return Overflow(binary.Behavior);
                 break;
 
-            case IrUnary { Operator: IrUnaryOperator.Negate } negation:
+            case IrUnary { OverflowingType: not null } negation:
                 yield return Overflow(negation.Behavior);
                 break;
 
             case IrConversion conversion:
-                yield return Conversion(conversion.Behavior);
+                yield return Conversion(conversion);
                 break;
         }
     }
@@ -284,13 +297,48 @@ internal static class HoverCard
             nameof(division), division.ZeroBehavior, "Unhandled zero-divisor behavior."),
     };
 
-    private static string Conversion(ConversionBehavior behavior) => behavior switch
+    /// <summary>What this conversion does with a value the target cannot hold.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>One sentence per row of spec 10.3's table, because the rows disagree.</b> An integer
+    /// target takes the low bits, a floating-point target rounds, and only a floating-point source
+    /// reaching an integer truncates and clamps and maps NaN to zero. Saying the last of those about
+    /// all of them -- which this did -- tells a reader that <c>ratio as double</c> discards the
+    /// fraction and flattens a NaN, and both are false.
+    /// </para>
+    /// <para>
+    /// <see cref="IrConversion.Kind"/> is the discriminator, which is the one the backends switch on
+    /// as well: the four families need different treatment in each target and this is a fifth reader
+    /// of the same classification rather than a second opinion about it. The one distinction it does
+    /// not draw is between the two directions across floating point, which the table does -- widening
+    /// is exact and narrowing rounds -- so the target's width settles that.
+    /// </para>
+    /// </remarks>
+    private static string Conversion(IrConversion conversion) => conversion.Behavior switch
     {
-        ConversionBehavior.WrapOrSaturate => "An integer target takes the low bits; a "
-            + "floating-point source truncates toward zero, clamps, and maps NaN to zero "
-            + "(spec 10.3).",
+        ConversionBehavior.WrapOrSaturate => WrapOrSaturate(conversion),
         _ => throw new ArgumentOutOfRangeException(
-            nameof(behavior), behavior, "Unhandled conversion behavior."),
+            nameof(conversion), conversion.Behavior, "Unhandled conversion behavior."),
+    };
+
+    /// <inheritdoc cref="Conversion"/>
+    private static string WrapOrSaturate(IrConversion conversion) => conversion.Kind switch
+    {
+        ConversionKind.Identity =>
+            "A conversion to the type the value already has. It states nothing new (spec 10.3).",
+        ConversionKind.IntegerToInteger =>
+            "Takes the low bits: the value reduced modulo 2^N, where N is the target's width "
+                + "(spec 10.3).",
+        ConversionKind.IntegerToFloat => "Rounds to nearest, ties to even (spec 10.3).",
+        ConversionKind.FloatToFloat => conversion.TargetType.Kind is ScalarKind.Double
+            ? "Widening to double, which is exact (spec 10.3)."
+            : "Rounds to nearest, ties to even; a magnitude too large for float becomes an infinity "
+                + "(spec 10.3).",
+        ConversionKind.FloatToInteger =>
+            "Truncates toward zero; a value outside the target's range clamps to that bound, and NaN "
+                + "becomes zero (spec 10.3).",
+        _ => throw new ArgumentOutOfRangeException(
+            nameof(conversion), conversion.Kind, "Unhandled conversion kind."),
     };
 
     // ------------------------------------------------------- asking what already knows

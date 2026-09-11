@@ -3,7 +3,7 @@
 Numeric behavior is one of the highest-risk portability areas.
 
 The decisions below are collected, alongside the presence rules and everything else the targets
-disagree about, in [docs/reference-semantics.md](docs/reference-semantics.md). That table is where
+disagree about, in [docs/reference-semantics.md](../docs/reference-semantics.md). That table is where
 the C# reference behavior for each operation is written down and where each backend's obligation to
 reproduce it is stated. This section remains normative; the table is a reading aid.
 
@@ -141,7 +141,7 @@ Open Questions:
   expression rather than a literal? Today only literal `0` is caught, and only because it fails the
   proven-non-zero test rather than by any dedicated analysis.
 - `on_zero fail` gives generated library code the ability to terminate the host process. That is
-  intentional, but it is a larger capability than anything else the language permits ([20](./§20-I-O, Threading, and Side Effects.md#20-io-threading-and-side-effects)), and a
+  intentional, but it is a larger capability than anything else the language permits ([20](./§20-I-O,%20Threading,%20and%20Side%20Effects.md#20-io-threading-and-side-effects)), and a
   server embedding ProtoLang behavior has no way to opt out.
 - Python's `/` produces a float and `//` floors, so neither maps to truncating division, and Python
   raises on float division by zero rather than yielding `inf`. The Python backend will need explicit
@@ -292,6 +292,16 @@ Normative Requirements:
   annotation the binder stamped on the IR node, so what is described is what will be emitted, and an
   operation carrying no annotation has nothing to say. A host that recited the project's policy on
   every explanation would be one nobody reads by the third.
+- **Carrying an annotation is not the same as being governed by one, and the difference is where a
+  host is most likely to say something false.** Every arithmetic node carries an overflow behavior
+  and only integer arithmetic is governed by it: 10.1 is about a result leaving the value range of
+  its type, which floating point does not do -- it rounds, and at the limit becomes an infinity. A
+  host that reads the annotation without asking whether it applies tells a reader that `double`
+  arithmetic wraps in two's complement. Likewise a conversion carries one behavior and 10.3 gives it
+  five rows, so the row is chosen by the source and the target together: only a floating-point
+  source reaching an integer truncates, clamps and maps NaN to zero, and claiming that of
+  `ratio as double` is false twice over. Where the language states no rule, the honest explanation
+  is the type and nothing further.
 
 Settings with a single legal value are listed anyway. The file's purpose is to enumerate every
 language-dependent preference, including the settled ones, so the whole contract is readable in one
@@ -300,7 +310,7 @@ and which of them are C#'s own behavior rather than something ProtoLang invented
 
 Open Questions:
 
-- Whether a language version ([27.1](./§27-Versioning and Compatibility.md#271-language-versioning)) belongs in this file rather than in each source file.
+- Whether a language version ([27.1](./§27-Versioning%20and%20Compatibility.md#271-language-versioning)) belongs in this file rather than in each source file.
 - Whether a backend may add settings of its own, and if so how a third-party backend's settings
   avoid colliding with the language's.
 
