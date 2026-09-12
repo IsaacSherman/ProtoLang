@@ -49,12 +49,20 @@ public class SignatureHelpTests
     private static string Typing(string statement)
         => Source.Replace("        return scaled(1, \"x\");\n", statement, StringComparison.Ordinal);
 
-    private static async Task<SignatureHelp?> HelpAsync(string text, int offset)
+    /// <param name="labelOffsets">
+    /// Whether this client negotiated offset labels. True by default because it is what every test
+    /// below is about; the substring form has one test of its own and the wire has another.
+    /// </param>
+    private static async Task<SignatureHelp?> HelpAsync(
+        string text, int offset, bool labelOffsets = true)
     {
         var (documents, uri) = EditorFixture.Open(text);
 
         var provider = new SignatureHelpProvider(
-            documents, EditorFixture.Configuration(), EditorFixture.Loaders());
+            documents, EditorFixture.Configuration(), EditorFixture.Loaders())
+        {
+            LabelOffsets = labelOffsets,
+        };
 
         var asked = provider.Read(EditorFixture.Ask(uri, text, offset));
 
@@ -127,21 +135,49 @@ public class SignatureHelpTests
     }
 
     /// <summary>
-    /// Supplying one argument too many points past the last parameter rather than at it.
+    /// Supplying one argument too many points at the last parameter rather than past it.
     /// </summary>
     /// <remarks>
-    /// A client renders that by highlighting nothing, which is the honest picture: there is no
-    /// parameter for what is being typed. Clamping to the last one would say the opposite.
+    /// The index on the wire has to stay inside the signature. LSP 3.17 reads an out-of-range
+    /// <c>activeParameter</c> as zero, so the honest index -- one past the last -- arrives as a
+    /// highlight on the <em>first</em> parameter, which points at the argument furthest from the
+    /// mistake. The last one is not true either, and it is next to what is being typed.
+    /// <see cref="AnExcessArgumentDoesNotSelectTheFirstParameterOnTheClient"/> asserts the property a
+    /// client would see; this one pins the number that produces it.
     /// </remarks>
     [Fact]
-    public async Task SupplyingTooManyArgumentsPointsPastTheLastParameter()
+    public async Task SupplyingTooManyArgumentsPointsAtTheLastParameter()
     {
         var text = Typing("        return scaled(1, \"x\", 3\n");
         var help = await HelpAsync(text, EditorFixture.After(text, "scaled(1, \"x\", "));
 
         Assert.NotNull(help);
-        Assert.Equal(2, help!.ActiveParameter);
-        Assert.Equal(2, Assert.Single(help.Signatures).Parameters.Count);
+        Assert.Equal(2, Assert.Single(help!.Signatures).Parameters.Count);
+        Assert.Equal(1, help.ActiveParameter);
+    }
+
+    /// <summary>An excess argument must not restart the client's highlight at the first parameter.</summary>
+    /// <remarks>
+    /// LSP 3.17 defines an out-of-range SignatureHelp.activeParameter as zero, not as no highlight.
+    /// Interpret the response as that client does instead of asserting only the raw index on the wire.
+    /// A dismissed panel or a signature with no parameter highlights is also an acceptable answer.
+    /// </remarks>
+    [Fact]
+    [Trait("ReviewRegression", "SignatureExcessArgument")]
+    public async Task AnExcessArgumentDoesNotSelectTheFirstParameterOnTheClient()
+    {
+        var text = Typing("        return scaled(1, \"x\", 3\n");
+        var inside = await HelpAsync(text, EditorFixture.After(text, "return scaled("));
+        Assert.NotNull(inside);
+        Assert.Equal(2, Assert.Single(inside!.Signatures).Parameters.Count);
+
+        var help = await HelpAsync(text, EditorFixture.After(text, "scaled(1, \"x\", "));
+        var signature = help is null ? null : Assert.Single(help.Signatures);
+        int? selected = signature is null || signature.Parameters.Count == 0
+            ? null
+            : help!.ActiveParameter < signature.Parameters.Count ? help.ActiveParameter : 0;
+
+        Assert.NotEqual<int?>(0, selected);
     }
 
     /// <summary>A call written inside an argument is the one the caret is supplying.</summary>
@@ -220,6 +256,24 @@ public class SignatureHelpTests
         Assert.Null(await HelpAsync(Source, EditorFixture.After(Source, "scaled(1, \"x\")")));
     }
 
+    /// <summary>A recovered call cannot own a caret in the next statement or method.</summary>
+    [Theory]
+    [InlineData("        return scaled(1;\n        var next: int64 = 0;\n")]
+    [InlineData("        return scaled(1\n    }\n    fn later() -> int64 {\n        var next: int64 = 0;\n")]
+    [Trait("ReviewRegression", "SignatureRecoveryBoundary")]
+    public async Task AnUnfinishedCallStopsAtAStatementOrBlockBoundary(string statement)
+    {
+        var text = Typing(statement);
+        var inside = await HelpAsync(text, EditorFixture.After(text, "return scaled("));
+
+        Assert.NotNull(inside);
+        Assert.Equal(
+            "fn scaled(factor: int64, label: string) -> int64",
+            Assert.Single(inside!.Signatures).Label);
+
+        Assert.Null(await HelpAsync(text, EditorFixture.After(text, "var next: int64 = ")));
+    }
+
     // ------------------------------------------------------- the parameters inside the line
 
     /// <summary>
@@ -290,16 +344,43 @@ public class SignatureHelpTests
 
         Assert.Equal(1, help.ActiveParameter);
         Assert.Equal(2, signature.Parameters.Count);
-        Assert.NotEqual(signature.Parameters[0].Label, signature.Parameters[1].Label);
+        Assert.NotEqual(signature.Parameters[0].Offsets, signature.Parameters[1].Offsets);
         Assert.All(
             signature.Parameters,
             parameter => Assert.Equal("same: int64", Cut(signature.Label, parameter)));
     }
 
+    /// <summary>
+    /// A client that never negotiated offsets is sent the parameter as it reads, and never an array.
+    /// </summary>
+    /// <remarks>
+    /// The two forms are not interchangeable: an array where a client expects a string is a parameter
+    /// it cannot point at. What the substring form costs is the case the offsets exist for -- two
+    /// parameters spelled alike are two identical strings, and which one a client finds is its own
+    /// rule -- and that cost belongs to the client that chose the form.
+    /// </remarks>
+    [Fact]
+    public async Task AClientThatDidNotNegotiateOffsetsIsSentTheParameterAsItReads()
+    {
+        var help = await HelpAsync(
+            Source, EditorFixture.After(Source, "return scaled("), labelOffsets: false);
+
+        Assert.NotNull(help);
+
+        var signature = Assert.Single(help!.Signatures);
+
+        Assert.Equal(
+            ["factor: int64", "label: string"],
+            signature.Parameters.Select(parameter => parameter.Written));
+
+        Assert.All(signature.Parameters, parameter => Assert.Null(parameter.Offsets));
+    }
+
     private static string Cut(string label, ParameterInformation parameter)
     {
-        Assert.Equal(2, parameter.Label.Count);
+        Assert.NotNull(parameter.Offsets);
+        Assert.Equal(2, parameter.Offsets!.Count);
 
-        return label[parameter.Label[0]..parameter.Label[1]];
+        return label[parameter.Offsets[0]..parameter.Offsets[1]];
     }
 }

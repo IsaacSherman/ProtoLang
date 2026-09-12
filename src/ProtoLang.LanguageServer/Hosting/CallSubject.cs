@@ -55,6 +55,13 @@ internal sealed record CallSubject(SourceSpan Callee, int ActiveParameter)
     /// author has not finished typing past cannot have changed anything yet.
     /// </para>
     /// <para>
+    /// <b>A closing parenthesis is not the only thing that ends a call.</b> An argument list cannot
+    /// outlive the statement it was written in, so a semicolon or a brace abandons every open one --
+    /// which is what the parser does with the same tokens, and what a reader means by them. Without
+    /// it the stack has no way back: <c>scaled(1;</c> leaves a frame that goes on claiming every
+    /// caret after it, into the next statement and through the end of the method.
+    /// </para>
+    /// <para>
     /// Nothing is suppressed inside a string literal or a comment, where <see cref="CompletionSubject"/>
     /// suppresses in both -- and the difference is the question being asked rather than an oversight. A
     /// completion inside a literal would offer names that cannot go there; a caret inside a literal or a
@@ -100,6 +107,17 @@ internal sealed record CallSubject(SourceSpan Callee, int ActiveParameter)
 
                 case TokenKind.Comma when open.Count > 0:
                     open.Peek().Supplied++;
+                    break;
+
+                // A statement ended, or a block did, and no argument list survives either. The parser
+                // recovers past a missing parenthesis and carries on; without this so would the stack,
+                // and a call abandoned three statements ago would go on claiming every caret after it
+                // -- including one inside a later method, which is the version of this a reader would
+                // find hardest to explain.
+                case TokenKind.Semicolon:
+                case TokenKind.OpenBrace:
+                case TokenKind.CloseBrace:
+                    open.Clear();
                     break;
 
                 default:

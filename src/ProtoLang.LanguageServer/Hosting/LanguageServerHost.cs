@@ -375,6 +375,8 @@ public sealed class LanguageServerHost : IDisposable
         var deltas = WantsDeltas(capabilities);
 
         _definition.LinkSupport = capabilities?.TextDocument?.Definition?.LinkSupport is true;
+        _signatures.LabelOffsets = capabilities?.TextDocument?.SignatureHelp?.SignatureInformation?
+            .ParameterInformation?.LabelOffsetSupport is true;
         _classification.Client = ClientLegend.Of(capabilities?.TextDocument?.SemanticTokens);
         _classification.Deltas = deltas;
         _outlineNests = capabilities?.TextDocument?.DocumentSymbol?.HierarchicalDocumentSymbolSupport is true;

@@ -85,12 +85,36 @@ public sealed record DocumentHighlightClientCapabilities;
 
 /// <inheritdoc cref="ClientCapabilities"/>
 /// <remarks>
-/// Deliberately empty. LSP's signature-help capability describes which content formats a client
-/// accepts for the documentation on a signature and whether it understands a per-signature active
-/// parameter -- and this server sends no documentation and carries the active parameter where every
-/// client reads it. What the members would have decided, they decide by their absence.
+/// Almost empty. What this server sends is one signature with one label, and most of what LSP lets a
+/// client say here -- which content formats it accepts for documentation, whether it understands a
+/// per-signature active parameter -- decides nothing, because there is no documentation and the
+/// active parameter is carried where every client reads it. The one member that does decide
+/// something is how a parameter may point into the label.
 /// </remarks>
-public sealed record SignatureHelpClientCapabilities;
+public sealed record SignatureHelpClientCapabilities
+{
+    public SignatureInformationClientCapabilities? SignatureInformation { get; init; }
+}
+
+/// <inheritdoc cref="SignatureHelpClientCapabilities"/>
+public sealed record SignatureInformationClientCapabilities
+{
+    public ParameterInformationClientCapabilities? ParameterInformation { get; init; }
+}
+
+/// <inheritdoc cref="SignatureHelpClientCapabilities"/>
+public sealed record ParameterInformationClientCapabilities
+{
+    /// <summary>Whether a parameter's label may be a pair of offsets rather than a substring.</summary>
+    /// <remarks>
+    /// Consulted rather than assumed, because the two forms are not compatible on the wire: a client
+    /// that did not ask for offsets and is sent an array finds no string where it expects one and
+    /// shows the parameter unhighlighted, or nothing at all. Both forms are produced from the same
+    /// ranges -- see <see cref="ParameterInformation"/> -- so what this decides is only how much of
+    /// what is already known survives the trip.
+    /// </remarks>
+    public bool? LabelOffsetSupport { get; init; }
+}
 
 /// <inheritdoc cref="ClientCapabilities"/>
 /// <remarks>

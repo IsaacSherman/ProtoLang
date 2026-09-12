@@ -1,3 +1,6 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 namespace ProtoLang.LanguageServer.Protocol.Lsp;
 
 /// <summary>What the editor shows while a call's arguments are being typed.</summary>
@@ -22,8 +25,9 @@ public sealed record SignatureHelp
     /// <summary>Which parameter the caret is currently supplying.</summary>
     /// <remarks>
     /// Carried here rather than on the signature because that is where every client reads it from.
-    /// It may point past the last parameter, which is what typing one argument too many looks like;
-    /// a client renders that by highlighting nothing, which is the honest picture.
+    /// <b>It must be in range.</b> LSP 3.17 defines a value outside the signature's parameters as
+    /// falling back to zero, so an index that honestly says "past the last one" arrives as a highlight
+    /// on the first -- see <c>SignatureHelpProvider.Highlighted</c> for what is sent instead and why.
     /// </remarks>
     public int ActiveParameter { get; init; }
 }
@@ -44,21 +48,87 @@ public sealed record SignatureInformation
 /// <summary>Which part of the signature line one parameter occupies.</summary>
 /// <remarks>
 /// <para>
-/// <b>A range, never a substring.</b> LSP allows either, and the substring form is the tempting one
-/// -- send <c>"factor: int64"</c> and let the client find it. It is wrong here: a client is told to
-/// highlight the <em>first</em> match, and ProtoLang permits a method to declare the same parameter
-/// name twice. The file where that happens is exactly the file whose signature a reader is squinting
-/// at, and highlighting the wrong one of two identical parameters is the sort of small lie that
-/// makes a reader stop trusting the panel.
+/// <b>Two forms, and which one is sent is the client's to decide.</b> LSP spells the label either as
+/// a substring of the signature -- which the client finds for itself -- or as a pair of offsets into
+/// it. The offsets are strictly better and are what this server would always send given the choice,
+/// because ProtoLang lets a method declare one parameter name twice and a client told to find
+/// <c>same: int64</c> highlights the first of the two whichever one the caret is supplying.
 /// </para>
 /// <para>
-/// Two integers, start and end, counted in UTF-16 code units into <see cref="SignatureInformation.Label"/>
-/// -- the same units the rest of this protocol counts columns in.
+/// It is not given the choice. The offset form is gated on the client declaring
+/// <c>labelOffsetSupport</c>, and a client that did not declare it is entitled to a string and will
+/// mis-read an array. So the capability is read and the answer follows it, which leaves the
+/// duplicate-name ambiguity with the clients that chose the form it lives in.
+/// </para>
+/// <para>
+/// One member on the wire and two in the type, because the alternative is an <c>object</c> that every
+/// reader has to test the runtime type of. The converter below is what makes them one again.
 /// </para>
 /// </remarks>
+[JsonConverter(typeof(ParameterInformationConverter))]
 public sealed record ParameterInformation
 {
-    public IReadOnlyList<int> Label { get; init; } = [];
+    /// <summary>The parameter as it reads, for a client that did not negotiate offsets.</summary>
+    public string? Written { get; init; }
+
+    /// <summary>
+    /// Start and end, counted in UTF-16 code units into <see cref="SignatureInformation.Label"/> --
+    /// the same units the rest of this protocol counts columns in.
+    /// </summary>
+    public IReadOnlyList<int>? Offsets { get; init; }
+}
+
+/// <inheritdoc cref="ParameterInformation"/>
+public sealed class ParameterInformationConverter : JsonConverter<ParameterInformation>
+{
+    public override ParameterInformation? Read(
+        ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        using var parameter = JsonDocument.ParseValue(ref reader);
+
+        if (!parameter.RootElement.TryGetProperty("label", out var label))
+        {
+            return new ParameterInformation();
+        }
+
+        return label.ValueKind switch
+        {
+            JsonValueKind.String => new ParameterInformation { Written = label.GetString() },
+            JsonValueKind.Array => new ParameterInformation
+            {
+                Offsets = [.. label.EnumerateArray().Select(offset => offset.GetInt32())],
+            },
+            _ => new ParameterInformation(),
+        };
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer, ParameterInformation value, JsonSerializerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(value);
+
+        writer.WriteStartObject();
+        writer.WritePropertyName("label");
+
+        if (value.Offsets is { } offsets)
+        {
+            writer.WriteStartArray();
+
+            foreach (var offset in offsets)
+            {
+                writer.WriteNumberValue(offset);
+            }
+
+            writer.WriteEndArray();
+        }
+        else
+        {
+            writer.WriteStringValue(value.Written ?? string.Empty);
+        }
+
+        writer.WriteEndObject();
+    }
 }
 
 /// <summary>When a client should ask for signature help, and when it should ask again.</summary>

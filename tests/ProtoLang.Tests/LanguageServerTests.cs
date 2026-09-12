@@ -401,6 +401,42 @@ public class LanguageServerTests
             Assert.Single(help!.Signatures).Label);
     }
 
+    /// <summary>A client that never opted into label offsets receives ordinary string labels.</summary>
+    [Fact]
+    [Trait("ReviewRegression", "SignatureLabelCapability")]
+    public async Task SignatureParameterLabelsRemainStringsUnlessOffsetsWereNegotiated()
+    {
+        const string Bound =
+            """
+            import proto "fixtures.proto";
+            extend Outer {
+                fn scaled(factor: int64) -> int64 { return factor; }
+                fn calls() -> int64 { return scaled(2); }
+            }
+            """;
+
+        // An empty signatureHelp capability asks for the feature, not for labelOffsetSupport.
+        var capabilities = new ClientCapabilities
+        {
+            TextDocument = new TextDocumentClientCapabilities
+            {
+                SignatureHelp = new SignatureHelpClientCapabilities(),
+            },
+        };
+        await using var client = await LanguageServerClient.StartAsync(capabilities: capabilities);
+        var uri = UriOf(Path.Combine(EditorFixture.DirectoryWithSchemas(), "source.protolang"));
+        client.Notify(Methods.DidOpen, Open(uri, Bound));
+
+        var answer = await client.RequestAsync(
+            Methods.SignatureHelp, At(uri, Bound, "return scaled(", "return scaled(".Length));
+        var signature = Assert.Single(answer.GetProperty("signatures").EnumerateArray());
+        Assert.Equal("fn scaled(factor: int64) -> int64", signature.GetProperty("label").GetString());
+        var parameter = Assert.Single(signature.GetProperty("parameters").EnumerateArray());
+
+        Assert.Equal(JsonValueKind.String, parameter.GetProperty("label").ValueKind);
+        Assert.Equal("factor: int64", parameter.GetProperty("label").GetString());
+    }
+
     /// <summary>Closing a document abandons the three kinds of work #51 added for it.</summary>
     /// <inheritdoc cref="ClosingADocumentAbandonsTheNavigationOutstandingForIt" path="/summary"/>
     [Fact]

@@ -52,6 +52,9 @@ public sealed class SignatureHelpProvider
     /// <inheritdoc cref="TriggerCharacters"/>
     public static IReadOnlyList<string> RetriggerCharacters { get; } = [","];
 
+    /// <inheritdoc cref="LabelOffsets"/>
+    private volatile bool _labelOffsets;
+
     private readonly DocumentStore _documents;
     private readonly ConfigurationSync _configuration;
     private readonly DocumentSemantics _semantics;
@@ -70,6 +73,20 @@ public sealed class SignatureHelpProvider
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         _semantics = semantics ?? new DocumentSemantics(loaders);
         _deferred = new DeferredAnswers("signature help", documents, configuration, concurrency);
+    }
+
+    /// <summary>Whether the client accepts a parameter label as a pair of offsets.</summary>
+    /// <remarks>
+    /// Set at <c>initialize</c>, on the worker that reads the wire, and read on whichever thread ends
+    /// up answering -- so the field behind it is volatile, for the reason
+    /// <see cref="DefinitionProvider.LinkSupport"/>'s is. The two label forms are not interchangeable:
+    /// a client that never asked for offsets and is sent an array finds no string where it expects
+    /// one, and the parameter it was meant to point at is the one thing the panel then fails to say.
+    /// </remarks>
+    public bool LabelOffsets
+    {
+        get => _labelOffsets;
+        set => _labelOffsets = value;
     }
 
     /// <inheritdoc cref="DeferredAnswers.Outstanding"/>
@@ -123,27 +140,57 @@ public sealed class SignatureHelpProvider
 
         return new SignatureHelp
         {
-            Signatures = [Describe(signature)],
-            ActiveParameter = call.ActiveParameter,
+            Signatures = [Describe(signature, LabelOffsets)],
+            ActiveParameter = Highlighted(call.ActiveParameter, signature.Parameters.Count),
         };
     }
 
+    /// <summary>Which parameter to point at when more arguments were written than exist.</summary>
     /// <remarks>
+    /// <para>
+    /// <b>Clamped, because out of range does not mean "none" on the wire.</b> LSP 3.17 says an
+    /// <c>activeParameter</c> outside the signature's parameters falls back to zero -- so sending the
+    /// honest index for a third argument to a two-parameter method makes the client highlight the
+    /// <em>first</em> one, which is the most misleading answer available: it points at the argument
+    /// furthest from the mistake. Pointing at the last parameter is not true either, but it is
+    /// adjacent to what is being typed, and it is what a reader of the panel can make sense of.
+    /// </para>
+    /// <para>
+    /// A method with no parameters clamps to zero, which the same rule renders as nothing, because
+    /// there is nothing to point at.
+    /// </para>
+    /// </remarks>
+    private static int Highlighted(int supplied, int parameters)
+        => parameters == 0 ? 0 : Math.Min(supplied, parameters - 1);
+
+    /// <remarks>
+    /// <para>
     /// The label is the one spelling of a signature this repository has, which a hover already shows,
     /// and the parameter ranges come from beside it rather than from searching it -- see
     /// <see cref="IrMethodSignature.ParameterLabels"/> for why a search is wrong rather than merely
     /// slower.
+    /// </para>
+    /// <para>
+    /// Both forms are cut from those same ranges, so a client that took the substring is told exactly
+    /// what a client that took the offsets is told. What it loses is the one case the ranges exist
+    /// for: two parameters spelled alike are two identical substrings, and finding the first is the
+    /// client's own rule. Sending it an array instead would not fix that and would lose the
+    /// highlight altogether.
+    /// </para>
     /// </remarks>
-    private static SignatureInformation Describe(IrMethodSignature signature)
-        => new()
+    private static SignatureInformation Describe(IrMethodSignature signature, bool offsets)
+    {
+        var label = signature.DisplayName;
+
+        return new SignatureInformation
         {
-            Label = signature.DisplayName,
+            Label = label,
             Parameters =
             [
-                .. signature.ParameterLabels.Select(label => new ParameterInformation
-                {
-                    Label = [label.Start, label.End],
-                }),
+                .. signature.ParameterLabels.Select(parameter => offsets
+                    ? new ParameterInformation { Offsets = [parameter.Start, parameter.End] }
+                    : new ParameterInformation { Written = label[parameter.Start..parameter.End] }),
             ],
         };
+    }
 }
