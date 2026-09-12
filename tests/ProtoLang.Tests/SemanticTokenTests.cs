@@ -1,5 +1,4 @@
 using System.Text.Json;
-using ProtoLang.Diagnostics;
 using ProtoLang.LanguageServer.Hosting;
 using ProtoLang.LanguageServer.Protocol;
 using ProtoLang.LanguageServer.Protocol.Lsp;
@@ -19,43 +18,11 @@ namespace ProtoLang.Tests;
 /// </remarks>
 public class SemanticTokenTests
 {
-    /// <summary>One token, back in absolute coordinates.</summary>
-    private readonly record struct Painted(int Line, int Character, int Length, string Type);
+    /// <summary>The lexical classification of <paramref name="text"/>, decoded.</summary>
+    private static List<PaintedToken> Paint(string text)
+        => PaintedToken.Decode(SemanticTokenEncoder.Encode(text, "test.protolang").Data);
 
-    /// <summary>
-    /// Undoes the delta encoding, which is the only way to assert anything about it.
-    /// </summary>
-    /// <remarks>
-    /// Written out here rather than compared against a hand-computed array of integers, because an
-    /// expected array says nothing to a reader and has to be recomputed by hand every time the fixture
-    /// is touched.
-    /// </remarks>
-    private static List<Painted> Paint(string text)
-    {
-        var data = SemanticTokenEncoder.Encode(text, "test.protolang").Data;
-        var painted = new List<Painted>();
-
-        var line = 0;
-        var character = 0;
-
-        for (var index = 0; index + 4 < data.Count; index += 5)
-        {
-            line += data[index];
-            character = data[index] == 0 ? character + data[index + 1] : data[index + 1];
-
-            painted.Add(new Painted(line, character, data[index + 2], SemanticTokenLegend.TokenTypes[data[index + 3]]));
-        }
-
-        return painted;
-    }
-
-    private static string TextOf(string source, Painted token)
-    {
-        var lines = new LineMap(source);
-        var start = lines.OffsetOf(token.Line + 1, token.Character + 1);
-
-        return source.Substring(start, token.Length);
-    }
+    private static string TextOf(string source, PaintedToken token) => token.TextIn(source);
 
     // ------------------------------------------------------- the legend
 
@@ -96,8 +63,16 @@ public class SemanticTokenTests
         Assert.All(painted, token => Assert.Equal(SemanticTokenLegend.Keyword, token.Type));
     }
 
+    /// <summary>The floor #50 refines up from, and falls back to.</summary>
+    /// <remarks>
+    /// This used to be the whole story and is now the answer for a caller that has no compilation --
+    /// which is every caller during a keystroke's worth of the session, and every caller at all for a
+    /// buffer whose schema will not load. It is asserted here rather than deleted because it is what
+    /// makes the refinement safe: a classification that is right sometimes is worse than one that is
+    /// consistently coarse, so the coarse one has to remain reachable and complete.
+    /// </remarks>
     [Fact]
-    public void EveryIdentifierIsClassifiedTheSameWay()
+    public void WithNothingBoundEveryIdentifierIsStillJustAnIdentifier()
     {
         const string Source =
             """
@@ -113,9 +88,9 @@ public class SemanticTokenTests
             .Where(token => TextOf(Source, token) is "InvoiceItem" or "total" or "rate" or "gross" or "quantity")
             .ToList();
 
-        // A receiver type, a method, a parameter, a local and a field: five different things, and this
-        // server does not yet know which is which. A classification that is right sometimes is worse
-        // than one that is consistently coarse, because the wrong colour reads as a fact about the code.
+        // A receiver type, a method, a parameter, a local and a field: five different things, and the
+        // token stream cannot tell them apart. What can is the binder, and what asks it is
+        // SemanticRefinementTests.
         Assert.Equal(7, identifiers.Count);
         Assert.All(identifiers, token => Assert.Equal(SemanticTokenLegend.Variable, token.Type));
     }

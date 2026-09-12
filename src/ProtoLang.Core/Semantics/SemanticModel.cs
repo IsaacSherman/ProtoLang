@@ -191,6 +191,33 @@ public sealed class SemanticModel
         => _references.Value?.ReferencesTo(symbol) ?? [];
 
     /// <summary>
+    /// Every name this compilation resolved, each declaration among them and marked as one, in
+    /// source order. Empty when nothing bound.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The whole file at once, for the caller that is describing the file rather than asking about a
+    /// symbol or a caret. Semantic classification is that caller: it walks a token stream and wants,
+    /// for each identifier in it, what the binder decided that identifier was. Asked one token at a
+    /// time through <see cref="ReferenceAt"/> that is a scan of this same list per identifier; asked
+    /// once it is a merge of two sequences that are both already in source order.
+    /// </para>
+    /// <para>
+    /// <b>Not <see cref="Ir.IrModule.References"/>, which is half of this.</b> That is what the
+    /// binder recorded as it resolved -- uses only, in the order resolution happened to reach them.
+    /// This is that merged with the declarations and put in the one order every published sequence
+    /// of references is in; see <see cref="SymbolReference.InSourceOrder"/> for why the order is
+    /// total rather than merely deterministic.
+    /// </para>
+    /// <para>
+    /// No document parameter, for the reason this whole type takes none: a
+    /// <see cref="CompilationResult"/> carries one source. When one carries several (#27) this takes
+    /// a document as well, which is an added parameter rather than a different shape.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<SymbolReference> AllReferences => _references.Value?.All ?? [];
+
+    /// <summary>
     /// Where <paramref name="symbol"/> was declared, or null when this compilation does not declare
     /// it.
     /// </summary>
