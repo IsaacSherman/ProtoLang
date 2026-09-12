@@ -1,4 +1,5 @@
 using ProtoLang.LanguageServer.Hosting;
+using ProtoLang.LanguageServer.Protocol;
 using ProtoLang.LanguageServer.Protocol.Lsp;
 using ProtoLang.LanguageServer.Workspace;
 using Xunit;
@@ -701,6 +702,55 @@ public class SemanticRefinementTests
 
         Assert.NotEmpty(answer.Data);
         Assert.NotNull(answer.ResultId);
+    }
+
+    /// <summary>
+    /// A document closed while its own classification was being made keeps nothing afterwards.
+    /// </summary>
+    /// <remarks>
+    /// The close lands between the freshness check that lets the work start and the assignment that
+    /// would keep its answer, which is the one interleaving a test cannot reach by asking twice and
+    /// hoping. It is reached here through the compile seam: the document is closed from inside the
+    /// compile this very request is waiting on, so the ordering is arranged rather than raced for.
+    /// Without the guard the answer is retained after the close and the array lives until the process
+    /// exits -- the same defect <c>DocumentSemantics.Publish</c> was given a counter to prevent.
+    /// </remarks>
+    [Fact]
+    public async Task AnAnswerFinishedAfterItsDocumentClosedIsNotKept()
+    {
+        var (documents, uri) = EditorFixture.Open(Source);
+        var semantics = new DocumentSemantics(EditorFixture.Loaders());
+
+        var provider = new ClassificationProvider(
+            documents, EditorFixture.Configuration(), EditorFixture.Loaders(), semantics: semantics)
+        {
+            Deltas = true,
+        };
+
+        var compile = semantics.Compile;
+        semantics.Compile = (compilation, token) =>
+        {
+            var built = compile(compilation, token);
+
+            documents.Close(uri);
+            provider.Forget(uri);
+
+            return built;
+        };
+
+        var asked = provider.Read(new SemanticTokensParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = uri.ToString() },
+        });
+
+        Assert.NotNull(asked);
+
+        // Refused, because the buffer it describes is no longer the one the store holds -- which is
+        // correct and is not what this test is about. What it is about is the line after.
+        await Assert.ThrowsAsync<JsonRpcException>(
+            () => provider.AnswerAsync(asked!, CancellationToken.None));
+
+        Assert.Equal(0, provider.Retained);
     }
 
     /// <summary>Closing a document gives back what was being kept for it.</summary>

@@ -88,9 +88,12 @@ public sealed class ClassificationProvider
     private readonly ConcurrentDictionary<string, Painted> _published =
         new(StringComparer.Ordinal);
 
+    private readonly object _retention = new();
+
     private volatile ClientLegend _client = ClientLegend.Everything;
     private volatile bool _deltas;
     private int _results;
+    private int _withdrawals;
 
     public ClassificationProvider(
         DocumentStore documents,
@@ -186,7 +189,12 @@ public sealed class ClassificationProvider
         ArgumentNullException.ThrowIfNull(document);
 
         _deferred.Forget(document);
-        _published.TryRemove(document.Key, out _);
+
+        lock (_retention)
+        {
+            _withdrawals++;
+            _published.TryRemove(document.Key, out _);
+        }
     }
 
     /// <summary>Classifies the buffer, and names the answer so a later one can be a difference.</summary>
@@ -208,6 +216,10 @@ public sealed class ClassificationProvider
     /// </remarks>
     private object? Publish(ClassificationRequest asked, CancellationToken cancellationToken)
     {
+        // Read before the compile rather than after it, for the reason DocumentSemantics reads its
+        // own: what this is watching for is a close that lands while the compile runs.
+        var withdrawals = Volatile.Read(ref _withdrawals);
+
         var compiled = _semantics.For(asked.Document, asked.Configuration, cancellationToken);
 
         var classified = SemanticTokenEncoder.Encode(
@@ -216,15 +228,50 @@ public sealed class ClassificationProvider
             compiled.Semantics?.AllReferences ?? [],
             Client);
 
-        if (!Deltas)
+        return Deltas ? Named(asked, classified, withdrawals) : classified;
+    }
+
+    /// <summary>
+    /// The answer under a name a later request can build on, unless the document went away while it
+    /// was being made.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Removing an entry and publishing one are one decision under one lock, which is the arrangement
+    /// <see cref="DocumentSemantics"/> already had to arrive at and for the same reason: a compile
+    /// takes long enough for a close to land inside it, and an answer that finished afterwards would
+    /// put back what <see cref="Forget"/> had just taken away -- leaving an integer array for a buffer
+    /// the editor has shut and nothing can ever ask about again. A remove that has already happened is
+    /// seen as a higher count, and one that has not cannot slip in between the comparison and the
+    /// assignment.
+    /// </para>
+    /// <para>
+    /// One counter for every document rather than one apiece, as there. Closing one document declines
+    /// to name an answer for another that was in flight at that instant; the caller still gets its
+    /// answer, and the client simply asks for a whole one next time.
+    /// </para>
+    /// <para>
+    /// The difference itself is computed outside the lock. What has to be atomic is deciding whether
+    /// to keep an answer and keeping it, not walking two integer arrays.
+    /// </para>
+    /// </remarks>
+    private object? Named(ClassificationRequest asked, SemanticTokens classified, int withdrawals)
+    {
+        Painted? held;
+        Painted published;
+
+        lock (_retention)
         {
-            return classified;
+            if (_withdrawals != withdrawals)
+            {
+                return classified;
+            }
+
+            _published.TryGetValue(asked.Uri.Key, out held);
+
+            published = new Painted(NextResultId(), classified.Data);
+            _published[asked.Uri.Key] = published;
         }
-
-        _published.TryGetValue(asked.Uri.Key, out var held);
-
-        var published = new Painted(NextResultId(), classified.Data);
-        _published[asked.Uri.Key] = published;
 
         return held is not null && string.Equals(held.ResultId, asked.PreviousResultId, StringComparison.Ordinal)
             ? new SemanticTokensDelta
