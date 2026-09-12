@@ -322,9 +322,13 @@ severities mapped rather than invented, help text kept as its own thing, a locat
 published at the start of its document, and a `protoc` failure landing both in the schema it names
 and on the import that reached it.
 
-Classification (spec 6.5) lexes and nothing more, so it answers for a file that does not parse. The
-legend is the whole standard token set, declared now because it is negotiated once and indexed by
-position; identifiers are uniformly `variable` until a semantic model can do better.
+Classification (spec 6.5) is two layers over one fixed legend. The first lexes and nothing more, so it
+answers for a file that does not parse; the second gives each identifier the category of the symbol
+the binder resolved it to, and wherever it resolved nothing — a half-typed name, a file that did not
+parse, a schema that would not load — the first layer's answer stands. The legend is the whole
+standard token set, declared once because it is negotiated once and indexed by position, which is
+what let the second layer ship by emitting different numbers rather than by changing what the numbers
+mean. What the second layer costs, and why it never costs colour, is in *Serving an editor*.
 
 Completion is the same bargain and one step further out. `CompletionProvider` decides which context
 the caret is in before it asks what belongs there, and today recognizes one — inside an `import
