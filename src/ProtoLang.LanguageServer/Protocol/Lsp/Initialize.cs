@@ -61,7 +61,36 @@ public sealed record TextDocumentClientCapabilities
 
     /// <summary>Present when the client will ask for a document outline at all.</summary>
     public DocumentSymbolClientCapabilities? DocumentSymbol { get; init; }
+
+    /// <summary>Present when the client will ask where a symbol is used at all.</summary>
+    public ReferenceClientCapabilities? References { get; init; }
+
+    /// <summary>Present when the client will ask what else the caret's name touches at all.</summary>
+    public DocumentHighlightClientCapabilities? DocumentHighlight { get; init; }
+
+    /// <summary>Present when the client will ask for signature help at all.</summary>
+    public SignatureHelpClientCapabilities? SignatureHelp { get; init; }
 }
+
+/// <inheritdoc cref="ClientCapabilities"/>
+/// <remarks>
+/// Deliberately empty, on the same terms as <see cref="CompletionClientCapabilities"/>. LSP's
+/// reference capability says only whether the client registers for the request dynamically, which
+/// this server does not offer for anything.
+/// </remarks>
+public sealed record ReferenceClientCapabilities;
+
+/// <inheritdoc cref="ReferenceClientCapabilities" path="/remarks"/>
+public sealed record DocumentHighlightClientCapabilities;
+
+/// <inheritdoc cref="ClientCapabilities"/>
+/// <remarks>
+/// Deliberately empty. LSP's signature-help capability describes which content formats a client
+/// accepts for the documentation on a signature and whether it understands a per-signature active
+/// parameter -- and this server sends no documentation and carries the active parameter where every
+/// client reads it. What the members would have decided, they decide by their absence.
+/// </remarks>
+public sealed record SignatureHelpClientCapabilities;
 
 /// <inheritdoc cref="ClientCapabilities"/>
 /// <remarks>
@@ -338,6 +367,23 @@ public sealed record ServerCapabilities
     /// <summary>Null when the client never said it wanted a document outline.</summary>
     /// <inheritdoc cref="HoverProvider" path="/remarks"/>
     public bool? DocumentSymbolProvider { get; init; }
+
+    /// <summary>Null when the client never said it wanted to find references.</summary>
+    /// <inheritdoc cref="HoverProvider" path="/remarks"/>
+    public bool? ReferencesProvider { get; init; }
+
+    /// <summary>Null when the client never said it wanted occurrence highlighting.</summary>
+    /// <inheritdoc cref="HoverProvider" path="/remarks"/>
+    public bool? DocumentHighlightProvider { get; init; }
+
+    /// <summary>Null when the client never said it wanted signature help.</summary>
+    /// <remarks>
+    /// The exception to the rule above, and not by preference: the characters that open the panel and
+    /// the ones that move it along are stated in the options object and nowhere else. A bare
+    /// <c>true</c> would advertise a request no client would ever send, because nothing would have
+    /// told it when to.
+    /// </remarks>
+    public SignatureHelpOptions? SignatureHelpProvider { get; init; }
 
     public WorkspaceServerCapabilities? Workspace { get; init; }
 }

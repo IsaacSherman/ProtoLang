@@ -92,20 +92,39 @@ public sealed class PositionRequest(
     public static PositionRequest? Read(
         DocumentStore documents, ConfigurationSync configuration, TextDocumentPositionParams message)
     {
-        ArgumentNullException.ThrowIfNull(documents);
-        ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(message);
 
-        if (!DocumentUri.TryParse(message.TextDocument.Uri, out var uri)
-            || documents.Find(uri) is not { } document)
+        return Read(documents, configuration, message.TextDocument, message.Position);
+    }
+
+    /// <inheritdoc cref="Read(DocumentStore, ConfigurationSync, TextDocumentPositionParams)"/>
+    /// <remarks>
+    /// The two pieces rather than the shape that usually carries them, for the requests whose params
+    /// carry something else as well -- a reference request states whether it wants the declaration.
+    /// Building a throwaway <see cref="TextDocumentPositionParams"/> to hand to the overload above
+    /// would be assembling a message nobody sent in order to take it apart again.
+    /// </remarks>
+    public static PositionRequest? Read(
+        DocumentStore documents,
+        ConfigurationSync configuration,
+        TextDocumentIdentifier document,
+        Position position)
+    {
+        ArgumentNullException.ThrowIfNull(documents);
+        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(document);
+        ArgumentNullException.ThrowIfNull(position);
+
+        if (!DocumentUri.TryParse(document.Uri, out var uri)
+            || documents.Find(uri) is not { } open)
         {
             return null;
         }
 
         return new PositionRequest(
             uri!,
-            document,
+            open,
             configuration.Current,
-            EditorPositions.OffsetOf(document.Lines, message.Position));
+            EditorPositions.OffsetOf(open.Lines, position));
     }
 }

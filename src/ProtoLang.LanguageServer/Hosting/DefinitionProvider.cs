@@ -1,5 +1,3 @@
-using ProtoLang.Diagnostics;
-using ProtoLang.Symbols;
 using ProtoLang.LanguageServer.Protocol;
 using ProtoLang.LanguageServer.Protocol.Lsp;
 using ProtoLang.LanguageServer.Workspace;
@@ -118,7 +116,7 @@ public sealed class DefinitionProvider
         var compiled = _semantics.For(asked.Document, asked.Configuration, cancellationToken);
 
         if (DeclaredSymbol.At(compiled, asked.Offset) is not { } symbol
-            || Target(symbol, asked.Uri) is not { } target)
+            || SymbolLocations.DeclarationOf(symbol, asked.Uri) is not { } target)
         {
             return null;
         }
@@ -134,50 +132,4 @@ public sealed class DefinitionProvider
             }
             : new[] { new Location(target.Uri, EditorPositions.RangeOf(target.Name)) };
     }
-
-    /// <summary>Where a symbol is written, whichever compiler owns the file it is written in.</summary>
-    /// <remarks>
-    /// The ProtoLang side first, because it is the side with no reason to fail: a declaration this
-    /// compilation produced is in the buffer that produced it. The schema side answers for
-    /// everything else and may decline, which is what an unreadable <c>.proto</c> looks like from
-    /// here.
-    /// </remarks>
-    private static Declared? Target(DeclaredSymbol symbol, DocumentUri asked)
-    {
-        if (symbol.Site is { } site)
-        {
-            return new Declared(UriOf(site.Document, asked), site.Extent, site.Name.Span);
-        }
-
-        return symbol.Schema?.Site is { } declared
-            ? new Declared(DocumentUri.FromPath(declared.Path).ToString(), declared.Extent, declared.Name)
-            : null;
-    }
-
-    /// <summary>Which document a ProtoLang declaration is in, as the client spells documents.</summary>
-    /// <remarks>
-    /// <para>
-    /// <b>The spelling the client sent, wherever that is the file being described.</b> A URI derived
-    /// from a path is this server's spelling of it, and the two differ: an editor sends
-    /// <c>file:///c%3A/Users/...</c> and <see cref="DocumentUri.FromPath"/> produces
-    /// <c>file:///C:/Users/...</c>. A client that matches the target against its own open documents
-    /// by string then fails to recognize the buffer the caret is already in, and opens a second
-    /// editor onto the same file. The request already carries the spelling that works, so nothing is
-    /// gained by re-deriving one.
-    /// </para>
-    /// <para>
-    /// Whether it <em>is</em> the same file is asked of <see cref="PathIdentity"/> rather than
-    /// assumed, although a compilation holds one source today: #27 makes it stop being true, and a
-    /// declaration that silently claimed to be in the wrong file would navigate to the right line of
-    /// the wrong buffer. A source with no path is an unsaved buffer, whose only handle is the URI the
-    /// client opened it under -- which is this one.
-    /// </para>
-    /// </remarks>
-    private static string UriOf(SourceIdentity source, DocumentUri asked)
-        => source.Path is { } path && !PathIdentity.AreSame(path, asked.Path)
-            ? DocumentUri.FromPath(path).ToString()
-            : asked.ToString();
-
-    /// <summary>A declaration reduced to what the wire carries: a document and two ranges.</summary>
-    private sealed record Declared(string Uri, SourceSpan Extent, SourceSpan Name);
 }
