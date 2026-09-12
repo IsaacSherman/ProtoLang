@@ -25,6 +25,9 @@ public static class Methods
     public const string Hover = "textDocument/hover";
     public const string Definition = "textDocument/definition";
     public const string DocumentSymbol = "textDocument/documentSymbol";
+    public const string References = "textDocument/references";
+    public const string DocumentHighlight = "textDocument/documentHighlight";
+    public const string SignatureHelp = "textDocument/signatureHelp";
 
     public const string DidChangeConfiguration = "workspace/didChangeConfiguration";
     public const string DidChangeWorkspaceFolders = "workspace/didChangeWorkspaceFolders";

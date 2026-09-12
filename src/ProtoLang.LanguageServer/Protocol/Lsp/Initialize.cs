@@ -61,6 +61,59 @@ public sealed record TextDocumentClientCapabilities
 
     /// <summary>Present when the client will ask for a document outline at all.</summary>
     public DocumentSymbolClientCapabilities? DocumentSymbol { get; init; }
+
+    /// <summary>Present when the client will ask where a symbol is used at all.</summary>
+    public ReferenceClientCapabilities? References { get; init; }
+
+    /// <summary>Present when the client will ask what else the caret's name touches at all.</summary>
+    public DocumentHighlightClientCapabilities? DocumentHighlight { get; init; }
+
+    /// <summary>Present when the client will ask for signature help at all.</summary>
+    public SignatureHelpClientCapabilities? SignatureHelp { get; init; }
+}
+
+/// <inheritdoc cref="ClientCapabilities"/>
+/// <remarks>
+/// Deliberately empty, on the same terms as <see cref="CompletionClientCapabilities"/>. LSP's
+/// reference capability says only whether the client registers for the request dynamically, which
+/// this server does not offer for anything.
+/// </remarks>
+public sealed record ReferenceClientCapabilities;
+
+/// <inheritdoc cref="ReferenceClientCapabilities" path="/remarks"/>
+public sealed record DocumentHighlightClientCapabilities;
+
+/// <inheritdoc cref="ClientCapabilities"/>
+/// <remarks>
+/// Almost empty. What this server sends is one signature with one label, and most of what LSP lets a
+/// client say here -- which content formats it accepts for documentation, whether it understands a
+/// per-signature active parameter -- decides nothing, because there is no documentation and the
+/// active parameter is carried where every client reads it. The one member that does decide
+/// something is how a parameter may point into the label.
+/// </remarks>
+public sealed record SignatureHelpClientCapabilities
+{
+    public SignatureInformationClientCapabilities? SignatureInformation { get; init; }
+}
+
+/// <inheritdoc cref="SignatureHelpClientCapabilities"/>
+public sealed record SignatureInformationClientCapabilities
+{
+    public ParameterInformationClientCapabilities? ParameterInformation { get; init; }
+}
+
+/// <inheritdoc cref="SignatureHelpClientCapabilities"/>
+public sealed record ParameterInformationClientCapabilities
+{
+    /// <summary>Whether a parameter's label may be a pair of offsets rather than a substring.</summary>
+    /// <remarks>
+    /// Consulted rather than assumed, because the two forms are not compatible on the wire: a client
+    /// that did not ask for offsets and is sent an array finds no string where it expects one and
+    /// shows the parameter unhighlighted, or nothing at all. Both forms are produced from the same
+    /// ranges -- see <see cref="ParameterInformation"/> -- so what this decides is only how much of
+    /// what is already known survives the trip.
+    /// </remarks>
+    public bool? LabelOffsetSupport { get; init; }
 }
 
 /// <inheritdoc cref="ClientCapabilities"/>
@@ -338,6 +391,23 @@ public sealed record ServerCapabilities
     /// <summary>Null when the client never said it wanted a document outline.</summary>
     /// <inheritdoc cref="HoverProvider" path="/remarks"/>
     public bool? DocumentSymbolProvider { get; init; }
+
+    /// <summary>Null when the client never said it wanted to find references.</summary>
+    /// <inheritdoc cref="HoverProvider" path="/remarks"/>
+    public bool? ReferencesProvider { get; init; }
+
+    /// <summary>Null when the client never said it wanted occurrence highlighting.</summary>
+    /// <inheritdoc cref="HoverProvider" path="/remarks"/>
+    public bool? DocumentHighlightProvider { get; init; }
+
+    /// <summary>Null when the client never said it wanted signature help.</summary>
+    /// <remarks>
+    /// The exception to the rule above, and not by preference: the characters that open the panel and
+    /// the ones that move it along are stated in the options object and nowhere else. A bare
+    /// <c>true</c> would advertise a request no client would ever send, because nothing would have
+    /// told it when to.
+    /// </remarks>
+    public SignatureHelpOptions? SignatureHelpProvider { get; init; }
 
     public WorkspaceServerCapabilities? Workspace { get; init; }
 }

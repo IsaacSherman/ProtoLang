@@ -166,6 +166,9 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | What could be typed at a position | `CompletionProvider`, `ImportPathContext` | [Hosting/CompletionProvider.cs](src/ProtoLang.LanguageServer/Hosting/CompletionProvider.cs) |
 | What a request is about, and what it owes for leaving the process | `DocumentRequest`, `DeferredAnswers` | [Hosting/DocumentRequest.cs](src/ProtoLang.LanguageServer/Hosting/DocumentRequest.cs), [Hosting/DeferredAnswers.cs](src/ProtoLang.LanguageServer/Hosting/DeferredAnswers.cs) |
 | What the caret names, and where that was declared | `DeclaredSymbol` | [Hosting/DeclaredSymbol.cs](src/ProtoLang.LanguageServer/Hosting/DeclaredSymbol.cs) |
+| Everywhere that symbol is written | `SymbolOccurrences`, `ReferenceProvider`, `HighlightProvider` | [Hosting/SymbolOccurrences.cs](src/ProtoLang.LanguageServer/Hosting/SymbolOccurrences.cs), [Hosting/ReferenceProvider.cs](src/ProtoLang.LanguageServer/Hosting/ReferenceProvider.cs) |
+| Which document a span is in, as the client spells it | `SymbolLocations` | [Hosting/SymbolLocations.cs](src/ProtoLang.LanguageServer/Hosting/SymbolLocations.cs) |
+| The call being typed, and what it expects next | `CallSubject`, `SignatureHelpProvider` | [Hosting/CallSubject.cs](src/ProtoLang.LanguageServer/Hosting/CallSubject.cs), [Hosting/SignatureHelpProvider.cs](src/ProtoLang.LanguageServer/Hosting/SignatureHelpProvider.cs) |
 | What the pointer resting somewhere says | `HoverProvider`, `HoverCard` | [Hosting/HoverProvider.cs](src/ProtoLang.LanguageServer/Hosting/HoverProvider.cs), [Hosting/HoverCard.cs](src/ProtoLang.LanguageServer/Hosting/HoverCard.cs) |
 | Where a name leads | `DefinitionProvider` | [Hosting/DefinitionProvider.cs](src/ProtoLang.LanguageServer/Hosting/DefinitionProvider.cs) |
 | The shape of a file | `DocumentOutline` | [Hosting/DocumentOutline.cs](src/ProtoLang.LanguageServer/Hosting/DocumentOutline.cs) |
@@ -247,8 +250,9 @@ server already holds. A handler that **leaves the process** — one that opens a
 a tool — opts out with `OnRequest(..., concurrent: true)`, because answered in order it holds the
 reading worker for as long as the outside world takes, and behind it sit every `didChange`, every
 `didClose`, and the `$/cancelRequest` that would have shortened it. Completion was the first such
-handler and is where the rules were worked out; hover, go-to-definition and classification have since
-joined it. What one owes in return is four things, all of them easy to get wrong:
+handler and is where the rules were worked out; hover, go-to-definition, classification,
+find-references, occurrence highlighting and signature help have since joined it. What one owes in
+return is four things, all of them easy to get wrong:
 
 - **Settle which buffer the request is about before yielding.** `CompletionProvider.Read` runs on the
   ordered worker; only the walk is deferred. Deferring the lookup lets the `didChange` behind the
@@ -267,15 +271,17 @@ joined it. What one owes in return is four things, all of them easy to get wrong
   request: it sits inside the same cleanup as the walk, so a request that ends while waiting is still
   retired, and gives back only a slot it actually took.
 
-Hover, go-to-definition, classification and the outline arrive on the same terms and split two ways.
-The outline lexes and parses and stops, so it alone still answers on the ordered worker, never waits
-on protoc, and survives a file that does not parse — which is the point of it, since an outline that
-vanishes while you type is worse than a stale one. The other three can only be answered by the
-binder, so each compiles through `DocumentSemantics` and each is concurrent, and everything the
-architecture above demands of a concurrent handler is stated once in
-[`DeferredAnswers`](src/ProtoLang.LanguageServer/Hosting/DeferredAnswers.cs) rather than four times:
-supersession per document, a bounded gate, abandoning work nobody waits for, and the staleness
-refusal. One instance per request kind, because a passing mouse must not cancel a deliberate click.
+Every request an editor sends arrives on the same terms and splits two ways. The outline lexes and
+parses and stops, so it alone still answers on the ordered worker, never waits on protoc, and
+survives a file that does not parse — which is the point of it, since an outline that vanishes while
+you type is worse than a stale one. Everything else can only be answered by the binder, so each
+compiles through `DocumentSemantics` and each is concurrent, and everything the architecture above
+demands of a concurrent handler is stated once in
+[`DeferredAnswers`](src/ProtoLang.LanguageServer/Hosting/DeferredAnswers.cs) rather than once per
+handler: supersession per document, a bounded gate, abandoning work nobody waits for, and the
+staleness refusal. One instance per request kind, because a passing mouse must not cancel a
+deliberate click — and a caret sliding through a file must not cancel the reference list somebody
+asked for.
 
 Classification is the one that moved. #42 answered it from the lexer in the instant it was read and
 #50 gave every identifier the category of the symbol the binder resolved it to, which means the
@@ -288,10 +294,26 @@ differences rather than whole answers is sent the integers that changed, one ret
 document, paired with the name it was published under so an answer that was never delivered cannot be
 diffed against.
 
+Find-references and occurrence highlighting are one question rendered twice, and they share the
+lookup rather than each doing it: `SymbolOccurrences` turns a caret into a symbol and every place that
+symbol is written, one sends locations and the other sends ranges to tint. Being semantic rather than
+textual falls out of that rather than being implemented — identity is a `SymbolId` and never a
+spelling, so two locals of one name in sibling blocks answer separately and a name inside a string
+answers not at all. The reference index is consulted directly and nothing is cached on top of it;
+#57 is what decides whether that needs to change.
+
+Signature help is the one that cannot ask the tree. A call being typed has no closing parenthesis, and
+the tree records no comma positions, no span for the argument list and no flag saying the parenthesis
+was closed — so `CallSubject` finds which call and which argument in the token stream, the way import
+path completion does. Which method it names still comes from the binder: the reference to the method
+name is recorded before the arity check that a half-written call nearly always fails, so the identity
+survives even though the node carrying the signature does not.
+
 What they answer is joined in one place. `DeclaredSymbol` turns a caret into a symbol and then asks
 whichever compiler owns the declaration — `SemanticModel.DeclarationOf` for a local, a parameter, a
 loop binding or a method, `DescriptorBundle.DeclarationOf` for a field, an enum constant, a message or
-an enum — so neither hover nor definition knows which side a symbol falls on. Hover adds the type,
+an enum — so no surface has to know which side a symbol falls on, and
+`SymbolLocations` is the one place a span becomes a document the client recognizes. Hover adds the type,
 the `.proto` comment, and the one thing the source text cannot show: the arithmetic policy in force,
 read off the behavior the binder stamped on the node rather than off the configuration, and stated
 only where a node carries one (spec 10.4). Capabilities are honoured throughout: links carry a
@@ -367,9 +389,10 @@ One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized b
 `SourceSpanTests`, `CompilationTests`, `InMemoryCompilationTests`, `PartialBindingTests`,
 `SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `ScopeQueryTests`,
 `DescriptorCacheTests`, `SchemaDeclarationTests`, `ProcessSupervisionTests`, `CompileSupervisionTests`,
-`WorkspaceConfigurationTests`, `LanguageServerTests`, `SemanticTokenTests`, `SchemaCatalogTests`,
+`WorkspaceConfigurationTests`, `LanguageServerTests`, `SemanticTokenTests`,
+`SemanticRefinementTests`, `SchemaCatalogTests`,
 `ImportCompletionTests`, `SchemaCompletionTests`, `HoverTests`, `DefinitionTests`,
-`DocumentSymbolTests`,
+`DocumentSymbolTests`, `ReferenceTests`, `SignatureHelpTests`,
 `TreeWalkTests`, `ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`,
 and the scaffolding and smoke suites.
 
@@ -433,5 +456,8 @@ was missing rather than to reshape one: a schema declaration is now reachable by
 by descriptor, which is what a caret on a type name produces, and the walk that finds it is the walk
 the source index already performed. #50 finished the semantic token work #42 left half done, and
 reached Core once, additively: the reference index already held every name a file resolved, in order,
-and had no way to hand over the whole sequence at once. Everything from here should be additive: new
+and had no way to hand over the whole sequence at once. #51 answered the other direction — who uses
+this, what else is this name, what does this call expect next — and reached Core only for renderings
+and lookups over what was already there: the method behind an identity, and where each parameter sits
+inside the signature line a hover already shows. Everything from here should be additive: new
 types, new projects. Rewriting the binder is the signal to stop and re-scope.

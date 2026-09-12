@@ -132,3 +132,58 @@ public sealed record LocationLink(
     string TargetUri,
     Range TargetRange,
     Range TargetSelectionRange);
+
+/// <summary>Which document and caret to find references from, and whether to include the declaration.</summary>
+/// <remarks>
+/// The one request in this file that carries something beyond a position, which is why it is a shape
+/// of its own rather than a <see cref="TextDocumentPositionParams"/>. An editor asks both ways: the
+/// references panel usually wants the declaration among the results and a "find usages" command
+/// usually does not.
+/// </remarks>
+public sealed record ReferenceParams
+{
+    public TextDocumentIdentifier TextDocument { get; init; } = new();
+
+    public Position Position { get; init; } = new(0, 0);
+
+    public ReferenceContext Context { get; init; } = new();
+}
+
+/// <inheritdoc cref="ReferenceParams"/>
+/// <remarks>
+/// <see cref="IncludeDeclaration"/> is answerable because the index marks the declaration rather than
+/// keeping it beside the list -- see <see cref="Symbols.ReferenceKind"/>, which has a value for it for
+/// this reason. Defaulting to false is LSP's shape rather than a preference: an absent member means
+/// the client did not ask for it.
+/// </remarks>
+public sealed record ReferenceContext
+{
+    public bool IncludeDeclaration { get; init; }
+}
+
+/// <summary>One place a symbol appears in the document that was asked about.</summary>
+/// <remarks>
+/// Ranges rather than locations, because every one of them is in that one document. Find-all-references
+/// answers with <see cref="Location"/>s and may cross a file boundary; this cannot, which is what
+/// makes it cheap enough to run on a caret movement.
+/// </remarks>
+public sealed record DocumentHighlight
+{
+    public Range Range { get; init; } = new(new Position(0, 0), new Position(0, 0));
+
+    public DocumentHighlightKind Kind { get; init; } = DocumentHighlightKind.Text;
+}
+
+/// <summary>What a highlighted occurrence does with the symbol it names.</summary>
+/// <remarks>
+/// The three values <see cref="Symbols.ReferenceKind"/> already records, which is not a coincidence:
+/// that enum says it has three because this one separates a read from a write. A declaration maps to
+/// <see cref="Text"/> because LSP offers no kind for it and tinting it as a read would be saying
+/// something untrue about the one occurrence a reader most wants to pick out.
+/// </remarks>
+public enum DocumentHighlightKind
+{
+    Text = 1,
+    Read = 2,
+    Write = 3,
+}

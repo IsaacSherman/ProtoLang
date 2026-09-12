@@ -106,6 +106,18 @@ public sealed class LanguageServerClient : IAsyncDisposable
             {
                 HierarchicalDocumentSymbolSupport = true,
             },
+            References = new ReferenceClientCapabilities(),
+            DocumentHighlight = new DocumentHighlightClientCapabilities(),
+            SignatureHelp = new SignatureHelpClientCapabilities
+            {
+                SignatureInformation = new SignatureInformationClientCapabilities
+                {
+                    ParameterInformation = new ParameterInformationClientCapabilities
+                    {
+                        LabelOffsetSupport = true,
+                    },
+                },
+            },
         },
         General = new GeneralClientCapabilities { PositionEncodings = ["utf-16"] },
     };

@@ -56,6 +56,9 @@ public sealed class LanguageServerHost : IDisposable
     private readonly HoverProvider _hover;
     private readonly DefinitionProvider _definition;
     private readonly ClassificationProvider _classification;
+    private readonly ReferenceProvider _references;
+    private readonly HighlightProvider _highlights;
+    private readonly SignatureHelpProvider _signatures;
 
     private DiagnosticMapper _mapper = new(relatedInformationSupported: false);
 
@@ -104,6 +107,10 @@ public sealed class LanguageServerHost : IDisposable
         _definition = new DefinitionProvider(_documents, _configuration, _loaders, semantics: _semantics);
         _classification = new ClassificationProvider(
             _documents, _configuration, _loaders, semantics: _semantics);
+        _references = new ReferenceProvider(_documents, _configuration, _loaders, semantics: _semantics);
+        _highlights = new HighlightProvider(_documents, _configuration, _loaders, semantics: _semantics);
+        _signatures = new SignatureHelpProvider(
+            _documents, _configuration, _loaders, semantics: _semantics);
 
         Register();
     }
@@ -145,6 +152,18 @@ public sealed class LanguageServerHost : IDisposable
     /// <inheritdoc cref="Completion" path="/remarks"/>
     public ClassificationProvider Classification => _classification;
 
+    /// <summary>What answers a find-references request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public ReferenceProvider References => _references;
+
+    /// <summary>What answers an occurrence-highlight request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public HighlightProvider Highlights => _highlights;
+
+    /// <summary>What answers a signature help request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public SignatureHelpProvider Signatures => _signatures;
+
     /// <summary>What compiles a buffer for the questions asked between keystrokes, for a test and #58.</summary>
     /// <remarks>
     /// Published so that "this buffer is compiled once however many questions are asked of it" is a
@@ -179,6 +198,15 @@ public sealed class LanguageServerHost : IDisposable
             concurrent: true);
         _connection.OnRequest(
             Methods.DocumentSymbol, (parameters, _) => Answer<DocumentSymbolParams>(parameters, Outline));
+        _connection.OnRequest(Methods.References, FindReferences, concurrent: true);
+        _connection.OnRequest(
+            Methods.DocumentHighlight,
+            (parameters, token) => AtPosition(parameters, _highlights.Read, _highlights.AnswerAsync, token),
+            concurrent: true);
+        _connection.OnRequest(
+            Methods.SignatureHelp,
+            (parameters, token) => AtPosition(parameters, _signatures.Read, _signatures.AnswerAsync, token),
+            concurrent: true);
 
         _connection.OnNotification(Methods.Initialized, (_, token) => Initialized(token));
         _connection.OnNotification(Methods.Exit, (_, _) => Exit());
@@ -347,6 +375,8 @@ public sealed class LanguageServerHost : IDisposable
         var deltas = WantsDeltas(capabilities);
 
         _definition.LinkSupport = capabilities?.TextDocument?.Definition?.LinkSupport is true;
+        _signatures.LabelOffsets = capabilities?.TextDocument?.SignatureHelp?.SignatureInformation?
+            .ParameterInformation?.LabelOffsetSupport is true;
         _classification.Client = ClientLegend.Of(capabilities?.TextDocument?.SemanticTokens);
         _classification.Deltas = deltas;
         _outlineNests = capabilities?.TextDocument?.DocumentSymbol?.HierarchicalDocumentSymbolSupport is true;
@@ -376,6 +406,16 @@ public sealed class LanguageServerHost : IDisposable
                 HoverProvider = capabilities?.TextDocument?.Hover is null ? null : true,
                 DefinitionProvider = capabilities?.TextDocument?.Definition is null ? null : true,
                 DocumentSymbolProvider = capabilities?.TextDocument?.DocumentSymbol is null ? null : true,
+                ReferencesProvider = capabilities?.TextDocument?.References is null ? null : true,
+                DocumentHighlightProvider =
+                    capabilities?.TextDocument?.DocumentHighlight is null ? null : true,
+                SignatureHelpProvider = capabilities?.TextDocument?.SignatureHelp is null
+                    ? null
+                    : new SignatureHelpOptions
+                    {
+                        TriggerCharacters = SignatureHelpProvider.TriggerCharacters,
+                        RetriggerCharacters = SignatureHelpProvider.RetriggerCharacters,
+                    },
                 Workspace = new WorkspaceServerCapabilities
                 {
                     WorkspaceFolders = new WorkspaceFoldersServerCapabilities(),
@@ -383,6 +423,29 @@ public sealed class LanguageServerHost : IDisposable
             },
             ServerInfo = new ServerInfo("protolang-server", Version),
         });
+    }
+
+    /// <summary>
+    /// Everywhere a name is used: read here, in order, and produced anywhere.
+    /// </summary>
+    /// <remarks>
+    /// Its own handler rather than <see cref="AtPosition"/>, because the params carry a caret
+    /// <em>and</em> whether the declaration belongs in the answer. What may not move off this worker
+    /// is unchanged and is the reason the shape exists at all: which buffer the request is about is
+    /// settled before this returns. See <see cref="Complete"/> for why, at length.
+    /// </remarks>
+    private async Task<object?> FindReferences(
+        JsonElement? parameters, CancellationToken cancellationToken)
+    {
+        RequireRunning();
+
+        var message = LspJson.Read<ReferenceParams>(parameters) ?? throw Missing<ReferenceParams>();
+
+        return _references.Read(message) is not { } asked
+            ? null
+            : await _references
+                .AnswerAsync(asked, message.Context.IncludeDeclaration, cancellationToken)
+                .ConfigureAwait(false);
     }
 
     /// <summary>Whether this client asked to be sent differences rather than whole answers.</summary>
@@ -537,6 +600,9 @@ public sealed class LanguageServerHost : IDisposable
         _hover.Forget(uri);
         _definition.Forget(uri);
         _classification.Forget(uri);
+        _references.Forget(uri);
+        _highlights.Forget(uri);
+        _signatures.Forget(uri);
 
         // And what was remembered about it. Every question comes through the store, so once the
         // document is closed nothing can ask -- and an entry nothing can ask for is a syntax tree and
