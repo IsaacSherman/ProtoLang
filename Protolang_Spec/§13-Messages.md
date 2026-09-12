@@ -13,7 +13,7 @@ This is the one place the initial backends disagreed silently. Reading an unset 
 raises `NullReferenceException` in C# and returns the default instance -- so, zero -- in C++. Both
 are the correct idiomatic translation for their runtime. Neither can be made to match the other
 without a runtime check in every target, so the situation is made unrepresentable instead, which is
-the same choice `on_zero` makes for a zero divisor ([10.2.1](./§10-Numeric Semantics.md#1021-the-on_zero-clause)).
+the same choice `on_zero` makes for a zero divisor ([10.2.1](./§10-Numeric%20Semantics.md#1021-the-on_zero-clause)).
 
 Normative Requirements:
 
@@ -22,7 +22,7 @@ Normative Requirements:
 - "Using the value" is reading a field through it, calling a method on it, passing it as an
   argument, or binding it to a local. Each launders the same divergence, so the rule is stated once
   about the value rather than four times about its uses.
-- Presence is established by `has` ([8.4](./§8-Type System.md#84-nullability-and-presence)), in any of these shapes:
+- Presence is established by `has` ([8.4](./§8-Type%20System.md#84-nullability-and-presence)), in any of these shapes:
   - inside `if has f { ... }`;
   - in the `else` of `if not has f { ... } else { ... }`;
   - after `if not has f { return ...; }`, or any guard whose branch cannot complete normally;
@@ -40,13 +40,13 @@ Normative Requirements:
 - Because the guard is a compile-time requirement, a guarded read emits the plain accessor chain in
   every backend. The rule costs nothing at runtime.
 
-`Presence/UnsetMessageRead` in `protolang.config.xml` ([10.4](./§10-Numeric Semantics.md#104-compile-time-policy)) names this behavior. It has one legal
+`Presence/UnsetMessageRead` in `protolang.config.xml` ([10.4](./§10-Numeric%20Semantics.md#104-compile-time-policy)) names this behavior. It has one legal
 value today, `RequireGuard`.
 
 Open Questions:
 
 - Oneof fields, which have a case discriminator this says nothing about.
-- Map fields, which are not supported at all ([14.2](./§14-Repeated Fields and Collections.md#142-maps)).
+- Map fields, which are not supported at all ([14.2](./§14-Repeated%20Fields%20and%20Collections.md#142-maps)).
 
 ### 13.2 Message Construction
 

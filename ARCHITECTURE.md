@@ -81,8 +81,14 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    [`SchemaDeclaration`](src/ProtoLang.Core/Symbols/SchemaDeclaration.cs) — the `.proto` it was
    written in, the range of the declaration and of its name, and the comments around it — through a
    per-file [`SchemaSourceIndex`](src/ProtoLang.Core/Binding/SchemaSourceIndex.cs) built on first ask
-   and kept on the bundle. That is what lets go-to-definition and hover cross the file boundary,
-   which is where most of what a ProtoLang file talks about lives.
+   and kept on the bundle. The same question is answerable from a `SymbolId` rather than a descriptor,
+   which is the handle a caret produces: a name in type position resolves to a type and leaves no IR
+   node behind, so an identity is all there is to ask with. Both doors are fed by one walk over what a
+   schema declares ([`SchemaSymbols`](src/ProtoLang.Core/Binding/SchemaSymbols.cs)) — the bundle uses
+   it to index which file declares each identity, the source index to address each declaration's
+   `SourceCodeInfo` path — because two descents disagree first about an enum nested in a message.
+   That is what lets go-to-definition and hover cross the file boundary, which is where most of what a
+   ProtoLang file talks about lives.
 7. **Bind.** [`Binder.Bind`](src/ProtoLang.Core/Binding/Binder.cs) resolves names against the
    descriptors and produces typed IR. It does **not** throw on bad input: an unresolved name becomes
    `ErrorType` (`PL0037`) and binding continues, a name the parser never saw resolves to `ErrorType`
@@ -125,6 +131,12 @@ constant or a type, whose declaration is in a `.proto` this compiler does not ow
 a keystroke produces a new compilation and a new model over it, and the index that merges the
 binder's references with the declarations is built on the first question that needs it.
 
+What the model deliberately cannot answer is where a schema element is declared, and it says so:
+that is a `.proto` this compiler does not own. The other side is `DescriptorBundle.DeclarationOf`,
+which takes a descriptor or a `SymbolId`, and `SchemaTypes.Find`, which turns an identity back into
+the message or enum it names. A host joins the two — see *Serving an editor* — and exactly one of them
+answers for any symbol that resolved.
+
 `ScopeAt` is the third question: what a bare identifier written at this offset could mean, as the
 names in scope there with their types and declarations, plus the receiver they are looked up against.
 It is narrower than "everything nameable" on purpose — a method resolves only in call position and a
@@ -151,6 +163,12 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | Which file a schema path names | `SchemaLookup` | [Binding/SchemaLookup.cs](src/ProtoLang.Core/Binding/SchemaLookup.cs) |
 | Which roots are searched, and what they hold | `SchemaCatalog`, `SchemaCandidate` | [Binding/SchemaCatalog.cs](src/ProtoLang.Core/Binding/SchemaCatalog.cs) |
 | What could be typed at a position | `CompletionProvider`, `ImportPathContext` | [Hosting/CompletionProvider.cs](src/ProtoLang.LanguageServer/Hosting/CompletionProvider.cs) |
+| What a request is about, and what it owes for leaving the process | `DocumentRequest`, `DeferredAnswers` | [Hosting/DocumentRequest.cs](src/ProtoLang.LanguageServer/Hosting/DocumentRequest.cs), [Hosting/DeferredAnswers.cs](src/ProtoLang.LanguageServer/Hosting/DeferredAnswers.cs) |
+| What the caret names, and where that was declared | `DeclaredSymbol` | [Hosting/DeclaredSymbol.cs](src/ProtoLang.LanguageServer/Hosting/DeclaredSymbol.cs) |
+| What the pointer resting somewhere says | `HoverProvider`, `HoverCard` | [Hosting/HoverProvider.cs](src/ProtoLang.LanguageServer/Hosting/HoverProvider.cs), [Hosting/HoverCard.cs](src/ProtoLang.LanguageServer/Hosting/HoverCard.cs) |
+| Where a name leads | `DefinitionProvider` | [Hosting/DefinitionProvider.cs](src/ProtoLang.LanguageServer/Hosting/DefinitionProvider.cs) |
+| The shape of a file | `DocumentOutline` | [Hosting/DocumentOutline.cs](src/ProtoLang.LanguageServer/Hosting/DocumentOutline.cs) |
+| Compiler coordinates ↔ editor coordinates | `EditorPositions` | [Protocol/Lsp/EditorPositions.cs](src/ProtoLang.LanguageServer/Protocol/Lsp/EditorPositions.cs) |
 | What a descriptor load produced | `DescriptorBundle`, `SchemaFile` | [Binding/DescriptorBundle.cs](src/ProtoLang.Core/Binding/DescriptorBundle.cs) |
 | What decides a load, and keys it | `DescriptorRequest` | [Binding/DescriptorRequest.cs](src/ProtoLang.Core/Binding/DescriptorRequest.cs) |
 | Whether a load can be reused | `DescriptorCache`, `SchemaClosure` | [Binding/DescriptorCache.cs](src/ProtoLang.Core/Binding/DescriptorCache.cs) |
@@ -166,6 +184,7 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | Down through a tree | `SyntaxWalk`, `IrWalk` | [Semantics/SyntaxWalk.cs](src/ProtoLang.Core/Semantics/SyntaxWalk.cs) |
 | Where a declaration is | `DeclarationSite` | [Symbols/DeclarationSite.cs](src/ProtoLang.Core/Symbols/DeclarationSite.cs) |
 | Where a `.proto` declared it, and what it said | `SchemaDeclaration`, `SchemaSite`, `SchemaComments` | [Symbols/SchemaDeclaration.cs](src/ProtoLang.Core/Symbols/SchemaDeclaration.cs) |
+| Everything a schema declares, once | `SchemaSymbols` | [Binding/SchemaSymbols.cs](src/ProtoLang.Core/Binding/SchemaSymbols.cs) |
 | Which symbol a reference means | `SymbolId` | [Symbols/SymbolId.cs](src/ProtoLang.Core/Symbols/SymbolId.cs) |
 | Where a symbol is used | `SymbolReference`, `ReferenceKind` | [Symbols/SymbolReference.cs](src/ProtoLang.Core/Symbols/SymbolReference.cs) |
 | What a name is in scope over | `ScopeEntry` | [Symbols/ScopeEntry.cs](src/ProtoLang.Core/Symbols/ScopeEntry.cs) |
@@ -246,6 +265,26 @@ handler today, and what it owes in return is four things, all of them easy to ge
   request: it sits inside the same cleanup as the walk, so a request that ends while waiting is still
   retired, and gives back only a slot it actually took.
 
+Hover, go-to-definition and the outline arrive on the same terms and split three ways. The outline
+lexes and parses and stops, so it answers on the ordered worker beside classification, never waits on
+protoc, and survives a file that does not parse — which is the point of it, since an outline that
+vanishes while you type is worse than a stale one. Hover and go-to-definition can only be answered by
+the binder, so both compile through `DocumentSemantics` and both are concurrent, and everything the
+architecture above demands of a concurrent handler is stated once in
+[`DeferredAnswers`](src/ProtoLang.LanguageServer/Hosting/DeferredAnswers.cs) rather than three times:
+supersession per document, a bounded gate, abandoning work nobody waits for, and the staleness
+refusal. One instance per request kind, because a passing mouse must not cancel a deliberate click.
+
+What they answer is joined in one place. `DeclaredSymbol` turns a caret into a symbol and then asks
+whichever compiler owns the declaration — `SemanticModel.DeclarationOf` for a local, a parameter, a
+loop binding or a method, `DescriptorBundle.DeclarationOf` for a field, an enum constant, a message or
+an enum — so neither hover nor definition knows which side a symbol falls on. Hover adds the type,
+the `.proto` comment, and the one thing the source text cannot show: the arithmetic policy in force,
+read off the behavior the binder stamped on the node rather than off the configuration, and stated
+only where a node carries one (spec 10.4). Capabilities are honoured throughout: links carry a
+declaration's two ranges only to a client that declared `linkSupport`, and an outline nests only for
+one that declared it can show a tree.
+
 The buffer the client sent is the source of truth and the file on disk is never read for an open
 document. Edits are applied incrementally, in order, each against the text the one before it
 produced. A compile is debounced and coalesced, carries the document version and the configuration
@@ -312,7 +351,8 @@ One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized b
 `SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `ScopeQueryTests`,
 `DescriptorCacheTests`, `SchemaDeclarationTests`, `ProcessSupervisionTests`, `CompileSupervisionTests`,
 `WorkspaceConfigurationTests`, `LanguageServerTests`, `SemanticTokenTests`, `SchemaCatalogTests`,
-`ImportCompletionTests`,
+`ImportCompletionTests`, `SchemaCompletionTests`, `HoverTests`, `DefinitionTests`,
+`DocumentSymbolTests`,
 `TreeWalkTests`, `ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`,
 and the scaffolding and smoke suites.
 
@@ -369,5 +409,10 @@ comment are reachable from a descriptor. #54 made abandoned work stop costing an
 cancellable wait on `protoc`, an expiry that says it is one, a stated queue bound, and counters that
 turn "no leak over a working day" into a soak test. #56 opened the completion surface on the first
 line anybody writes, and reached Core to give the include roots one home rather than the two
-expressions that had been agreeing by coincidence. Everything from here should be additive: new
+expressions that had been agreeing by coincidence. #43 answered what a dot can reach and what a bare
+name may mean, from a compilation kept between keystrokes. #44 built the first navigation milestone —
+hover, the document outline, go-to-definition — and reached Core twice, both times to open a door that
+was missing rather than to reshape one: a schema declaration is now reachable by identity and not only
+by descriptor, which is what a caret on a type name produces, and the walk that finds it is the walk
+the source index already performed. Everything from here should be additive: new
 types, new projects. Rewriting the binder is the signal to stop and re-scope.

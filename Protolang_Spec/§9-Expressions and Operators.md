@@ -33,7 +33,7 @@ has
 =
 ```
 
-`has` is a prefix operator on a field, producing `bool` ([8.4](./§8-Type System.md#84-nullability-and-presence)). It sits at the same precedence as
+`has` is a prefix operator on a field, producing `bool` ([8.4](./§8-Type%20System.md#84-nullability-and-presence)). It sits at the same precedence as
 `not`, and unlike every other operator its operand is a field rather than a value -- reading the
 value is exactly what it must not do.
 

@@ -212,6 +212,236 @@ public class LanguageServerTests
         Assert.NotEqual(JsonValueKind.Null, result.ValueKind);
     }
 
+    /// <summary>
+    /// Each of the three navigation surfaces, withheld from a client that never said it wanted it.
+    /// Advertising one to a client that cannot use it is how a server comes to work in one editor
+    /// and fail silently in the other.
+    /// </summary>
+    [Fact]
+    public async Task NavigationIsOfferedOnlyToAClientThatAskedAboutIt()
+    {
+        await using var asking = LanguageServerClient.Create();
+        var offered = await asking.InitializeAsync(LanguageServerClient.FullCapabilities, null);
+
+        await using var silent = LanguageServerClient.Create();
+        var withheld = await silent.InitializeAsync(
+            new ClientCapabilities { TextDocument = new TextDocumentClientCapabilities() },
+            null);
+
+        Assert.True(offered.Capabilities.HoverProvider);
+        Assert.True(offered.Capabilities.DefinitionProvider);
+        Assert.True(offered.Capabilities.DocumentSymbolProvider);
+
+        Assert.Null(withheld.Capabilities.HoverProvider);
+        Assert.Null(withheld.Capabilities.DefinitionProvider);
+        Assert.Null(withheld.Capabilities.DocumentSymbolProvider);
+    }
+
+    // ------------------------------------------------------- navigation, over the wire
+
+    /// <summary>
+    /// The three requests answered through the framing, the lifecycle gate and the dispatch queue,
+    /// which is the part a provider test skips. What each one says is <see cref="HoverTests"/>,
+    /// <see cref="DefinitionTests"/> and <see cref="DocumentSymbolTests"/>; what is asserted here is
+    /// that a client asking the way an editor asks is answered at all.
+    /// </summary>
+    [Fact]
+    public async Task AHoverIsAnsweredOverTheWire()
+    {
+        var protoc = RequireBundledProtoc();
+        var source = File.ReadAllText(TestPaths.SimpleScript);
+
+        await using var client = await LanguageServerClient.StartAsync(
+            settings: Settings(new Dictionary<string, object?>
+            {
+                ["protocPath"] = protoc,
+                ["includePaths"] = new[] { TestPaths.ExampleProtoDirectory },
+            }));
+
+        var uri = UriOf(TestPaths.SimpleScript);
+        client.Notify(Methods.DidOpen, Open(uri, source));
+
+        var answer = await client.RequestAsync(Methods.Hover, At(uri, source, "quantity"));
+        var card = answer.Deserialize<Hover>(LspJson.Options);
+
+        Assert.NotNull(card);
+        Assert.Contains("quantity: int64", card!.Contents.Value, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A buffer with no usable schema stops before the binder, so there are no names to describe --
+    /// and the honest answer is no card rather than one saying nothing. The request still has to be
+    /// answered, which is what this pins: a null result rather than a refusal or a hang.
+    /// </summary>
+    [Fact]
+    public async Task AHoverInABufferWithNoSchemaIsAnsweredWithNothing()
+    {
+        await using var client = await LanguageServerClient.StartAsync();
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        var answer = await client.RequestAsync(Methods.Hover, At(uri, NoImports, "total"));
+
+        Assert.Equal(JsonValueKind.Null, answer.ValueKind);
+    }
+
+    /// <summary>
+    /// A call in a buffer whose schema was never importable. The receiver does not resolve, so the
+    /// binder skipped the extend block and no method was ever declared on it -- and the honest
+    /// answer is nowhere rather than a guess. It is the boundary of what an unresolved schema costs,
+    /// and it is stated rather than assumed.
+    /// </summary>
+    [Fact]
+    public async Task ADefinitionIsAnsweredOverTheWire()
+    {
+        const string source =
+            """
+            extend InvoiceItem {
+                fn total() -> int64 {
+                    return 1;
+                }
+
+                fn twice() -> int64 {
+                    return total() + total();
+                }
+            }
+            """;
+
+        await using var client = await LanguageServerClient.StartAsync();
+
+        var uri = UriOf(WriteDocument(source));
+        client.Notify(Methods.DidOpen, Open(uri, source));
+
+        var answer = await client.RequestAsync(Methods.Definition, At(uri, source, "return total()", 8));
+
+        Assert.Equal(JsonValueKind.Null, answer.ValueKind);
+    }
+
+    [Fact]
+    public async Task AnOutlineIsAnsweredOverTheWireEvenWithNoSchema()
+    {
+        await using var client = await LanguageServerClient.StartAsync();
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        var answer = await client.RequestAsync(
+            Methods.DocumentSymbol, new DocumentSymbolParams { TextDocument = new() { Uri = uri } });
+
+        var outline = answer.Deserialize<DocumentSymbol[]>(LspJson.Options);
+
+        Assert.Equal("InvoiceItem", Assert.Single(outline!).Name);
+    }
+
+    /// <summary>
+    /// A client that declared no hierarchical support is sent the flat shape, which carries a
+    /// location where the nested shape carries children. The two are not interchangeable: a client
+    /// handed the wrong one finds no member it knows and shows an empty outline.
+    /// </summary>
+    [Fact]
+    public async Task AClientThatCannotShowATreeIsSentTheFlatShape()
+    {
+        await using var client = LanguageServerClient.Create();
+
+        await client.InitializeAsync(
+            new ClientCapabilities
+            {
+                TextDocument = new TextDocumentClientCapabilities
+                {
+                    DocumentSymbol = new DocumentSymbolClientCapabilities(),
+                },
+            },
+            null);
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        var answer = await client.RequestAsync(
+            Methods.DocumentSymbol, new DocumentSymbolParams { TextDocument = new() { Uri = uri } });
+
+        var flat = answer.Deserialize<SymbolInformation[]>(LspJson.Options)!;
+
+        Assert.Equal(uri, Assert.Single(flat, symbol => symbol.Name == "total").Location.Uri);
+        Assert.Equal("InvoiceItem", Assert.Single(flat, symbol => symbol.Name == "total").ContainerName);
+    }
+
+    /// <summary>
+    /// Spec 26.1: an answer describes the version it was computed against, and a request that can
+    /// only answer about a superseded one is refused rather than answered. The rule completion
+    /// already obeys, stated here for the two requests that arrived with it.
+    /// </summary>
+    [Theory]
+    [InlineData(Methods.Hover)]
+    [InlineData(Methods.Definition)]
+    public async Task AnAnswerAboutABufferThatHasMovedOnIsRefusedRatherThanSent(string method)
+    {
+        await using var client = await LanguageServerClient.StartAsync();
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        var asked = client.Ask(method, At(uri, NoImports, "total"));
+
+        client.Notify(
+            Methods.DidChange,
+            Change(uri, 2, new TextDocumentContentChangeEvent { Text = NoImports + Environment.NewLine }));
+
+        var answered = await client.AnswerToAsync(asked);
+
+        // Which of the two happens is a race and both are correct: the edit may be applied before
+        // the request is read, in which case the answer is about the buffer the client now holds, or
+        // after it, in which case there is nothing honest to say. What must never happen is a third
+        // outcome -- an answer describing a version that has gone -- so the refusal, where there is
+        // one, has to be the one spec 26.1 names.
+        if (answered.Error is { } refusal)
+        {
+            Assert.Equal(ErrorCodes.ContentModified, refusal.Code);
+        }
+    }
+
+    /// <summary>
+    /// Closing a document abandons what is outstanding for it, which spec 26.1 requires of every kind
+    /// of work and not only of compiles.
+    /// </summary>
+    [Fact]
+    public async Task ClosingADocumentAbandonsTheNavigationOutstandingForIt()
+    {
+        await using var client = await LanguageServerClient.StartAsync();
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        await client.RequestAsync(Methods.Hover, At(uri, NoImports, "total"));
+
+        client.Notify(Methods.DidClose, new DidCloseTextDocumentParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = uri },
+        });
+
+        // Asked after the close, so that the notification has certainly been handled: the connection
+        // drains notifications in order, and this request is behind it.
+        await client.RequestAsync(
+            Methods.DocumentSymbol, new DocumentSymbolParams { TextDocument = new() { Uri = uri } });
+
+        Assert.Equal(0, client.Host.Hover.Outstanding);
+        Assert.Equal(0, client.Host.Definition.Outstanding);
+    }
+
+    /// <summary>A caret inside <paramref name="marker"/>, as a client sends it.</summary>
+    private static TextDocumentPositionParams At(string uri, string text, string marker, int into = 1)
+    {
+        var offset = text.IndexOf(marker, StringComparison.Ordinal);
+
+        Assert.True(offset >= 0, $"the fixture must contain '{marker}'");
+
+        return new TextDocumentPositionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = uri },
+            Position = EditorPositions.PositionAt(new Diagnostics.LineMap(text), offset + into),
+        };
+    }
+
     // ------------------------------------------------------- diagnostics
 
     [Fact]

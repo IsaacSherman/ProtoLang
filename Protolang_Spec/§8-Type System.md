@@ -101,7 +101,7 @@ Normative Requirements:
 | proto3 `optional` scalar or enum | Yes | The type's zero, distinguishable by `has` |
 | proto2 singular field | Yes | The field's declared default |
 | Repeated field | No | An empty collection |
-| Map field | No | Not supported at all ([14.2](./§14-Repeated Fields and Collections.md#142-maps)) |
+| Map field | No | Not supported at all ([14.2](./§14-Repeated%20Fields%20and%20Collections.md#142-maps)) |
 
 - An `optional` scalar set to its zero value, or an `optional` string set to empty, is **set**.
   `has` reports presence, not difference from the default.

@@ -652,7 +652,7 @@ public sealed class CppBackend : ITestProjectScaffold
         var left = Expression(binary.Left);
         var right = Expression(binary.Right);
 
-        if (binary.IsArithmetic && binary.ResultType is ScalarType { IsInteger: true } scalar)
+        if (binary.OverflowingType is { } scalar)
         {
             // Never a bare operator, under any policy: signed overflow is undefined behavior, so
             // even the wrapping case has to be spelled out in the unsigned domain.
@@ -695,7 +695,7 @@ public sealed class CppBackend : ITestProjectScaffold
 
         if (unary.Operator == IrUnaryOperator.Negate)
         {
-            return unary.ResultType is ScalarType { IsInteger: true } scalar
+            return unary.OverflowingType is { } scalar
                 ? $"{RuntimeNamespace}::{CppRuntime.Stem(unary.Behavior)}_neg_{HelperSuffix(scalar)}({operand})"
                 : $"(-{operand})";
         }

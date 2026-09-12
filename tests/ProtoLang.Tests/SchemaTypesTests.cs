@@ -1,5 +1,6 @@
 using Google.Protobuf.Reflection;
 using ProtoLang.Binding;
+using ProtoLang.Symbols;
 using Xunit;
 
 namespace ProtoLang.Tests;
@@ -107,6 +108,54 @@ public class SchemaTypesTests
             Assert.Contains(enumType, result.Types.EnumsNamed(enumType.Name));
         }
     }
+
+    // ------- asking by identity
+
+    /// <summary>
+    /// What a caret gives is an identity, because a name in type position resolves to a type and
+    /// leaves no IR node behind. Swept over every message and enum the fixtures declare, since the
+    /// shape a hand-rolled lookup omits first is the one nested inside something else.
+    /// </summary>
+    [Fact]
+    public void EveryTypeIsReachableByTheIdentityTheIrCarriesForIt()
+    {
+        var result = Compile(Fixtures);
+        var types = result.Types;
+
+        foreach (var message in AllMessages(result.Descriptors.SelectMany(file => file.MessageTypes)))
+        {
+            var found = types.Find(SymbolId.ForType(message));
+
+            Assert.True(found is SchemaMessageName, $"'{message.FullName}' is not reachable by identity");
+            Assert.Equal(message.FullName, found!.FullName);
+        }
+
+        foreach (var enumType in AllEnums(result))
+        {
+            var found = types.Find(SymbolId.ForType(enumType));
+
+            Assert.True(found is SchemaEnumName, $"'{enumType.FullName}' is not reachable by identity");
+            Assert.Equal(enumType.FullName, found!.FullName);
+        }
+    }
+
+    /// <summary>
+    /// A field identity and a type identity can spell the same full name -- protobuf puts a field in
+    /// its message and the index is over types alone -- so the kind has to be part of what is
+    /// matched rather than an afterthought.
+    /// </summary>
+    [Fact]
+    public void AnIdentityThatIsNotATypeReachesNothing()
+    {
+        var result = Compile(Fixtures);
+        var field = result.Types.FindMessage("protolang.tests.Outer")!.FindFieldByName("count");
+
+        Assert.Null(result.Types.Find(SymbolId.ForField(field)));
+    }
+
+    [Fact]
+    public void TheIndexOverNoSchemasReachesNothing()
+        => Assert.Null(SchemaTypes.Empty.Find(default));
 
     // ------- nesting, which is what a second walk omits
 

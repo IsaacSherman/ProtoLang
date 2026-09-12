@@ -51,7 +51,7 @@ identifier = (.NET letter | "_") { .NET letter-or-digit | "_" }
 ```
 
 Identifiers are case-sensitive. ProtoLang does not impose a naming convention on source names.
-Backends may map method names to target conventions when emitting public APIs ([24](./§24-Generated API Strategy.md#24-generated-api-strategy)).
+Backends may map method names to target conventions when emitting public APIs ([24](./§24-Generated%20API%20Strategy.md#24-generated-api-strategy)).
 
 Open Question:
 

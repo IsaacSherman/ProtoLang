@@ -51,6 +51,15 @@ public sealed record TextDocumentClientCapabilities
 
     /// <summary>Present when the client will ask for completion at all.</summary>
     public CompletionClientCapabilities? Completion { get; init; }
+
+    /// <summary>Present when the client will ask for hover at all.</summary>
+    public HoverClientCapabilities? Hover { get; init; }
+
+    /// <summary>Present when the client will ask for go-to-definition at all.</summary>
+    public DefinitionClientCapabilities? Definition { get; init; }
+
+    /// <summary>Present when the client will ask for a document outline at all.</summary>
+    public DocumentSymbolClientCapabilities? DocumentSymbol { get; init; }
 }
 
 /// <inheritdoc cref="ClientCapabilities"/>
@@ -63,6 +72,41 @@ public sealed record TextDocumentClientCapabilities
 /// the insert format is always stated because a path is not a snippet.
 /// </remarks>
 public sealed record CompletionClientCapabilities;
+
+/// <inheritdoc cref="ClientCapabilities"/>
+/// <remarks>
+/// Deliberately empty, on the same terms as <see cref="CompletionClientCapabilities"/>. LSP's hover
+/// capability says which content formats the client accepts, best first, and every client that
+/// implements hover accepts Markdown -- so honouring it would mean carrying a second rendering of
+/// every card to serve a client that does not exist. A client that accepts only plain text is shown
+/// the Markdown source, which is still the sentence.
+/// </remarks>
+public sealed record HoverClientCapabilities;
+
+/// <inheritdoc cref="ClientCapabilities"/>
+public sealed record DefinitionClientCapabilities
+{
+    /// <summary>
+    /// Whether the client accepts <see cref="LocationLink"/>, which carries the declaration and the
+    /// name inside it as separate ranges.
+    /// </summary>
+    /// <remarks>
+    /// Consulted rather than assumed, because the two shapes are not compatible: a client that did
+    /// not ask for links and is sent them finds no <c>uri</c> member and navigates nowhere. Both
+    /// ranges are produced either way -- <see cref="Symbols.DeclarationSite"/> has carried both
+    /// since #39 -- so what this decides is only how much of what is already known survives the
+    /// wire.
+    /// </remarks>
+    public bool? LinkSupport { get; init; }
+}
+
+/// <inheritdoc cref="ClientCapabilities"/>
+public sealed record DocumentSymbolClientCapabilities
+{
+    /// <summary>Whether the client can show an outline that nests.</summary>
+    /// <inheritdoc cref="SymbolInformation" path="/remarks"/>
+    public bool? HierarchicalDocumentSymbolSupport { get; init; }
+}
 
 /// <inheritdoc cref="ClientCapabilities"/>
 public sealed record GeneralClientCapabilities
@@ -179,6 +223,22 @@ public sealed record ServerCapabilities
 
     /// <summary>Null when the client never said it wanted completion.</summary>
     public CompletionOptions? CompletionProvider { get; init; }
+
+    /// <summary>Null when the client never said it wanted hover.</summary>
+    /// <remarks>
+    /// A bare boolean rather than an options object, here and for the two below. LSP allows either,
+    /// and the options shape carries only work-done progress reporting, which this server does not
+    /// do for a request that answers in milliseconds.
+    /// </remarks>
+    public bool? HoverProvider { get; init; }
+
+    /// <summary>Null when the client never said it wanted go-to-definition.</summary>
+    /// <inheritdoc cref="HoverProvider" path="/remarks"/>
+    public bool? DefinitionProvider { get; init; }
+
+    /// <summary>Null when the client never said it wanted a document outline.</summary>
+    /// <inheritdoc cref="HoverProvider" path="/remarks"/>
+    public bool? DocumentSymbolProvider { get; init; }
 
     public WorkspaceServerCapabilities? Workspace { get; init; }
 }

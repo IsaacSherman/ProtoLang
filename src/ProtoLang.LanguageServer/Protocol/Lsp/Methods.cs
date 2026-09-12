@@ -21,6 +21,9 @@ public static class Methods
     public const string PublishDiagnostics = "textDocument/publishDiagnostics";
     public const string SemanticTokensFull = "textDocument/semanticTokens/full";
     public const string Completion = "textDocument/completion";
+    public const string Hover = "textDocument/hover";
+    public const string Definition = "textDocument/definition";
+    public const string DocumentSymbol = "textDocument/documentSymbol";
 
     public const string DidChangeConfiguration = "workspace/didChangeConfiguration";
     public const string DidChangeWorkspaceFolders = "workspace/didChangeWorkspaceFolders";

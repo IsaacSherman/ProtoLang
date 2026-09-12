@@ -59,7 +59,11 @@ public static class SemanticTokenEncoder
         /// re-measurement of the text happens anywhere in this file.
         /// </remarks>
         public static Classified From(SourceSpan span, int type)
-            => new(span.Start.Offset, span.Start.Line - 1, span.Start.Column - 1, span.Length, type);
+        {
+            var start = EditorPositions.PositionOf(span.Start);
+
+            return new Classified(span.Start.Offset, start.Line, start.Character, span.Length, type);
+        }
     }
 
     /// <summary>

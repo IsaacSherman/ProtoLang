@@ -53,8 +53,19 @@ public sealed class LanguageServerHost : IDisposable
     private readonly DocumentSemantics _semantics;
     private readonly CompileScheduler _scheduler;
     private readonly CompletionProvider _completion;
+    private readonly HoverProvider _hover;
+    private readonly DefinitionProvider _definition;
 
     private DiagnosticMapper _mapper = new(relatedInformationSupported: false);
+
+    /// <summary>Whether this client can show an outline that nests.</summary>
+    /// <remarks>
+    /// Volatile for the reason <see cref="DefinitionProvider.LinkSupport"/> is: negotiated once, on
+    /// the worker that reads the wire, and read wherever an answer is produced.
+    /// </remarks>
+    /// <inheritdoc cref="SymbolInformation" path="/remarks"/>
+    private volatile bool _outlineNests;
+
     private volatile ServerState _state = ServerState.NotInitialized;
 
     public LanguageServerHost(Stream input, Stream output, ServerLog? log = null, TimeSpan? debounce = null)
@@ -88,6 +99,9 @@ public sealed class LanguageServerHost : IDisposable
         _completion = new CompletionProvider(
             _documents, _configuration, _loaders, semantics: _semantics);
 
+        _hover = new HoverProvider(_documents, _configuration, _loaders, semantics: _semantics);
+        _definition = new DefinitionProvider(_documents, _configuration, _loaders, semantics: _semantics);
+
         Register();
     }
 
@@ -116,6 +130,14 @@ public sealed class LanguageServerHost : IDisposable
     /// </remarks>
     public CompletionProvider Completion => _completion;
 
+    /// <summary>What answers a hover request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public HoverProvider Hover => _hover;
+
+    /// <summary>What answers a go-to-definition request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public DefinitionProvider Definition => _definition;
+
     /// <summary>What compiles a buffer for the questions asked between keystrokes, for a test and #58.</summary>
     /// <remarks>
     /// Published so that "this buffer is compiled once however many questions are asked of it" is a
@@ -138,6 +160,17 @@ public sealed class LanguageServerHost : IDisposable
         _connection.OnRequest(Methods.Shutdown, (_, _) => Shutdown());
         _connection.OnRequest(Methods.SemanticTokensFull, (parameters, _) => Answer<SemanticTokensParams>(parameters, Classify));
         _connection.OnRequest(Methods.Completion, Complete, concurrent: true);
+        _connection.OnRequest(
+            Methods.Hover,
+            (parameters, token) => AtPosition(parameters, _hover.Read, _hover.AnswerAsync, token),
+            concurrent: true);
+
+        _connection.OnRequest(
+            Methods.Definition,
+            (parameters, token) => AtPosition(parameters, _definition.Read, _definition.AnswerAsync, token),
+            concurrent: true);
+        _connection.OnRequest(
+            Methods.DocumentSymbol, (parameters, _) => Answer<DocumentSymbolParams>(parameters, Outline));
 
         _connection.OnNotification(Methods.Initialized, (_, token) => Initialized(token));
         _connection.OnNotification(Methods.Exit, (_, _) => Exit());
@@ -210,6 +243,32 @@ public sealed class LanguageServerHost : IDisposable
         return await _completion.AnswerAsync(asked, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Answers a request about one caret: read here, in order with everything else, and produced
+    /// anywhere.
+    /// </summary>
+    /// <remarks>
+    /// One method for hover and go-to-definition, and for whatever #51 adds beside them, because
+    /// what differs between them is which provider answers and what does not differ is the part
+    /// that must not move: <paramref name="read"/> runs before this returns and therefore before the
+    /// next message is dequeued. See <see cref="Complete"/> for why, at length.
+    /// </remarks>
+    private async Task<object?> AtPosition<T>(
+        JsonElement? parameters,
+        Func<TextDocumentPositionParams, PositionRequest?> read,
+        Func<PositionRequest, CancellationToken, Task<T>> answer,
+        CancellationToken cancellationToken)
+    {
+        RequireRunning();
+
+        var message = LspJson.Read<TextDocumentPositionParams>(parameters)
+            ?? throw Missing<TextDocumentPositionParams>();
+
+        return read(message) is not { } asked
+            ? null
+            : await answer(asked, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Runs a notification handler, dropping the message when it arrives out of turn.</summary>
     /// <remarks>
     /// Dropped rather than refused: a notification has no response to carry a complaint, and the
@@ -274,6 +333,9 @@ public sealed class LanguageServerHost : IDisposable
             _log.Level = TraceLevel.Parse(trace);
         }
 
+        _definition.LinkSupport = capabilities?.TextDocument?.Definition?.LinkSupport is true;
+        _outlineNests = capabilities?.TextDocument?.DocumentSymbol?.HierarchicalDocumentSymbolSupport is true;
+
         _configuration.Negotiate(capabilities);
         _configuration.SetFolders(FoldersOf(message));
 
@@ -292,6 +354,9 @@ public sealed class LanguageServerHost : IDisposable
                 CompletionProvider = capabilities?.TextDocument?.Completion is null
                     ? null
                     : new CompletionOptions { TriggerCharacters = CompletionProvider.TriggerCharacters },
+                HoverProvider = capabilities?.TextDocument?.Hover is null ? null : true,
+                DefinitionProvider = capabilities?.TextDocument?.Definition is null ? null : true,
+                DocumentSymbolProvider = capabilities?.TextDocument?.DocumentSymbol is null ? null : true,
                 Workspace = new WorkspaceServerCapabilities
                 {
                     WorkspaceFolders = new WorkspaceFoldersServerCapabilities(),
@@ -436,10 +501,12 @@ public sealed class LanguageServerHost : IDisposable
 
         _documents.Close(uri);
 
-        // Every kind of outstanding work for this document, not just the compile. A completion is the
-        // other kind, it can be queued behind a slow walk for as long as that walk takes, and nothing
-        // else would ever tell it the buffer it describes has gone.
+        // Every kind of outstanding work for this document, not just the compile. Each of these can
+        // be queued behind a slow one for as long as that one takes, and nothing else would ever
+        // tell it the buffer it describes has gone.
         _completion.Forget(uri);
+        _hover.Forget(uri);
+        _definition.Forget(uri);
 
         // And what was remembered about it. Every question comes through the store, so once the
         // document is closed nothing can ask -- and an entry nothing can ask for is a syntax tree and
@@ -477,6 +544,34 @@ public sealed class LanguageServerHost : IDisposable
         }
 
         return SemanticTokenEncoder.Encode(document.Text, uri.Text);
+    }
+
+    /// <summary>The file's declarations, as far as it parses.</summary>
+    /// <remarks>
+    /// <para>
+    /// Parsed rather than compiled, so it answers for a file that does not parse and never waits on
+    /// protoc -- which is what makes it safe to run on the ordered worker beside
+    /// <see cref="Classify"/>, and what keeps the outline from vanishing at exactly the moment
+    /// somebody is navigating a file they are halfway through editing. An unopened document produces
+    /// an empty outline rather than an error: the client may have closed it between asking and being
+    /// answered.
+    /// </para>
+    /// <para>
+    /// Nothing is refused here because nothing can be: the read and the answer are the same instant,
+    /// which is the property <see cref="Classify"/> states at length and this one shares.
+    /// </para>
+    /// </remarks>
+    private object? Outline(DocumentSymbolParams message)
+    {
+        if (!DocumentUri.TryParse(message.TextDocument.Uri, out var uri)
+            || _documents.Find(uri) is not { } document)
+        {
+            return Array.Empty<DocumentSymbol>();
+        }
+
+        var outline = DocumentOutline.Of(document.Text);
+
+        return _outlineNests ? outline : DocumentOutline.Flattened(outline, uri!.ToString());
     }
 
     // ------------------------------------------------------- configuration

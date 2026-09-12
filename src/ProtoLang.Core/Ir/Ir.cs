@@ -339,6 +339,10 @@ public sealed record IrBinary(
     public bool IsArithmetic => Operator
         is IrBinaryOperator.Add or IrBinaryOperator.Subtract or IrBinaryOperator.Multiply
         or IrBinaryOperator.Divide or IrBinaryOperator.Modulo;
+
+    /// <inheritdoc cref="IrUnary.OverflowingType"/>
+    public ScalarType? OverflowingType
+        => IsArithmetic && ResultType is ScalarType { IsInteger: true } scalar ? scalar : null;
 }
 
 /// <summary>What an integer division does when its divisor is zero.</summary>
@@ -381,7 +385,35 @@ public sealed record IrUnary(
     IrExpression Operand,
     PlType ResultType,
     ArithmeticBehavior Behavior,
-    SourceSpan Span) : IrExpression(ResultType, Span);
+    SourceSpan Span) : IrExpression(ResultType, Span)
+{
+    /// <summary>
+    /// The integer type whose overflow <see cref="Behavior"/> governs here, or null where the
+    /// annotation governs nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The annotation is present on every node and meaningful on some of them.</b>
+    /// <see cref="ArithmeticBehavior"/> says so in a sentence, and a sentence is not something a
+    /// consumer can ask. So the question is asked here instead: is this an operation that can
+    /// overflow, and at what width. Null for a logical operator, for a comparison, for anything
+    /// whose operands are floating point -- none of which wraps, checks or saturates, because none
+    /// of them leaves the value range of its type in the way 10.1 is about.
+    /// </para>
+    /// <para>
+    /// <b>One home because it already had four.</b> Both backends spelled
+    /// <c>ResultType is ScalarType { IsInteger: true }</c> for themselves, twice each, and agreed by
+    /// coincidence; a hover explaining the policy would have made it five, and the one that read the
+    /// annotation without the guard told a reader that <c>double</c> arithmetic wraps in two's
+    /// complement. The width comes back with the answer rather than after it, because every caller
+    /// that wants the first wants the second.
+    /// </para>
+    /// </remarks>
+    public ScalarType? OverflowingType
+        => Operator is IrUnaryOperator.Negate && ResultType is ScalarType { IsInteger: true } scalar
+            ? scalar
+            : null;
+}
 
 /// <summary>
 /// A named protobuf enum constant, such as <c>TopLevelStatus.TOP_LEVEL_STATUS_OK</c>.

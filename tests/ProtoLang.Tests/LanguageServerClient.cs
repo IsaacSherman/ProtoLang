@@ -100,6 +100,12 @@ public sealed class LanguageServerClient : IAsyncDisposable
             PublishDiagnostics = new PublishDiagnosticsClientCapabilities { RelatedInformation = true },
             SemanticTokens = new SemanticTokensClientCapabilities(),
             Completion = new CompletionClientCapabilities(),
+            Hover = new HoverClientCapabilities(),
+            Definition = new DefinitionClientCapabilities { LinkSupport = true },
+            DocumentSymbol = new DocumentSymbolClientCapabilities
+            {
+                HierarchicalDocumentSymbolSupport = true,
+            },
         },
         General = new GeneralClientCapabilities { PositionEncodings = ["utf-16"] },
     };

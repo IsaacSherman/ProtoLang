@@ -107,7 +107,7 @@ Open Question:
 version.**
 
 The version mattered because presence rules differ by it. Once presence is a first-class question
-([8.4](./§8-Type System.md#84-nullability-and-presence)), the compiler asks the descriptor rather than the syntax version, and
+([8.4](./§8-Type%20System.md#84-nullability-and-presence)), the compiler asks the descriptor rather than the syntax version, and
 `FieldDescriptor.HasPresence` answers correctly for every one of them -- including editions, where
 presence is a resolved feature rather than a property of the syntax line. A version check would be
 a second, worse copy of a rule the protobuf runtime already implements.

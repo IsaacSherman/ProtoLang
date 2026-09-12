@@ -38,7 +38,7 @@ Normative Requirements:
   spelling differs by case where the file system ignores case, by a trailing separator, by the
   alternate separator, or by being the source directory that would have been appended anyway. A
   directory searched twice is a redundant `--proto_path`, a diagnostic that names it twice, and, for
-  a cached load ([21.1](./§21-Interoperability With Protobuf.md#211-descriptor-input)), a second key for one configuration.
+  a cached load ([21.1](./§21-Interoperability%20With%20Protobuf.md#211-descriptor-input)), a second key for one configuration.
 - Well-known protobuf imports may be resolved by the descriptor loader's implicit include paths.
 - **The directories an import is resolved against are one ordered list**, and one place answers for
   it: the include paths, then each source's own directory, then the loader's implicit ones. Everything
