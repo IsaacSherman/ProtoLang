@@ -76,6 +76,11 @@ Normative Requirements:
 - **Which symbol a name means, where it is declared, and everywhere it is used.** Identity is the
   declaration, never a spelling: two locals of one name in sibling blocks are two symbols, and one
   field reached bare and through a receiver is one.
+- **Every name a file resolved, as one sequence in source order**, each spanning the name alone and
+  saying what it resolved to and whether that use declared, read or wrote it. The same facts as the
+  question above, asked of the file instead of of a symbol, because a caller describing the whole
+  file -- classifying it ([6.5](./§6-Lexical%20Structure.md#65-source-classification)) -- would
+  otherwise ask about a position once per name in it and scan the same answer each time.
 - **Where a schema element is declared and what was written about it**, reachable both from the
   descriptor and from the identity the IR carries for it. The second is not a convenience: a name in
   type position leaves no IR node, so an identity is the only handle a caret there produces.

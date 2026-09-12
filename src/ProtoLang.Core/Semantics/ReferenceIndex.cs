@@ -64,6 +64,13 @@ internal sealed class ReferenceIndex
                 group => (IReadOnlyList<SymbolReference>)[.. group]);
     }
 
+    /// <inheritdoc cref="SemanticModel.AllReferences"/>
+    /// <remarks>
+    /// Handed out rather than copied. It is already immutable and already in the published order, so
+    /// a copy would differ from this only in costing a list per request.
+    /// </remarks>
+    internal IReadOnlyList<SymbolReference> All => _all;
+
     /// <inheritdoc cref="SemanticModel.ReferencesTo"/>
     internal IReadOnlyList<SymbolReference> ReferencesTo(SymbolId symbol)
         => _bySymbol.GetValueOrDefault(symbol) ?? [];

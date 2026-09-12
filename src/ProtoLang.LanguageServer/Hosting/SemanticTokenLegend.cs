@@ -1,5 +1,7 @@
 using ProtoLang.LanguageServer.Protocol.Lsp;
+using ProtoLang.Symbols;
 using ProtoLang.Syntax;
+using SymbolKind = ProtoLang.Symbols.SymbolKind;
 
 namespace ProtoLang.LanguageServer.Hosting;
 
@@ -16,12 +18,13 @@ namespace ProtoLang.LanguageServer.Hosting;
 /// different numbers rather than by changing what the numbers mean.
 /// </para>
 /// <para>
-/// <b>Identifiers are all one category today, deliberately.</b> Telling a local from a parameter from
-/// a field needs the position lookup in #38 and the declaration data in #39 applied to a bound model,
-/// and this server classifies from the token stream alone -- which is what lets it answer for a file
-/// that does not parse, exactly when a user is staring at the screen. A classification that is right
-/// sometimes is worse than one that is consistently coarse, because the wrong colour reads as a fact
-/// about the code.
+/// <b>An identifier is classified twice, and the second answer is the binder's.</b> The lexer says
+/// <c>variable</c>, because from a token stream that is the whole truth. #50 then replaces that with
+/// the category of the symbol the binder resolved the name to, wherever it resolved one, which is
+/// what <see cref="IndexOf(SymbolKind)"/> and <see cref="ModifiersOf"/> are for. A name that did not
+/// resolve keeps the lexical answer, so a file that does not parse is still coloured -- exactly when
+/// a user is staring at the screen. That is the whole of the degradation rule: refinement adds, and
+/// never takes colour away.
 /// </para>
 /// <para>
 /// <b>Structural punctuation is not classified at all.</b> Braces, parentheses, semicolons, commas,
@@ -64,15 +67,28 @@ public static class SemanticTokenLegend
         Operator, Decorator,
     ];
 
+    public const string Declaration = "declaration";
+    public const string Definition = "definition";
+    public const string ReadOnly = "readonly";
+    public const string Static = "static";
+    public const string Deprecated = "deprecated";
+    public const string Abstract = "abstract";
+    public const string Async = "async";
+    public const string Modification = "modification";
+    public const string Documentation = "documentation";
+    public const string DefaultLibrary = "defaultLibrary";
+
     /// <summary>The modifiers, in the order their bits refer to.</summary>
     /// <remarks>
-    /// None are emitted yet. They are declared for the same reason the unused types are: a modifier
-    /// added later shifts every bit above it.
+    /// Three of the ten are emitted; the rest are declared for the same reason the unused types are,
+    /// since a modifier added later shifts every bit above it. <see cref="Definition"/> is one of the
+    /// seven on purpose: in ProtoLang a name is declared and defined in the same breath, so emitting
+    /// both bits for one event would be telling a client twice about one thing.
     /// </remarks>
     public static IReadOnlyList<string> TokenModifiers { get; } =
     [
-        "declaration", "definition", "readonly", "static", "deprecated", "abstract", "async",
-        "modification", "documentation", "defaultLibrary",
+        Declaration, Definition, ReadOnly, Static, Deprecated, Abstract, Async, Modification,
+        Documentation, DefaultLibrary,
     ];
 
     /// <summary>The legend as it goes on the wire.</summary>
@@ -90,6 +106,17 @@ public static class SemanticTokenLegend
     private static readonly int StringIndex = IndexOf(String);
     private static readonly int NumberIndex = IndexOf(Number);
     private static readonly int OperatorIndex = IndexOf(Operator);
+
+    private static readonly int ParameterIndex = IndexOf(Parameter);
+    private static readonly int PropertyIndex = IndexOf(Property);
+    private static readonly int EnumMemberIndex = IndexOf(EnumMember);
+    private static readonly int MethodIndex = IndexOf(Method);
+    private static readonly int ClassIndex = IndexOf(Class);
+    private static readonly int EnumIndex = IndexOf(Enum);
+
+    private static readonly int DeclarationBit = BitOf(Declaration);
+    private static readonly int ReadOnlyBit = BitOf(ReadOnly);
+    private static readonly int ModificationBit = BitOf(Modification);
 
     /// <summary>Which category a token belongs to, or null when it is not classified.</summary>
     /// <remarks>
@@ -119,6 +146,89 @@ public static class SemanticTokenLegend
             // of. A token the client should colour by its own grammar, or not at all.
             _ => null,
         };
+    }
+
+    /// <summary>Which category a resolved name belongs to.</summary>
+    /// <remarks>
+    /// <para>
+    /// The binder's answer, translated. <see cref="SymbolKind"/> is finer than the compiler needs
+    /// precisely so that this translation exists, and its own remarks name a semantic highlighter as
+    /// the reason -- so the mapping is a reading of that enum rather than a second opinion about what
+    /// a name means.
+    /// </para>
+    /// <para>
+    /// <b>A local and a loop binding are both <c>variable</c>, and the modifier is what tells them
+    /// apart.</b> LSP has no category for the name a <c>for</c> binds, and inventing one is not
+    /// available -- the published set is fixed (spec 6.5). What a loop binding does have is that it
+    /// cannot be assigned, and neither can a parameter or a field, so <see cref="ModifiersOf"/>
+    /// marks all three <c>readonly</c>; a local is then the only <c>variable</c> without that bit.
+    /// </para>
+    /// <para>
+    /// An unrecognized kind falls back to the lexical answer rather than throwing. A kind added to
+    /// the compiler is a kind this file has not been taught yet, and colouring it as an identifier is
+    /// what it looked like before anyone asked.
+    /// </para>
+    /// </remarks>
+    public static int IndexOf(SymbolKind kind)
+        => kind switch
+        {
+            SymbolKind.Parameter => ParameterIndex,
+            SymbolKind.Field => PropertyIndex,
+            SymbolKind.EnumValue => EnumMemberIndex,
+            SymbolKind.Method => MethodIndex,
+            SymbolKind.MessageType => ClassIndex,
+            SymbolKind.EnumType => EnumIndex,
+            _ => VariableIndex,
+        };
+
+    /// <summary>What else is true of a name written here: declared, assigned, or unassignable.</summary>
+    /// <remarks>
+    /// <para>
+    /// Both halves come from what the binder recorded rather than from a second look at the tree.
+    /// <see cref="ReferenceKind"/> already separates the place a name was introduced from the places
+    /// it was used, and a use that assigns from one that reads, which is exactly the pair LSP's
+    /// <c>declaration</c> and <c>modification</c> describe.
+    /// </para>
+    /// <para>
+    /// <c>readonly</c> is a fact about the language, not a decoration: spec 18 makes a local the only
+    /// thing a method may assign, so a parameter, a loop binding, a field and an enum constant all
+    /// genuinely are read-only. A method and a type are left out of it -- neither is a place a value
+    /// could be stored, and a bit that is true of everything conveys nothing.
+    /// </para>
+    /// <para>
+    /// An assignment the language refuses is still marked. <c>line.quantity = 2</c> is
+    /// <c>PL0034</c>, and the binder still records the write, because what the author wrote is what
+    /// an editor is describing.
+    /// </para>
+    /// </remarks>
+    public static int ModifiersOf(SymbolKind kind, ReferenceKind reference)
+    {
+        var modifiers = reference switch
+        {
+            ReferenceKind.Declaration => DeclarationBit,
+            ReferenceKind.Write => ModificationBit,
+            _ => 0,
+        };
+
+        return CannotBeAssigned(kind) ? modifiers | ReadOnlyBit : modifiers;
+    }
+
+    private static bool CannotBeAssigned(SymbolKind kind)
+        => kind is SymbolKind.Parameter or SymbolKind.LoopBinding
+            or SymbolKind.Field or SymbolKind.EnumValue;
+
+    private static int BitOf(string modifier)
+    {
+        for (var index = 0; index < TokenModifiers.Count; index++)
+        {
+            if (string.Equals(TokenModifiers[index], modifier, StringComparison.Ordinal))
+            {
+                return 1 << index;
+            }
+        }
+
+        throw new ArgumentOutOfRangeException(
+            nameof(modifier), modifier, "The legend does not carry that modifier.");
     }
 
     private static int IndexOf(string type)

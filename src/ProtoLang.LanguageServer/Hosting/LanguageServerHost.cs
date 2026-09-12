@@ -55,6 +55,7 @@ public sealed class LanguageServerHost : IDisposable
     private readonly CompletionProvider _completion;
     private readonly HoverProvider _hover;
     private readonly DefinitionProvider _definition;
+    private readonly ClassificationProvider _classification;
 
     private DiagnosticMapper _mapper = new(relatedInformationSupported: false);
 
@@ -101,6 +102,8 @@ public sealed class LanguageServerHost : IDisposable
 
         _hover = new HoverProvider(_documents, _configuration, _loaders, semantics: _semantics);
         _definition = new DefinitionProvider(_documents, _configuration, _loaders, semantics: _semantics);
+        _classification = new ClassificationProvider(
+            _documents, _configuration, _loaders, semantics: _semantics);
 
         Register();
     }
@@ -138,6 +141,10 @@ public sealed class LanguageServerHost : IDisposable
     /// <inheritdoc cref="Completion" path="/remarks"/>
     public DefinitionProvider Definition => _definition;
 
+    /// <summary>What answers a semantic token request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public ClassificationProvider Classification => _classification;
+
     /// <summary>What compiles a buffer for the questions asked between keystrokes, for a test and #58.</summary>
     /// <remarks>
     /// Published so that "this buffer is compiled once however many questions are asked of it" is a
@@ -158,7 +165,8 @@ public sealed class LanguageServerHost : IDisposable
     {
         _connection.OnRequest(Methods.Initialize, (parameters, _) => Initialize(parameters));
         _connection.OnRequest(Methods.Shutdown, (_, _) => Shutdown());
-        _connection.OnRequest(Methods.SemanticTokensFull, (parameters, _) => Answer<SemanticTokensParams>(parameters, Classify));
+        _connection.OnRequest(Methods.SemanticTokensFull, Classify, concurrent: true);
+        _connection.OnRequest(Methods.SemanticTokensFullDelta, ClassifyDelta, concurrent: true);
         _connection.OnRequest(Methods.Completion, Complete, concurrent: true);
         _connection.OnRequest(
             Methods.Hover,
@@ -334,6 +342,8 @@ public sealed class LanguageServerHost : IDisposable
         }
 
         _definition.LinkSupport = capabilities?.TextDocument?.Definition?.LinkSupport is true;
+        _classification.Client = ClientLegend.Of(capabilities?.TextDocument?.SemanticTokens);
+        _classification.Deltas = WantsDeltas(capabilities);
         _outlineNests = capabilities?.TextDocument?.DocumentSymbol?.HierarchicalDocumentSymbolSupport is true;
 
         _configuration.Negotiate(capabilities);
@@ -350,7 +360,11 @@ public sealed class LanguageServerHost : IDisposable
                 TextDocumentSync = new TextDocumentSyncOptions { Save = new SaveOptions() },
                 SemanticTokensProvider = capabilities?.TextDocument?.SemanticTokens is null
                     ? null
-                    : new SemanticTokensOptions { Legend = SemanticTokenLegend.Wire },
+                    : new SemanticTokensOptions
+                    {
+                        Legend = SemanticTokenLegend.Wire,
+                        Full = new SemanticTokensFullOptions { Delta = WantsDeltas(capabilities) },
+                    },
                 CompletionProvider = capabilities?.TextDocument?.Completion is null
                     ? null
                     : new CompletionOptions { TriggerCharacters = CompletionProvider.TriggerCharacters },
@@ -365,6 +379,16 @@ public sealed class LanguageServerHost : IDisposable
             ServerInfo = new ServerInfo("protolang-server", Version),
         });
     }
+
+    /// <summary>Whether this client asked to be sent differences rather than whole answers.</summary>
+    /// <remarks>
+    /// Offered only where it was asked for. LSP spells the request two ways -- a bare <c>true</c>
+    /// means whole answers only -- and <see cref="SemanticTokensFullRequest"/> is where the two
+    /// spellings become one. Advertising a delta to a client that will never ask for one promises
+    /// something nobody collects, and pays for the promise with a retained answer per open document.
+    /// </remarks>
+    private static bool WantsDeltas(ClientCapabilities? capabilities)
+        => capabilities?.TextDocument?.SemanticTokens?.Requests?.Full?.Delta is true;
 
     /// <summary>
     /// The folders the client opened, taking <c>rootUri</c> as one when it named no folders at all.
@@ -507,6 +531,7 @@ public sealed class LanguageServerHost : IDisposable
         _completion.Forget(uri);
         _hover.Forget(uri);
         _definition.Forget(uri);
+        _classification.Forget(uri);
 
         // And what was remembered about it. Every question comes through the store, so once the
         // document is closed nothing can ask -- and an entry nothing can ask for is a syntax tree and
@@ -516,35 +541,55 @@ public sealed class LanguageServerHost : IDisposable
         return _scheduler.ForgetAsync(uri);
     }
 
+    /// <summary>The whole document's classification: read here, in order, and produced anywhere.</summary>
     /// <remarks>
     /// <para>
-    /// Lexes rather than compiles, so it answers for a file that does not parse and never waits on
-    /// protoc -- which is what makes it safe to run on every request. An unopened document produces an
-    /// empty result rather than an error: the client may have closed it between asking and being
-    /// answered.
+    /// <b>This handler used to be free and is not any more.</b> #42 answered it from the lexer on this
+    /// worker, in the same instant it was read, and the remark that used to sit here said what such a
+    /// handler owes: nothing, because the read and the answer were one moment. Refining an identifier
+    /// needs the binder, so classification now leaves the process exactly as hover, completion and
+    /// go-to-definition do, and owes what they owe -- which is <see cref="DeferredAnswers"/>'s to
+    /// state and <see cref="ClassificationProvider"/>'s to obey.
     /// </para>
     /// <para>
-    /// <b>It answers about the version it read, which is the rule every request type obeys.</b> The
-    /// store hands out an immutable <see cref="OpenDocument"/>, so the text this classifies cannot
-    /// change underneath it however many edits arrive while it runs, and the tokens it returns
-    /// describe one version of the buffer rather than a blend of two. Nothing is refused here because
-    /// nothing can be: the read and the answer are the same instant. A handler that has to leave the
-    /// document between them -- one that waits on a compile, which is what hover, completion and
-    /// go-to-definition will do -- must check the version it read against the store before answering,
-    /// and refuse with LSP's <c>ContentModified</c> rather than answer about text the user has
-    /// already replaced. The scheduler states the same rule for diagnostics, where it is
-    /// <c>IsStale</c>.
+    /// What may not move off this worker is deciding which buffer is being classified.
+    /// <see cref="ClassificationProvider.Read(SemanticTokensParams)"/> is called before this returns,
+    /// for the reason <see cref="Complete"/> gives at length.
     /// </para>
     /// </remarks>
-    private object? Classify(SemanticTokensParams message)
+    private async Task<object?> Classify(JsonElement? parameters, CancellationToken cancellationToken)
     {
-        if (!DocumentUri.TryParse(message.TextDocument.Uri, out var uri) || _documents.Find(uri) is not { } document)
-        {
-            return new SemanticTokens();
-        }
+        RequireRunning();
 
-        return SemanticTokenEncoder.Encode(document.Text, uri.Text);
+        var message = LspJson.Read<SemanticTokensParams>(parameters)
+            ?? throw Missing<SemanticTokensParams>();
+
+        return await Classified(_classification.Read(message), cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>The difference from the classification the client says it is holding.</summary>
+    /// <inheritdoc cref="Classify" path="/remarks"/>
+    private async Task<object?> ClassifyDelta(JsonElement? parameters, CancellationToken cancellationToken)
+    {
+        RequireRunning();
+
+        var message = LspJson.Read<SemanticTokensDeltaParams>(parameters)
+            ?? throw Missing<SemanticTokensDeltaParams>();
+
+        return await Classified(_classification.Read(message), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <remarks>
+    /// An unopened document produces an empty classification rather than an error, and rather than
+    /// null: the client may have closed it between asking and being answered, it has done nothing
+    /// wrong, and a document with no tokens is the truth about one this server does not hold. That is
+    /// what #42 answered here and it has not changed.
+    /// </remarks>
+    private async Task<object?> Classified(
+        ClassificationRequest? asked, CancellationToken cancellationToken)
+        => asked is null
+            ? new SemanticTokens()
+            : await _classification.AnswerAsync(asked, cancellationToken).ConfigureAwait(false);
 
     /// <summary>The file's declarations, as far as it parses.</summary>
     /// <remarks>

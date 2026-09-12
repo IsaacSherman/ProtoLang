@@ -181,6 +181,151 @@ public class LanguageServerTests
         Assert.Null(withheld.Capabilities.SemanticTokensProvider);
     }
 
+    /// <summary>
+    /// A difference is offered only to a client that said it would ask for one.
+    /// </summary>
+    /// <remarks>
+    /// Promising a delta to a client that cannot send the request would buy nothing and cost a
+    /// retained answer per open document, which is why the server reads the capability rather than
+    /// advertising what it happens to be able to do.
+    /// </remarks>
+    [Fact]
+    public async Task DeltasAreOfferedOnlyToAClientThatAskedForThem()
+    {
+        await using var asking = LanguageServerClient.Create();
+        var offered = await asking.InitializeAsync(WantingDeltas(), null);
+
+        await using var content = LanguageServerClient.Create();
+        var withheld = await content.InitializeAsync(LanguageServerClient.FullCapabilities, null);
+
+        Assert.True(offered.Capabilities.SemanticTokensProvider!.Full.Delta);
+        Assert.False(withheld.Capabilities.SemanticTokensProvider!.Full.Delta);
+    }
+
+    /// <summary>Both spellings LSP allows for the delta capability mean what they say.</summary>
+    /// <remarks>
+    /// The member is <c>boolean | { delta?: boolean }</c> on the wire and this server reads it from
+    /// real clients that pick either. Asserted against the JSON rather than against the record,
+    /// because the record is the half that cannot be got wrong.
+    /// </remarks>
+    [Theory]
+    [InlineData("true", false)]
+    [InlineData("false", false)]
+    [InlineData("{}", false)]
+    [InlineData("{\"delta\":false}", false)]
+    [InlineData("{\"delta\":true}", true)]
+    public void EitherSpellingOfTheDeltaCapabilityIsUnderstood(string written, bool wanted)
+    {
+        var capabilities = JsonSerializer.Deserialize<SemanticTokensClientCapabilities>(
+            "{\"requests\":{\"full\":" + written + "}}", LspJson.Options);
+
+        Assert.Equal(wanted, capabilities!.Requests!.Full!.Delta);
+    }
+
+    /// <summary>A client that asked for differences is sent one, and it rebuilds the whole answer.</summary>
+    /// <remarks>
+    /// The wire half of what <see cref="SemanticRefinementTests"/> asserts of the provider: that the
+    /// method is registered, that the two shapes survive serialization, and that what comes back
+    /// really is a difference rather than a whole answer wearing the wrong name.
+    /// </remarks>
+    [Fact]
+    public async Task ADeltaOverTheWireRebuildsTheWholeClassification()
+    {
+        await using var client = await LanguageServerClient.StartAsync(capabilities: WantingDeltas());
+
+        const string Start = "extend X {\n}\n";
+
+        var uri = UriOf(WriteDocument(Start));
+        client.Notify(Methods.DidOpen, Open(uri, Start));
+
+        var first = (await client.RequestAsync(
+            Methods.SemanticTokensFull,
+            new SemanticTokensParams { TextDocument = new TextDocumentIdentifier { Uri = uri } }))
+            .Deserialize<SemanticTokens>(LspJson.Options)!;
+
+        Assert.NotNull(first.ResultId);
+
+        client.Notify(Methods.DidChange, Change(uri, 2, Replace(1, 0, 1, 1, "fn total() -> int64 {\n}\n}")));
+
+        var delta = (await client.RequestAsync(
+            Methods.SemanticTokensFullDelta,
+            new SemanticTokensDeltaParams
+            {
+                TextDocument = new TextDocumentIdentifier { Uri = uri },
+                PreviousResultId = first.ResultId!,
+            }))
+            .Deserialize<SemanticTokensDelta>(LspJson.Options)!;
+
+        Assert.NotEmpty(delta.Edits);
+
+        var rebuilt = new List<int>(first.Data);
+
+        foreach (var edit in delta.Edits.OrderByDescending(edit => edit.Start))
+        {
+            rebuilt.RemoveRange(edit.Start, edit.DeleteCount);
+            rebuilt.InsertRange(edit.Start, edit.Data ?? []);
+        }
+
+        Assert.Equal(SemanticTokenEncoder.Encode("extend X {\nfn total() -> int64 {\n}\n}\n", uri).Data, rebuilt);
+    }
+
+    /// <summary>
+    /// Closing a document abandons the classification outstanding for it and gives back what was being
+    /// kept to answer a delta with.
+    /// </summary>
+    /// <remarks>
+    /// The retention is the one thing this request holds between calls, so it is the one thing a close
+    /// has to take back. Left behind, an editor that opens and closes files all day accumulates an
+    /// integer array per file it has ever shown.
+    /// </remarks>
+    [Fact]
+    public async Task ClosingADocumentForgetsTheClassificationKeptForIt()
+    {
+        await using var client = await LanguageServerClient.StartAsync(capabilities: WantingDeltas());
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        await client.RequestAsync(
+            Methods.SemanticTokensFull,
+            new SemanticTokensParams { TextDocument = new TextDocumentIdentifier { Uri = uri } });
+
+        Assert.Equal(1, client.Host.Classification.Retained);
+
+        client.Notify(Methods.DidClose, new DidCloseTextDocumentParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = uri },
+        });
+
+        // Asked after the close, so the notification has certainly been handled: the connection drains
+        // notifications in order and this request is behind it.
+        await client.RequestAsync(
+            Methods.DocumentSymbol, new DocumentSymbolParams { TextDocument = new() { Uri = uri } });
+
+        Assert.Equal(0, client.Host.Classification.Retained);
+        Assert.Equal(0, client.Host.Classification.Outstanding);
+    }
+
+    /// <summary>Everything this server looks for, plus the intention to ask for differences.</summary>
+    private static ClientCapabilities WantingDeltas()
+    {
+        var capabilities = LanguageServerClient.FullCapabilities;
+
+        return capabilities with
+        {
+            TextDocument = capabilities.TextDocument! with
+            {
+                SemanticTokens = new SemanticTokensClientCapabilities
+                {
+                    Requests = new SemanticTokensRequests
+                    {
+                        Full = new SemanticTokensFullRequest { Delta = true },
+                    },
+                },
+            },
+        };
+    }
+
     [Fact]
     public async Task TheServerNegotiatesTheEncodingItsColumnsAreActuallyMeasuredIn()
     {

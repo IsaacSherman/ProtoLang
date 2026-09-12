@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace ProtoLang.LanguageServer.Protocol.Lsp;
 
@@ -134,11 +135,95 @@ public sealed record PublishDiagnosticsClientCapabilities
 }
 
 /// <inheritdoc cref="ClientCapabilities"/>
+/// <remarks>
+/// <para>
+/// <b>These lists are read, and the reading is what keeps a refinement useful.</b> LSP leaves a
+/// client free to understand only part of a legend, and one that meets a category it has no rule for
+/// paints the token with nothing at all -- so publishing <c>enumMember</c> to a client that never
+/// claimed to know the word takes colour away rather than adding it. <c>ClientLegend</c> is where
+/// that is applied; a category this client did not declare degrades to the lexical answer it was
+/// already being sent.
+/// </para>
+/// <para>
+/// Both are nullable because this server must survive a client that omits them, even though LSP
+/// requires them of a client that asks for semantic tokens at all. Absent is read as "did not fill
+/// the capability in" rather than as "supports nothing", since the second reading would switch the
+/// feature off for every such client; an empty list is read literally.
+/// </para>
+/// </remarks>
 public sealed record SemanticTokensClientCapabilities
 {
     public IReadOnlyList<string>? TokenTypes { get; init; }
 
     public IReadOnlyList<string>? TokenModifiers { get; init; }
+
+    public SemanticTokensRequests? Requests { get; init; }
+}
+
+/// <summary>Which of the semantic token requests this client intends to send.</summary>
+public sealed record SemanticTokensRequests
+{
+    public SemanticTokensFullRequest? Full { get; init; }
+}
+
+/// <summary>
+/// Whether this client wants whole answers only, or wants to be sent the difference between one
+/// answer and the next.
+/// </summary>
+/// <remarks>
+/// LSP spells this member as either <c>true</c> or <c>{ "delta": true }</c>, which is the first union
+/// of shapes this protocol layer has had to read -- <c>TextDocumentContentChangeEvent</c> tells its
+/// two forms apart by a nullable member rather than by a type. The converter below collapses both
+/// spellings to one record, so nothing above it has to know there were two.
+/// </remarks>
+[JsonConverter(typeof(SemanticTokensFullRequestConverter))]
+public sealed record SemanticTokensFullRequest
+{
+    public bool Delta { get; init; }
+}
+
+/// <inheritdoc cref="SemanticTokensFullRequest"/>
+public sealed class SemanticTokensFullRequestConverter : JsonConverter<SemanticTokensFullRequest>
+{
+    public override SemanticTokensFullRequest? Read(
+        ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        // The bare `true` form says the client sends the full request and nothing about deltas, which
+        // is the same thing `{ "delta": false }` says.
+        if (reader.TokenType is JsonTokenType.True or JsonTokenType.False)
+        {
+            return new SemanticTokensFullRequest { Delta = false };
+        }
+
+        if (reader.TokenType is JsonTokenType.Null)
+        {
+            return null;
+        }
+
+        using var full = JsonDocument.ParseValue(ref reader);
+
+        return new SemanticTokensFullRequest
+        {
+            Delta = full.RootElement.ValueKind is JsonValueKind.Object
+                && full.RootElement.TryGetProperty("delta", out var delta)
+                && delta.ValueKind is JsonValueKind.True,
+        };
+    }
+
+    /// <remarks>
+    /// Only ever written by a test round-tripping the shape; a server states what it offers in
+    /// <see cref="SemanticTokensOptions"/>, not in a client capability.
+    /// </remarks>
+    public override void Write(
+        Utf8JsonWriter writer, SemanticTokensFullRequest value, JsonSerializerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(value);
+
+        writer.WriteStartObject();
+        writer.WriteBoolean("delta", value.Delta);
+        writer.WriteEndObject();
+    }
 }
 
 /// <summary>What the client says when the conversation opens.</summary>
@@ -170,7 +255,21 @@ public sealed record SemanticTokensOptions
 {
     public SemanticTokensLegend Legend { get; init; } = new();
 
-    public bool Full { get; init; } = true;
+    public SemanticTokensFullOptions Full { get; init; } = new();
+}
+
+/// <summary>
+/// That the server answers for a whole document, and whether it will also answer with a difference.
+/// </summary>
+/// <remarks>
+/// LSP allows this member to be a bare <c>true</c> as well, and that is what this server sent before
+/// deltas existed. It is written in the object form unconditionally now rather than switching between
+/// two spellings: the object form is as old as semantic tokens themselves, so no client that can ask
+/// for them can fail to read it, and one shape on the way out is one shape to keep right.
+/// </remarks>
+public sealed record SemanticTokensFullOptions
+{
+    public bool Delta { get; init; }
 }
 
 /// <summary>When the client should send text, and how much of it.</summary>
