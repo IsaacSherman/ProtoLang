@@ -16,13 +16,22 @@ public class MethodSignatureTests
 {
     private const string Prelude = "import proto \"fixtures.proto\";\n";
 
-    private static IrModule Bind(string source)
+    /// <param name="errorFree">
+    /// Whether the source is expected to bind cleanly. False for the one fixture that declares a
+    /// parameter name twice: the language refuses it and the binder still produces the method, which
+    /// is the state a reader looking at the signature is actually in.
+    /// </param>
+    private static IrModule Bind(string source, bool errorFree = true)
     {
         var result = Compilation.Compile(
             TestPaths.WriteTempScript(Prelude + source),
             [TestPaths.FixtureProtoDirectory]);
 
-        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        if (errorFree)
+        {
+            Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        }
+
         return Assert.IsType<IrModule>(result.Module);
     }
 
@@ -126,6 +135,52 @@ public class MethodSignatureTests
             foreach (var parameter in method.Parameters)
             {
                 Assert.Contains($"{parameter.Name}: {parameter.Type.DisplayName}", rendered, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Every parameter's label range picks that parameter out of the line, and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// A sweep rather than a case, because what it guards is that two things built from one format
+    /// stay in step: change how a signature reads and the ranges move with it or this fails. The
+    /// duplicated name is the reason the ranges exist at all -- a caller searching the line for a
+    /// parameter's text would find the first of the two whichever one it meant.
+    /// </remarks>
+    [Fact]
+    public void EveryParameterLabelPicksThatParameterOutOfTheSignature()
+    {
+        var module = Bind(
+            """
+            extend Outer {
+                fn a() -> int64 { return count; }
+                fn b(one: int64) -> int64 { return one; }
+                fn c(one: int64, two: string) -> int64 { return one; }
+                fn d(same: int64, same: int64) -> int64 { return 1; }
+            }
+            """,
+            errorFree: false);
+
+        Assert.Equal(4, module.Methods.Count);
+
+        foreach (var method in module.Methods)
+        {
+            var rendered = method.Signature.DisplayName;
+            var labels = method.Signature.ParameterLabels;
+
+            Assert.Equal(method.Parameters.Count, labels.Count);
+
+            for (var index = 0; index < labels.Count; index++)
+            {
+                var parameter = method.Parameters[index];
+
+                Assert.InRange(labels[index].Start, 0, rendered.Length);
+                Assert.InRange(labels[index].End, labels[index].Start, rendered.Length);
+
+                Assert.Equal(
+                    $"{parameter.Name}: {parameter.Type.DisplayName}",
+                    rendered[labels[index].Start..labels[index].End]);
             }
         }
     }

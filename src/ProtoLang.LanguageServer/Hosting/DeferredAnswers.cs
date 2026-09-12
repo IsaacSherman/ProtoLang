@@ -13,8 +13,10 @@ namespace ProtoLang.LanguageServer.Hosting;
 /// be answered in order, because behind it sit every <c>didChange</c>, every <c>didClose</c>, and
 /// the <c>$/cancelRequest</c> that would have shortened it. <see cref="JsonRpcConnection.OnRequest"/>
 /// says so and says what such a handler owes in return. This is that debt, paid once: completion,
-/// hover and go-to-definition all leave the process through <see cref="DocumentSemantics"/>, and
-/// three copies of the rules below would be three things to keep in agreement.
+/// hover, go-to-definition, classification, find-references, occurrence highlighting and signature
+/// help all leave the process through <see cref="DocumentSemantics"/>, and seven copies of the rules
+/// below would be seven things to keep in agreement. The count is the argument -- it was three when
+/// this was written and has not needed a second copy since.
 /// </para>
 /// <para>
 /// <b>Supersede.</b> A newer request for a document cancels the outstanding one for that document,

@@ -58,6 +58,7 @@ public sealed class LanguageServerHost : IDisposable
     private readonly ClassificationProvider _classification;
     private readonly ReferenceProvider _references;
     private readonly HighlightProvider _highlights;
+    private readonly SignatureHelpProvider _signatures;
 
     private DiagnosticMapper _mapper = new(relatedInformationSupported: false);
 
@@ -108,6 +109,8 @@ public sealed class LanguageServerHost : IDisposable
             _documents, _configuration, _loaders, semantics: _semantics);
         _references = new ReferenceProvider(_documents, _configuration, _loaders, semantics: _semantics);
         _highlights = new HighlightProvider(_documents, _configuration, _loaders, semantics: _semantics);
+        _signatures = new SignatureHelpProvider(
+            _documents, _configuration, _loaders, semantics: _semantics);
 
         Register();
     }
@@ -157,6 +160,10 @@ public sealed class LanguageServerHost : IDisposable
     /// <inheritdoc cref="Completion" path="/remarks"/>
     public HighlightProvider Highlights => _highlights;
 
+    /// <summary>What answers a signature help request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public SignatureHelpProvider Signatures => _signatures;
+
     /// <summary>What compiles a buffer for the questions asked between keystrokes, for a test and #58.</summary>
     /// <remarks>
     /// Published so that "this buffer is compiled once however many questions are asked of it" is a
@@ -195,6 +202,10 @@ public sealed class LanguageServerHost : IDisposable
         _connection.OnRequest(
             Methods.DocumentHighlight,
             (parameters, token) => AtPosition(parameters, _highlights.Read, _highlights.AnswerAsync, token),
+            concurrent: true);
+        _connection.OnRequest(
+            Methods.SignatureHelp,
+            (parameters, token) => AtPosition(parameters, _signatures.Read, _signatures.AnswerAsync, token),
             concurrent: true);
 
         _connection.OnNotification(Methods.Initialized, (_, token) => Initialized(token));
@@ -396,6 +407,13 @@ public sealed class LanguageServerHost : IDisposable
                 ReferencesProvider = capabilities?.TextDocument?.References is null ? null : true,
                 DocumentHighlightProvider =
                     capabilities?.TextDocument?.DocumentHighlight is null ? null : true,
+                SignatureHelpProvider = capabilities?.TextDocument?.SignatureHelp is null
+                    ? null
+                    : new SignatureHelpOptions
+                    {
+                        TriggerCharacters = SignatureHelpProvider.TriggerCharacters,
+                        RetriggerCharacters = SignatureHelpProvider.RetriggerCharacters,
+                    },
                 Workspace = new WorkspaceServerCapabilities
                 {
                     WorkspaceFolders = new WorkspaceFoldersServerCapabilities(),
@@ -582,6 +600,7 @@ public sealed class LanguageServerHost : IDisposable
         _classification.Forget(uri);
         _references.Forget(uri);
         _highlights.Forget(uri);
+        _signatures.Forget(uri);
 
         // And what was remembered about it. Every question comes through the store, so once the
         // document is closed nothing can ask -- and an entry nothing can ask for is a syntax tree and

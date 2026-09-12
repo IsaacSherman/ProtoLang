@@ -354,8 +354,7 @@ internal static class HoverCard
         => result.Module?.Scope.FirstOrDefault(entry => entry.Declaration.Id == symbol.Id)?.Type;
 
     private static IrMethodSignature? SignatureOf(CompilationResult result, DeclaredSymbol symbol)
-        => result.Module?.Methods
-            .FirstOrDefault(method => method.Signature.Id == symbol.Id)?.Signature;
+        => result.Module?.SignatureOf(symbol.Id);
 
     /// <summary>The field descriptor the IR node under this name carries.</summary>
     /// <remarks>

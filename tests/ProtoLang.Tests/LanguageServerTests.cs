@@ -306,6 +306,129 @@ public class LanguageServerTests
         Assert.Equal(0, client.Host.Classification.Outstanding);
     }
 
+    /// <summary>
+    /// The three requests #51 added are offered only to a client that asked about them.
+    /// </summary>
+    [Fact]
+    public async Task ReferencesHighlightingAndSignatureHelpAreOfferedOnlyToAClientThatAskedAboutThem()
+    {
+        await using var asking = LanguageServerClient.Create();
+        var offered = await asking.InitializeAsync(LanguageServerClient.FullCapabilities, null);
+
+        await using var silent = LanguageServerClient.Create();
+        var withheld = await silent.InitializeAsync(
+            new ClientCapabilities { TextDocument = new TextDocumentClientCapabilities() },
+            null);
+
+        Assert.True(offered.Capabilities.ReferencesProvider);
+        Assert.True(offered.Capabilities.DocumentHighlightProvider);
+        Assert.Equal(
+            SignatureHelpProvider.TriggerCharacters,
+            offered.Capabilities.SignatureHelpProvider!.TriggerCharacters);
+
+        Assert.Null(withheld.Capabilities.ReferencesProvider);
+        Assert.Null(withheld.Capabilities.DocumentHighlightProvider);
+        Assert.Null(withheld.Capabilities.SignatureHelpProvider);
+    }
+
+    /// <summary>
+    /// Each of the three is registered, reaches its provider, and comes back in the shape LSP asks for.
+    /// </summary>
+    /// <remarks>
+    /// The wire half of what <see cref="ReferenceTests"/> and <see cref="SignatureHelpTests"/> assert
+    /// of the providers: that the method names are spelled right, that the params deserialize, and
+    /// that the answers serialize. A method name is a string a client and a server have to agree on
+    /// exactly, and a typo in one is a feature that silently does not exist.
+    /// </remarks>
+    [Fact]
+    public async Task TheThreeNewRequestsAreAnsweredOverTheWire()
+    {
+        const string Bound =
+            """
+            import proto "fixtures.proto";
+
+            extend Outer {
+                fn scaled(factor: int64) -> int64 {
+                    return factor * count;
+                }
+
+                fn twice() -> int64 {
+                    return scaled(2);
+                }
+            }
+            """;
+
+        await using var client = await LanguageServerClient.StartAsync();
+
+        // Written beside the fixture schemas, because a buffer that resolves no import never reaches
+        // the binder and all three of these would then be answering nothing for the right reason.
+        var path = Path.Combine(EditorFixture.DirectoryWithSchemas(), "source.protolang");
+        File.WriteAllText(path, Bound);
+
+        var uri = UriOf(path);
+        client.Notify(Methods.DidOpen, Open(uri, Bound));
+
+        var caret = At(uri, Bound, "factor");
+
+        var found = (await client.RequestAsync(
+            Methods.References,
+            new ReferenceParams
+            {
+                TextDocument = caret.TextDocument,
+                Position = caret.Position,
+                Context = new ReferenceContext { IncludeDeclaration = true },
+            }))
+            .Deserialize<Location[]>(LspJson.Options);
+
+        // The parameter is declared once and read once.
+        Assert.NotNull(found);
+        Assert.Equal(2, found!.Length);
+        Assert.All(found, location => Assert.Equal(uri, location.Uri));
+
+        var highlights = (await client.RequestAsync(Methods.DocumentHighlight, caret))
+            .Deserialize<DocumentHighlight[]>(LspJson.Options);
+
+        Assert.NotNull(highlights);
+        Assert.Equal(found.Length, highlights!.Length);
+        Assert.Contains(highlights, highlight => highlight.Kind == DocumentHighlightKind.Text);
+
+        var help = (await client.RequestAsync(Methods.SignatureHelp, At(uri, Bound, "return scaled(", 14)))
+            .Deserialize<SignatureHelp>(LspJson.Options);
+
+        Assert.NotNull(help);
+        Assert.Equal(
+            "fn scaled(factor: int64) -> int64",
+            Assert.Single(help!.Signatures).Label);
+    }
+
+    /// <summary>Closing a document abandons the three kinds of work #51 added for it.</summary>
+    /// <inheritdoc cref="ClosingADocumentAbandonsTheNavigationOutstandingForIt" path="/summary"/>
+    [Fact]
+    public async Task ClosingADocumentAbandonsTheReferenceWorkOutstandingForIt()
+    {
+        await using var client = await LanguageServerClient.StartAsync();
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        await client.RequestAsync(Methods.DocumentHighlight, At(uri, NoImports, "total"));
+        await client.RequestAsync(Methods.SignatureHelp, At(uri, NoImports, "total"));
+
+        client.Notify(Methods.DidClose, new DidCloseTextDocumentParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = uri },
+        });
+
+        // Asked after the close, so the notification has certainly been handled: the connection drains
+        // notifications in order and this request is behind it.
+        await client.RequestAsync(
+            Methods.DocumentSymbol, new DocumentSymbolParams { TextDocument = new() { Uri = uri } });
+
+        Assert.Equal(0, client.Host.References.Outstanding);
+        Assert.Equal(0, client.Host.Highlights.Outstanding);
+        Assert.Equal(0, client.Host.Signatures.Outstanding);
+    }
+
     /// <summary>Everything this server looks for, plus the intention to ask for differences.</summary>
     private static ClientCapabilities WantingDeltas()
     {

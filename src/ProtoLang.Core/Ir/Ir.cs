@@ -30,6 +30,16 @@ public sealed record IrModule(IReadOnlyList<IrMethod> Methods, IReadOnlyList<IrT
         => [.. Methods.Where(method
             => string.Equals(method.Receiver.FullName, receiverFullName, StringComparison.Ordinal))];
 
+    /// <summary>The method <paramref name="symbol"/> identifies, or null when this module declares no
+    /// such method.</summary>
+    /// <remarks>
+    /// The way back from what a caret resolved to. A reference carries an identity and nothing else,
+    /// and every surface that wants to describe the method -- a hover, signature help -- needs the
+    /// signature behind it, so the walk lives here rather than once in each of them.
+    /// </remarks>
+    public IrMethodSignature? SignatureOf(SymbolId symbol)
+        => Methods.FirstOrDefault(method => method.Signature.Id == symbol)?.Signature;
+
     /// <summary>
     /// Every place a name was written and resolved to a symbol, in
     /// <see cref="SymbolReference.InSourceOrder">source order</see>.
@@ -155,11 +165,61 @@ public sealed record IrMethodSignature(
     /// </para>
     /// </remarks>
     public string DisplayName
-        => $"fn {Name}({string.Join(", ", Parameters.Select(Describe))}) -> {ReturnType.DisplayName}";
+        => $"{Opening}{string.Join(Separator, Parameters.Select(Describe))}) -> {ReturnType.DisplayName}";
+
+    /// <summary>
+    /// Where each parameter sits inside <see cref="DisplayName"/>, in the order they are declared.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// So that a surface pointing at one parameter of a rendered signature can point at the right
+    /// characters. The alternative a caller has is to search the line for the parameter's text, and
+    /// it is wrong here rather than merely slower: ProtoLang lets a method declare one name twice, so
+    /// a search finds the first of two identical parameters and highlights it whichever one was
+    /// meant.
+    /// </para>
+    /// <para>
+    /// Built from the same three pieces the line is -- <see cref="Opening"/>, <see cref="Describe"/>
+    /// and <see cref="Separator"/> -- so there is no second spelling of the format to fall out of
+    /// step with the first. Change the rendering and these move with it.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<ParameterLabel> ParameterLabels
+    {
+        get
+        {
+            var labels = new List<ParameterLabel>(Parameters.Count);
+            var at = Opening.Length;
+
+            foreach (var parameter in Parameters)
+            {
+                var written = Describe(parameter).Length;
+
+                labels.Add(new ParameterLabel(at, at + written));
+                at += written + Separator.Length;
+            }
+
+            return labels;
+        }
+    }
+
+    private string Opening => $"fn {Name}(";
+
+    private const string Separator = ", ";
 
     private static string Describe(IrParameter parameter)
         => $"{parameter.Name}: {parameter.Type.DisplayName}";
 }
+
+/// <summary>Where one parameter sits inside a rendered signature.</summary>
+/// <param name="Start">The first character of the parameter, counted from the start of the line.</param>
+/// <param name="End">One past its last character, so <c>End - Start</c> is its length.</param>
+/// <remarks>
+/// Half-open at the end, matching <see cref="Diagnostics.SourceSpan"/> and the protocol this is
+/// eventually written to, so that no consumer has to remember which of the two conventions applies
+/// where.
+/// </remarks>
+public sealed record ParameterLabel(int Start, int End);
 
 public sealed record IrParameter(DeclarationSite Declaration, PlType Type)
 {

@@ -29,7 +29,7 @@ namespace ProtoLang.LanguageServer.Hosting;
 /// </para>
 /// <para>
 /// Everything about supersession, the concurrency bound and the staleness refusal is
-/// <see cref="DeferredAnswers"/>'s, stated once there for all three surfaces that leave the process.
+/// <see cref="DeferredAnswers"/>'s, stated once there for every surface that leaves the process.
 /// A hover superseded by the next hover is the ordinary case: a pointer crossing a line of code
 /// produces one request per token it passes over.
 /// </para>
