@@ -30,12 +30,21 @@ namespace ProtoLang.LanguageServer.Hosting;
 /// facts about the same declaration rather than two renderings of one.
 /// </para>
 /// <para>
-/// <b>A test nests under the <c>extend</c> whose receiver it names, by spelling.</b> Resolving the
-/// two to one message is the binder's job and the binder is not here, so <c>extend
-/// protolang.tests.Outer</c> and <c>test Outer.f</c> are two names that a reader can see are the
-/// same and this cannot. The cost of being wrong is one test listed at the top level instead of
-/// nested, which is visible, harmless, and honest; the cost of compiling to avoid it is the outline
-/// disappearing whenever the schema does.
+/// <b>A test nests under the <c>extend</c> whose receiver it names, by spelling and when it is
+/// written beside it.</b> Resolving the two to one message is the binder's job and the binder is
+/// not here, so <c>extend protolang.tests.Outer</c> and <c>test Outer.f</c> are two names that a
+/// reader can see are the same and this cannot. The cost of being wrong is one test listed at the
+/// top level instead of nested, which is visible, harmless, and honest; the cost of compiling to
+/// avoid it is the outline disappearing whenever the schema does.
+/// </para>
+/// <para>
+/// <b>Beside, because a tree of ranges is read by containment.</b> A test is a top-level
+/// declaration written outside the block it tests, and LSP's outline is not merely a picture: a
+/// client works out which symbol the caret is in by descending into whichever range holds it, so a
+/// child written outside its parent is a child the breadcrumb bar and the outline's follow-cursor
+/// can never reach. What makes the nesting true rather than decorative is the block's range
+/// covering what hangs under it -- and that is only honest while the two are written together.
+/// <see cref="TestsBeside"/> is where the rule lives and why it stops where it does.
 /// </para>
 /// </remarks>
 public static class DocumentOutline
@@ -53,38 +62,112 @@ public static class DocumentOutline
         var tokens = new Lexer(text, SourceIdentity.UnsavedName, diagnostics).Tokenize();
         var unit = new Parser(tokens, SourceIdentity.UnsavedName, diagnostics).ParseCompilationUnit();
 
-        var tests = unit.Tests.ToList();
+        var declarations = InSourceOrder(unit);
         var outline = new List<DocumentSymbol>();
 
-        foreach (var extend in unit.Extends)
+        for (var index = 0; index < declarations.Count; index++)
         {
-            var receiver = extend.MessageName.Text;
-            var nested = tests
-                .Where(test => Targets(test, receiver))
-                .Select(Test)
-                .ToList();
+            switch (declarations[index])
+            {
+                case ExtendDeclaration extend:
+                    var beside = TestsBeside(declarations, index, extend.MessageName.Text);
 
-            tests.RemoveAll(test => Targets(test, receiver));
+                    outline.Add(Block(extend, beside));
+                    index += beside.Count;
+                    break;
 
-            outline.Add(Entry(
-                Named(extend.MessageName, "extend"),
-                detail: null,
-                SymbolKind.Class,
-                extend.Span,
-                extend.MessageName.Span,
-                [.. extend.Methods.Select(Method), .. nested]));
+                // Whatever was not taken by the block above it: a test of a message extended
+                // elsewhere, one written away from its block, or one whose receiver is still being
+                // typed. Listed rather than dropped, because a declaration missing from an outline
+                // reads as a declaration that is not there.
+                case TestDeclaration test:
+                    outline.Add(Test(test));
+                    break;
+            }
         }
 
-        // Whatever named no extend block in this file: a test of a message extended elsewhere, or
-        // one whose receiver is still being typed. Listed rather than dropped, because a declaration
-        // missing from an outline reads as a declaration that is not there.
-        outline.AddRange(tests.Select(Test));
-
-        // Source order across the whole file. The two lists are separate on the compilation unit and
-        // an author interleaves them, so the order they arrive in is not the order they were written
-        // in -- and an outline that disagrees with the file it describes is one nobody trusts twice.
-        return [.. outline.OrderBy(symbol => symbol.Range.Start.Line).ThenBy(symbol => symbol.Range.Start.Character)];
+        return outline;
     }
+
+    /// <summary>The declarations an outline shows, in the order they were written.</summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="CompilationUnit"/> keeps extends and tests in two lists and an author interleaves
+    /// them, so neither list on its own is the file's order -- and an outline that disagrees with
+    /// the file it describes is one nobody trusts twice. The order decides more than what a reader
+    /// sees here: it is also what says which tests are written beside which block.
+    /// </para>
+    /// <para>
+    /// Imports are left out rather than filtered afterwards, which is what makes this list the whole
+    /// answer to "what does the outline walk": an outline lists what a file declares, and an import
+    /// declares nothing. Anything added to the unit later is out of the outline until it is added
+    /// here, which is one edit in one place rather than a case that silently does nothing.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<SyntaxNode> InSourceOrder(CompilationUnit unit)
+        => [.. unit.Extends
+            .Cast<SyntaxNode>()
+            .Concat(unit.Tests)
+            .OrderBy(declaration => declaration.Span.Start.Offset)];
+
+    /// <summary>An <c>extend</c> block, holding its methods and whatever nests under it.</summary>
+    /// <remarks>
+    /// The range covers the tests as well as the block, which is what makes them reachable by a
+    /// client that descends a tree by containment rather than merely drawing it. Its children are in
+    /// source order without being sorted, because the methods are inside the block and the tests
+    /// immediately follow it.
+    /// </remarks>
+    private static DocumentSymbol Block(ExtendDeclaration extend, IReadOnlyList<TestDeclaration> beside)
+        => Entry(
+            Named(extend.MessageName, "extend"),
+            detail: null,
+            SymbolKind.Class,
+            Covering(extend.Span, beside),
+            extend.MessageName.Span,
+            [.. extend.Methods.Select(Method), .. beside.Select(Test)]);
+
+    /// <summary>The run of tests written straight after a block, all of them naming it.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The run stops at the first declaration that is not one of them, and that is the point.</b>
+    /// Nesting a test means widening the block's range to cover it, because a child outside its
+    /// parent is one no client can descend to. Widening across something else would swallow it:
+    /// two top-level entries would overlap, and a caret inside the second would be reported as
+    /// being inside the first -- a wrong answer, where declining to nest is only a less useful
+    /// one.
+    /// </para>
+    /// <para>
+    /// Forward only. A test is written after the thing it tests, and looking backwards as well
+    /// would buy the unusual layout at the price of a block whose range starts before its own
+    /// keyword. A test written away from its block is listed on its own, which is the answer a test
+    /// whose receiver names no block at all already gets.
+    /// </para>
+    /// </remarks>
+    private static List<TestDeclaration> TestsBeside(
+        IReadOnlyList<SyntaxNode> declarations, int block, string receiver)
+    {
+        List<TestDeclaration> beside = [];
+
+        for (var index = block + 1; index < declarations.Count; index++)
+        {
+            if (declarations[index] is not TestDeclaration test || !Targets(test, receiver))
+            {
+                break;
+            }
+
+            beside.Add(test);
+        }
+
+        return beside;
+    }
+
+    /// <summary>The block and everything nested under it, as one range.</summary>
+    /// <remarks>
+    /// The last of them is enough: the run is contiguous and in source order, so nothing nested
+    /// reaches past it.
+    /// </remarks>
+    private static SourceSpan Covering(SourceSpan block, IReadOnlyList<TestDeclaration> beside)
+        => beside.Count == 0 ? block : SourceSpan.Union(block, beside[^1].Span);
 
     /// <summary>
     /// The same outline for a client that cannot show a tree, with the nesting kept as a name.

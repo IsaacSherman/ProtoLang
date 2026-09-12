@@ -43,6 +43,35 @@ public class DocumentSymbolTests
         }
         """;
 
+    /// <summary>The same declarations, with the test written away from the block it names.</summary>
+    /// <remarks>
+    /// The layout that decides whether nesting is real or decorative: nesting this test under
+    /// <c>Outer</c> puts a child two declarations below its parent, and widening <c>Outer</c> to
+    /// reach it swallows <c>Mapped</c> whole.
+    /// </remarks>
+    private const string Scattered =
+        """
+        import proto "fixtures.proto";
+
+        extend protolang.tests.Outer {
+            fn scaled(scale: int64) -> int64 {
+                return count * scale;
+            }
+        }
+
+        extend protolang.tests.Mapped {
+            fn tallied() -> int64 {
+                return count;
+            }
+        }
+
+        test protolang.tests.Outer.scaled "doubles what it is given" {
+            receiver { count = 2; }
+            arg scale = 3;
+            expect return 12;
+        }
+        """;
+
     private static IReadOnlyList<DocumentSymbol> Outline(string text) => DocumentOutline.Of(text);
 
     private static DocumentSymbol Named(IEnumerable<DocumentSymbol> outline, string name)
@@ -149,6 +178,72 @@ public class DocumentSymbolTests
         }
     }
 
+    /// <summary>
+    /// A client works out which symbol the caret is in by descending into whichever range holds it,
+    /// so a child outside its parent is a child the breadcrumb bar and the outline's follow-cursor
+    /// can never reach. Swept, because one entry getting it wrong is exactly how this fails.
+    /// </summary>
+    [Theory]
+    [InlineData(Source)]
+    [InlineData(Scattered)]
+    [InlineData(Broken)]
+    [InlineData(Unnamed)]
+    [InlineData(Nothing)]
+    [Trait("ReviewRegression", "OutlineChildContainment")]
+    public void EveryChildLiesInsideTheRangeOfWhateverHoldsIt(string text)
+    {
+        foreach (var (parent, child) in Nestings(Outline(text)))
+        {
+            Assert.True(
+                Contains(parent.Range, child.Range),
+                $"'{child.Name}' hangs under '{parent.Name}' at {Show(child.Range)}, which is not "
+                    + $"inside the {Show(parent.Range)} that holds it");
+        }
+    }
+
+    /// <summary>
+    /// Two entries the caret can be inside at once is worse than one it can reach through neither:
+    /// the same descent reports whichever comes first, so a caret in the second is told it is in the
+    /// first.
+    /// </summary>
+    [Theory]
+    [InlineData(Source)]
+    [InlineData(Scattered)]
+    [InlineData(Broken)]
+    [InlineData(Unnamed)]
+    [InlineData(Nothing)]
+    public void NoTopLevelEntryReachesIntoTheOneAfterIt(string text)
+    {
+        var outline = Outline(text);
+
+        foreach (var (earlier, later) in outline.Zip(outline.Skip(1)))
+        {
+            Assert.True(
+                Before(earlier.Range.End, later.Range.Start),
+                $"'{earlier.Name}' ends at {Show(earlier.Range)}, which reaches into the "
+                    + $"{Show(later.Range)} that '{later.Name}' occupies");
+        }
+    }
+
+    /// <summary>
+    /// Nesting means the block's range covers what hangs under it, and that is only honest while the
+    /// two are written together. A test written away from its block is listed on its own -- the same
+    /// answer a test whose receiver names no block at all already gets.
+    /// </summary>
+    [Fact]
+    public void ATestWrittenAwayFromItsBlockIsListedOnItsOwn()
+    {
+        var outline = Outline(Scattered);
+
+        Assert.Equal(
+            ["protolang.tests.Outer", "protolang.tests.Mapped", "doubles what it is given"],
+            outline.Select(symbol => symbol.Name));
+
+        Assert.DoesNotContain(
+            Named(outline, "protolang.tests.Outer").Children!,
+            child => child.Kind == SymbolKind.Function);
+    }
+
     [Fact]
     public void AMethodSelectsItsOwnNameAndSpansItsWholeDeclaration()
     {
@@ -253,6 +348,14 @@ public class DocumentSymbolTests
 
     private static IReadOnlyList<DocumentSymbol> Flatten(IEnumerable<DocumentSymbol> outline)
         => [.. outline.SelectMany(symbol => new[] { symbol }.Concat(Flatten(symbol.Children ?? [])))];
+
+    /// <summary>Every entry paired with whatever holds it, at any depth.</summary>
+    private static IEnumerable<(DocumentSymbol Parent, DocumentSymbol Child)> Nestings(
+        IEnumerable<DocumentSymbol> outline)
+        => outline.SelectMany(
+            parent => (parent.Children ?? [])
+                .Select(child => (parent, child))
+                .Concat(Nestings(parent.Children ?? [])));
 
     private static bool Contains(Range outer, Range inner)
         => Before(outer.Start, inner.Start) && Before(inner.End, outer.End);
