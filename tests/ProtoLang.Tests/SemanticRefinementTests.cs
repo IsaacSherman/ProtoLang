@@ -333,14 +333,26 @@ public class SemanticRefinementTests
 
         var names = await NamesAsync(Source);
 
+        var stored = names.Where(name => storage.Contains(name.Token.Type, StringComparer.Ordinal)).ToList();
+        var other = names.Where(name => elsewhere.Contains(name.Token.Type, StringComparer.Ordinal)).ToList();
+
+        // Every category named above is actually written somewhere in the fixture. Without this the
+        // two sweeps below are assertions over nothing the moment refinement stops happening at all,
+        // which is the one failure they exist to catch.
         Assert.All(
-            names.Where(name => storage.Contains(name.Token.Type, StringComparer.Ordinal)),
+            [.. storage, .. elsewhere],
+            category => Assert.Contains(
+                names,
+                name => string.Equals(name.Token.Type, category, StringComparison.Ordinal)));
+
+        Assert.All(
+            stored,
             name => Assert.True(
                 name.Token.Has(SemanticTokenLegend.ReadOnly),
                 $"'{name.Text}' is a {name.Token.Type}, which spec 18 forbids assigning"));
 
         Assert.All(
-            names.Where(name => elsewhere.Contains(name.Token.Type, StringComparer.Ordinal)),
+            other,
             name => Assert.False(
                 name.Token.Has(SemanticTokenLegend.ReadOnly),
                 $"'{name.Text}' is a {name.Token.Type}, which is not a place a value is kept"));
@@ -517,6 +529,7 @@ public class SemanticRefinementTests
 
         var names = await NamesAsync(Source, lexical);
 
+        Assert.NotEmpty(names);
         Assert.All(names, name => Assert.Equal(SemanticTokenLegend.Variable, name.Token.Type));
 
         // The whole document is still classified, not merely the identifiers in it.
@@ -643,6 +656,9 @@ public class SemanticRefinementTests
         documents.Apply(uri, 2, [new TextDocumentContentChangeEvent { Text = edited }]);
 
         var delta = Assert.IsType<SemanticTokensDelta>(await AskAsync(provider, uri, first.ResultId));
+
+        // Or the sweep below is an assertion about nothing.
+        Assert.NotEmpty(delta.Edits);
 
         Assert.All(delta.Edits, edit =>
         {

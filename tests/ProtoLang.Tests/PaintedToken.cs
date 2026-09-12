@@ -44,11 +44,26 @@ internal readonly record struct PaintedToken(
     }
 
     /// <summary>Whether this token carries <paramref name="modifier"/>, by its legend name.</summary>
-    public bool Has(string modifier)
-    {
-        var bit = SemanticTokenLegend.TokenModifiers.ToList().IndexOf(modifier);
+    /// <remarks>
+    /// A name the legend does not carry throws rather than answering false. A misspelled modifier
+    /// would otherwise make every <c>Assert.False(token.Has(...))</c> in the suite pass for the wrong
+    /// reason, which is the failure a test helper is least able to notice about itself.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The legend declares no such modifier.</exception>
+    public bool Has(string modifier) => (Modifiers & (1 << BitOf(modifier))) != 0;
 
-        return bit >= 0 && (Modifiers & (1 << bit)) != 0;
+    private static int BitOf(string modifier)
+    {
+        for (var bit = 0; bit < SemanticTokenLegend.TokenModifiers.Count; bit++)
+        {
+            if (string.Equals(SemanticTokenLegend.TokenModifiers[bit], modifier, StringComparison.Ordinal))
+            {
+                return bit;
+            }
+        }
+
+        throw new ArgumentOutOfRangeException(
+            nameof(modifier), modifier, "The legend does not carry that modifier.");
     }
 
     /// <summary>The text this token covers, which is how an assertion names one.</summary>

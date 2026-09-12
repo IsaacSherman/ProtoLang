@@ -341,9 +341,14 @@ public sealed class LanguageServerHost : IDisposable
             _log.Level = TraceLevel.Parse(trace);
         }
 
+        // Asked once and used twice below -- what is retained and what is advertised are two halves of
+        // one promise, and a server that retains an answer it did not offer to send, or offers one it
+        // is not keeping, has broken the half nobody is looking at.
+        var deltas = WantsDeltas(capabilities);
+
         _definition.LinkSupport = capabilities?.TextDocument?.Definition?.LinkSupport is true;
         _classification.Client = ClientLegend.Of(capabilities?.TextDocument?.SemanticTokens);
-        _classification.Deltas = WantsDeltas(capabilities);
+        _classification.Deltas = deltas;
         _outlineNests = capabilities?.TextDocument?.DocumentSymbol?.HierarchicalDocumentSymbolSupport is true;
 
         _configuration.Negotiate(capabilities);
@@ -363,7 +368,7 @@ public sealed class LanguageServerHost : IDisposable
                     : new SemanticTokensOptions
                     {
                         Legend = SemanticTokenLegend.Wire,
-                        Full = new SemanticTokensFullOptions { Delta = WantsDeltas(capabilities) },
+                        Full = new SemanticTokensFullOptions { Delta = deltas },
                     },
                 CompletionProvider = capabilities?.TextDocument?.Completion is null
                     ? null

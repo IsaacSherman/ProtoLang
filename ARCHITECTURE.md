@@ -157,6 +157,7 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | The server itself | `LanguageServerHost` | [Hosting/LanguageServerHost.cs](src/ProtoLang.LanguageServer/Hosting/LanguageServerHost.cs) |
 | Who is told what is wrong with which file | `DiagnosticRouter`, `DiagnosticContribution` | [Hosting/DiagnosticRouter.cs](src/ProtoLang.LanguageServer/Hosting/DiagnosticRouter.cs) |
 | What the compiler tells an editor to colour | `SemanticTokenLegend`, `SemanticTokenEncoder` | [Hosting/SemanticTokenLegend.cs](src/ProtoLang.LanguageServer/Hosting/SemanticTokenLegend.cs) |
+| Who serves that, and what this client can paint | `ClassificationProvider`, `ClientLegend`, `SemanticTokenDiff` | [Hosting/ClassificationProvider.cs](src/ProtoLang.LanguageServer/Hosting/ClassificationProvider.cs), [Hosting/ClientLegend.cs](src/ProtoLang.LanguageServer/Hosting/ClientLegend.cs) |
 | Where a comment was | `Comment` | [Syntax/Comment.cs](src/ProtoLang.Core/Syntax/Comment.cs) |
 | Written or not-yet-written names | `SyntaxName` | [Syntax/SyntaxName.cs](src/ProtoLang.Core/Syntax/SyntaxName.cs) |
 | What became of an import | `ImportResolution` | [ImportResolution.cs](src/ProtoLang.Core/ImportResolution.cs) |
@@ -245,8 +246,9 @@ Draining in order is the default and is right for a handler that is arithmetic o
 server already holds. A handler that **leaves the process** — one that opens a directory, or waits on
 a tool — opts out with `OnRequest(..., concurrent: true)`, because answered in order it holds the
 reading worker for as long as the outside world takes, and behind it sit every `didChange`, every
-`didClose`, and the `$/cancelRequest` that would have shortened it. Completion is the only such
-handler today, and what it owes in return is four things, all of them easy to get wrong:
+`didClose`, and the `$/cancelRequest` that would have shortened it. Completion was the first such
+handler and is where the rules were worked out; hover, go-to-definition and classification have since
+joined it. What one owes in return is four things, all of them easy to get wrong:
 
 - **Settle which buffer the request is about before yielding.** `CompletionProvider.Read` runs on the
   ordered worker; only the walk is deferred. Deferring the lookup lets the `didChange` behind the
@@ -265,15 +267,26 @@ handler today, and what it owes in return is four things, all of them easy to ge
   request: it sits inside the same cleanup as the walk, so a request that ends while waiting is still
   retired, and gives back only a slot it actually took.
 
-Hover, go-to-definition and the outline arrive on the same terms and split three ways. The outline
-lexes and parses and stops, so it answers on the ordered worker beside classification, never waits on
-protoc, and survives a file that does not parse — which is the point of it, since an outline that
-vanishes while you type is worse than a stale one. Hover and go-to-definition can only be answered by
-the binder, so both compile through `DocumentSemantics` and both are concurrent, and everything the
+Hover, go-to-definition, classification and the outline arrive on the same terms and split two ways.
+The outline lexes and parses and stops, so it alone still answers on the ordered worker, never waits
+on protoc, and survives a file that does not parse — which is the point of it, since an outline that
+vanishes while you type is worse than a stale one. The other three can only be answered by the
+binder, so each compiles through `DocumentSemantics` and each is concurrent, and everything the
 architecture above demands of a concurrent handler is stated once in
-[`DeferredAnswers`](src/ProtoLang.LanguageServer/Hosting/DeferredAnswers.cs) rather than three times:
+[`DeferredAnswers`](src/ProtoLang.LanguageServer/Hosting/DeferredAnswers.cs) rather than four times:
 supersession per document, a bounded gate, abandoning work nobody waits for, and the staleness
 refusal. One instance per request kind, because a passing mouse must not cancel a deliberate click.
+
+Classification is the one that moved. #42 answered it from the lexer in the instant it was read and
+#50 gave every identifier the category of the symbol the binder resolved it to, which means the
+binder and therefore the same treatment as hover. It transcribes rather than asks: the range and the
+identity of every name were already recorded as the binder resolved them, so the colour is that
+record read back and cannot disagree with completion, with navigation, or with the code that gets
+generated. What it may never cost is colour — a name that resolved to nothing, a file that did not
+parse and a schema that would not load all keep the lexical answer — and a client that asks for
+differences rather than whole answers is sent the integers that changed, one retained answer per open
+document, paired with the name it was published under so an answer that was never delivered cannot be
+diffed against.
 
 What they answer is joined in one place. `DeclaredSymbol` turns a caret into a symbol and then asks
 whichever compiler owns the declaration — `SemanticModel.DeclarationOf` for a local, a parameter, a
@@ -414,5 +427,7 @@ name may mean, from a compilation kept between keystrokes. #44 built the first n
 hover, the document outline, go-to-definition — and reached Core twice, both times to open a door that
 was missing rather than to reshape one: a schema declaration is now reachable by identity and not only
 by descriptor, which is what a caret on a type name produces, and the walk that finds it is the walk
-the source index already performed. Everything from here should be additive: new
+the source index already performed. #50 finished the semantic token work #42 left half done, and
+reached Core once, additively: the reference index already held every name a file resolved, in order,
+and had no way to hand over the whole sequence at once. Everything from here should be additive: new
 types, new projects. Rewriting the binder is the signal to stop and re-scope.
