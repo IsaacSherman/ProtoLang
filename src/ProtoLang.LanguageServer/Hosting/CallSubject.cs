@@ -55,9 +55,13 @@ internal sealed record CallSubject(SourceSpan Callee, int ActiveParameter)
     /// author has not finished typing past cannot have changed anything yet.
     /// </para>
     /// <para>
-    /// Nothing is suppressed inside a string literal. A string is a single token, so a comma inside
-    /// one is not an argument separator and cannot be miscounted -- and a caret inside a string is
-    /// still a caret supplying that argument, which is what a reader of the panel wants to know.
+    /// Nothing is suppressed inside a string literal or a comment, where <see cref="CompletionSubject"/>
+    /// suppresses in both -- and the difference is the question being asked rather than an oversight. A
+    /// completion inside a literal would offer names that cannot go there; a caret inside a literal or a
+    /// comment is still a caret supplying an argument to the call around it, which is what a reader of
+    /// the panel wants to know. Neither can miscount, either: a string is a single token, and a comment
+    /// is not in the token stream at all, so an unbalanced parenthesis written inside either one is
+    /// invisible here rather than mistaken for structure.
     /// </para>
     /// </remarks>
     public static bool TryFind(string text, int offset, out CallSubject? subject)

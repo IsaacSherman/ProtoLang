@@ -86,7 +86,12 @@ internal static class SymbolLocations
             ? DocumentUri.FromPath(path).ToString()
             : asked.ToString();
     }
-}
 
-/// <summary>A declaration reduced to what the wire carries: a document and two ranges.</summary>
-internal sealed record Declared(string Uri, SourceSpan Extent, SourceSpan Name);
+    /// <summary>A declaration reduced to what the wire carries: a document and two ranges.</summary>
+    /// <remarks>
+    /// Nested, because <c>Declared</c> says nothing on its own in a namespace that also holds
+    /// <see cref="DeclaredSymbol"/> and answers about <see cref="Symbols.DeclarationSite"/>. Qualified
+    /// by the type that produces it, it says which of the three it is.
+    /// </remarks>
+    internal sealed record Declared(string Uri, SourceSpan Extent, SourceSpan Name);
+}

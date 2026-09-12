@@ -87,9 +87,18 @@ public sealed class HighlightProvider
     public void Forget(DocumentUri document) => _deferred.Forget(document);
 
     /// <remarks>
+    /// <para>
     /// Every occurrence is in this document, so no filtering by file is needed: a reference is
     /// recorded where the name was written, and a schema symbol's declaration -- the one thing that
     /// lives elsewhere -- is not a reference and is not in the list.
+    /// </para>
+    /// <para>
+    /// That rests on a compilation holding one ProtoLang source, as every position query on
+    /// <see cref="Semantics.SemanticModel"/> does. When one holds several (#27) the references come
+    /// from all of them and this has to drop the ones written in another file -- a range measured in
+    /// one buffer and painted into a different one lands on unrelated text, or past the end of a
+    /// shorter one.
+    /// </para>
     /// </remarks>
     private DocumentHighlight[]? Answer(PositionRequest asked, CancellationToken cancellationToken)
     {

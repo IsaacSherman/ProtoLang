@@ -95,10 +95,17 @@ public sealed class ReferenceProvider
     public void Forget(DocumentUri document) => _deferred.Forget(document);
 
     /// <remarks>
-    /// In source order, because that is the order the index publishes and the order a reader expects
-    /// to walk a file in. Nothing sorts here: a second ordering is a second answer, and
+    /// <para>
+    /// The uses come in source order, because that is the order the index publishes and the order a
+    /// reader expects to walk a file in. Nothing sorts here: a second ordering is a second answer, and
     /// <see cref="SymbolReference.InSourceOrder"/> is already total rather than merely deterministic
     /// so the list cannot shuffle between two identical requests.
+    /// </para>
+    /// <para>
+    /// A schema symbol's declaration is appended after them rather than placed among them, because it
+    /// is in a different file and its offsets say nothing about where it belongs in this one. The
+    /// whole list is deterministic; only the part of it that is in this document is in source order.
+    /// </para>
     /// </remarks>
     private Location[]? Answer(
         PositionRequest asked, bool includeDeclaration, CancellationToken cancellationToken)

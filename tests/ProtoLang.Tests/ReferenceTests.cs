@@ -263,6 +263,9 @@ public class ReferenceTests
             session.InThisDocument(await session.LocationsAsync(EditorFixture.At(Source, "total")))
                 .Select(location => location.Range));
 
+        // An empty list and a single-element one are sorted whatever the order rule is.
+        Assert.True(starts.Count > 1, "the fixture must write `total` more than once");
+
         Assert.Equal(starts.Order(), starts);
     }
 
@@ -474,6 +477,10 @@ public class ReferenceTests
         var at = EditorFixture.At(Source, name);
 
         var highlighted = Starts(Source, (await session.HighlightsAsync(at)).Select(h => h.Range)).Order();
+
+        // Or two features that had both stopped answering would agree about nothing, which is the one
+        // way this test could pass while saying nothing.
+        Assert.NotEmpty(highlighted);
 
         Assert.Equal(session.Here(await session.LocationsAsync(at)), highlighted);
     }
