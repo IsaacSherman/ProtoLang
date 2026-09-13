@@ -44,8 +44,9 @@ namespace ProtoLang.LanguageServer.Hosting;
 /// nothing scheduled that would correct them.
 /// </para>
 /// <para>
-/// The numbers below -- the interval, the concurrency limit -- are still #57's, which measures rather
-/// than guesses.
+/// The numbers below -- the interval, the concurrency limit -- were #57's to pin, and it measured
+/// rather than guessed. Both stand. What the measurement moved is the argument for them, which is
+/// in <c>docs/performance.md</c>.
 /// </para>
 /// </remarks>
 public sealed class CompileScheduler
@@ -53,17 +54,24 @@ public sealed class CompileScheduler
     /// <summary>How long typing has to pause before a compile starts.</summary>
     /// <remarks>
     /// A quarter of a second: long enough that a fluent typist produces one compile per pause rather
-    /// than one per word, short enough that the squiggles still feel attached to the typing. #57 pins
-    /// it against a measured budget; it is a value here rather than a constant threaded through the
-    /// code so that pinning it is a one-line change.
+    /// than one per word, short enough that the squiggles still feel attached to the typing. #57
+    /// measured what follows it: a whole-buffer compile of a file ten times normal size is 33 ms at
+    /// p95, so this quarter second is almost all of the delay a reader experiences and the compile is
+    /// almost none of it. That is the right way round -- the pause is a choice about typing and the
+    /// compile is a cost -- and it means the number to revisit if diagnostics feel slow is this one.
+    /// It is a value rather than a constant threaded through the code so that changing it stays a
+    /// one-line change.
     /// </remarks>
     public static TimeSpan DefaultDebounce => TimeSpan.FromMilliseconds(250);
 
     /// <summary>How many documents may be compiling at once.</summary>
     /// <remarks>
-    /// Each compile can start a protoc, so ten open files must not mean ten processes. Four is a
-    /// guess; #57 pins it against measured latency, and <see cref="PeakInFlight"/> is what shows
-    /// whether whatever it is pinned to is being honoured.
+    /// Each compile can start a protoc, so ten open files must not mean ten processes. Four was a
+    /// guess and #57 measured it: four concurrent cold loads take the thread pool from seven to
+    /// fifteen, because #54's abandonable wait costs a second blocked thread per load. It holds on a
+    /// sixteen-processor machine and the measurement says nothing kinder about a four-core one, so it
+    /// stays at four until somebody measures there. <see cref="PeakInFlight"/> is what shows whether
+    /// it is being honoured.
     /// </remarks>
     public const int DefaultConcurrency = 4;
 

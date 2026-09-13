@@ -18,8 +18,9 @@ namespace ProtoLang.Semantics;
 /// carries lies before that point -- so a child can fall outside its parent, and refusing to look
 /// inside a parent that does not contain the offset would lose exactly the node an editor is asking
 /// about. Every node is visited and the best is kept, which is a linear scan of a method body per
-/// request. No index is built until something measures a need for one; #57 is the issue that would
-/// measure it.
+/// request. No index is built until something measures a need for one, and #57 measured: the answers
+/// that go through this are between 0.5 and 1.5 ms at p95 against budgets of 20 to 100 ms, so an
+/// index would be a structure to invalidate in exchange for nothing a reader could feel.
 /// </para>
 /// </remarks>
 internal static class PositionSearch

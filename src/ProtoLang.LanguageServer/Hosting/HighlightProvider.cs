@@ -25,9 +25,10 @@ namespace ProtoLang.LanguageServer.Hosting;
 /// <b>It fires on caret movement, which makes it the most latency-sensitive request here.</b> What
 /// it does is a walk of the names in the file and a dictionary lookup, over an index built when the
 /// buffer was last compiled -- so moving a caret through an unedited file rebuilds nothing and
-/// compiles nothing. Nothing is cached on top of that and nothing should be until #57 says what the
-/// budget is; the reference index is consulted directly, and if that ever proves too slow it is a
-/// finding about #40 rather than something to paper over here.
+/// compiles nothing. Nothing is cached on top of that, and #57 measured why nothing should be: 1.2 ms
+/// at p95 on a file ten times normal size, against a 20 ms budget. The reference index is consulted
+/// directly, which is what #57 was asked to confirm was affordable, and a cache here would be
+/// complexity bought with latency nobody can perceive.
 /// </para>
 /// <para>
 /// Read in order and answered out of it, bounded and refused when stale. Its own outstanding work,
