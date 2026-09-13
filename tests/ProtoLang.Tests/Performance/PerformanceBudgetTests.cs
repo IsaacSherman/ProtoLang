@@ -32,7 +32,7 @@ public class PerformanceBudgetTests
 {
     /// <summary>Every budgeted operation, measured on the stress corpus, warm.</summary>
     [Fact]
-    public async Task EveryBudgetedOperationIsWithinItsBudget()
+    public void EveryBudgetedOperationIsWithinItsBudget()
     {
         if (!Sampler.Requested)
         {
@@ -43,7 +43,7 @@ public class PerformanceBudgetTests
 
         foreach (var corpus in new[] { PerformanceCorpus.Normal, PerformanceCorpus.Stress })
         {
-            await MeasureAsync(report, corpus);
+            Measure(report, corpus);
         }
 
         report.Note($"Descriptor cache capacity is {ProtoLang.Binding.DescriptorCache.DefaultCapacity} entries.");
@@ -53,7 +53,10 @@ public class PerformanceBudgetTests
         var over = report.Samples
             .Where(sample => sample.Corpus == PerformanceCorpus.Stress)
             .Select(sample => (sample, budget: PerformanceBudgets.All.SingleOrDefault(b => b.Operation == sample.Operation)))
-            .Where(pair => pair.budget is not null && pair.sample.P95 > pair.budget.Milliseconds)
+            // Negated rather than `>`, so that a sample which produced no runs at all -- p95 of NaN,
+            // which compares false against everything -- fails here instead of passing silently. The
+            // report renders the same condition as "over", and the two must not disagree.
+            .Where(pair => pair.budget is not null && !(pair.sample.P95 <= pair.budget.Milliseconds))
             .Select(pair => $"{pair.sample.Operation}: {pair.sample.P95:0.0} ms against {pair.budget!.Milliseconds:0} ms")
             .ToList();
 
@@ -86,7 +89,7 @@ public class PerformanceBudgetTests
         }
     }
 
-    private static async Task MeasureAsync(PerformanceReport report, string corpus)
+    private static void Measure(PerformanceReport report, string corpus)
     {
         var workspace = new PerformanceWorkspace(corpus).Warm();
         var text = workspace.Text;
@@ -94,7 +97,13 @@ public class PerformanceBudgetTests
         // The widely referenced method, which is the worst case highlighting has and the whole
         // reason the stress file has one. On the normal corpus its nearest equivalent stands in.
         var shared = corpus == PerformanceCorpus.Stress ? StressCorpus.Shared : "line_total_cents";
-        var onShared = workspace.At($"{shared}()") + 1;
+
+        // A call and not the declaration. `At(shared)` would find `fn base_cents(`, because a
+        // declaration and a call are the same shape and the declaration comes first -- which is the
+        // trap five of #51's tests fell into, passing for the wrong reason until a guard exposed
+        // them. The work is the same either way here, but a caret is on a call far more often than
+        // on the line that introduced the name, and a measurement should describe the common case.
+        var onShared = workspace.At($"= {shared}();") + "= ".Length;
 
         report.Add(Sampler.Time(
             PerformanceBudgets.Hover,
@@ -137,8 +146,6 @@ public class PerformanceBudgetTests
         }
 
         report.Add(MeasureDiagnostics(workspace));
-
-        await Task.CompletedTask;
     }
 
     /// <summary>

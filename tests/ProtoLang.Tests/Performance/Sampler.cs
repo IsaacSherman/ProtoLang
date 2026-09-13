@@ -12,9 +12,9 @@ internal sealed record Sample(string Operation, string Corpus, string Warmth, IR
 
     public double P95 => Percentile(95);
 
-    public double Min => Milliseconds.Min();
+    public double Min => Milliseconds.Count == 0 ? double.NaN : Milliseconds.Min();
 
-    public double Max => Milliseconds.Max();
+    public double Max => Milliseconds.Count == 0 ? double.NaN : Milliseconds.Max();
 
     /// <remarks>
     /// Nearest-rank on the sorted samples: no interpolation, so every figure reported is a run that
@@ -23,6 +23,13 @@ internal sealed record Sample(string Operation, string Corpus, string Warmth, IR
     /// </remarks>
     private double Percentile(int percentile)
     {
+        // A sample with no runs in it is a measurement that did not happen, and reporting 0.00 ms for
+        // it would read as the fastest row in the table.
+        if (Milliseconds.Count == 0)
+        {
+            return double.NaN;
+        }
+
         var sorted = Milliseconds.Order().ToArray();
         var rank = (int)Math.Ceiling(percentile / 100.0 * sorted.Length) - 1;
 

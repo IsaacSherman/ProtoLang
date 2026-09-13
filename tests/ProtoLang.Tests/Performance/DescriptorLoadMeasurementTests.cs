@@ -177,7 +177,15 @@ public class DescriptorLoadMeasurementTests
         var full = Settle();
         var perEntry = (full - settled) / (double)DescriptorCache.DefaultCapacity;
 
+        // The reading has to be plausible before it is reported. A heap measurement taken across a
+        // collection can come back negative or absurd if the timing is unlucky, and a note printing
+        // "-3 KiB per bundle" is worse than a failure: it is a number somebody would quote. Bounds
+        // rather than an expected value, because the point is to catch nonsense and not to pin a
+        // figure the schema closure decides.
         Assert.Equal(DescriptorCache.DefaultCapacity, held.Count);
+        Assert.True(
+            perEntry > 1024 && perEntry < 100 * 1024 * 1024,
+            $"a retained bundle measured at {perEntry:0} bytes is not a measurement, it is noise");
 
         report.Note(
             $"A retained bundle for the examples' schema closure is about {perEntry / 1024:0} KiB, so a full "

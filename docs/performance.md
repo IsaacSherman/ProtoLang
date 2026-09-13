@@ -109,11 +109,15 @@ numbers below are a snapshot and the report is the authority.
 
 | Operation | Normal p95 | Stress p95 | Budget |
 |---|---:|---:|---:|
-| hover | 0.6 ms | 1.3 ms | 50 ms |
-| occurrence highlighting | 0.5 ms | 1.2 ms | 20 ms |
-| go-to-definition | 1.0 ms | 1.5 ms | 100 ms |
-| diagnostics after edit | 1.3 ms | 33.0 ms | 400 ms |
-| completion | 2.7 ms | 40.6 ms | 50 ms |
+| hover | 0.5 ms | 0.9 ms | 50 ms |
+| occurrence highlighting | 0.7 ms | 1.2–1.7 ms | 20 ms |
+| go-to-definition | 0.7 ms | 1.2–1.5 ms | 100 ms |
+| diagnostics after edit | 1.0 ms | 29–33 ms | 400 ms |
+| completion | 1.9 ms | 41–48 ms | 50 ms |
+
+Ranges where repeated runs on the same machine disagreed by more than rounding. That spread is
+itself a result: a single figure would imply a precision these measurements do not have, and the
+operation whose spread matters is the one closest to its ceiling.
 
 **Four of the five have one to two orders of magnitude of headroom, and that is the finding.** #57
 exists partly to inform design — whether scope data is cached, whether occurrence highlighting can
@@ -122,12 +126,16 @@ answers are: **no caching is warranted**, **yes it can**, and the reference inde
 20 ms budget on a file ten times normal size is not something to optimise. Anything built on top of
 those paths to make them faster would be paying complexity for latency nobody can perceive.
 
-**Completion on the stress corpus is the one operation near its budget**, at 27 ms median and 41 ms
-at p95 against 50 ms, with individual runs reaching 46 ms. It is the row to watch, it is the row a
-new feature should be measured against before it is added, and it is the reason the budget was not
-tightened to match current performance: a budget is a threshold a person can feel, not a ratchet
-against the last measurement. Tightening it to just above today's number would fail on a slower
-machine without anything having got worse.
+**Completion on the stress corpus is the one operation near its budget** — 37 ms median and 48 ms at
+p95 against 50 ms on the slowest run observed, and it did not clear 41 ms on the fastest. It is
+within budget and it is the row that will not stay within budget by accident. It is the row a new
+feature should be measured against before it is added, and `ScopeSearch` — the linear scan it leans
+on hardest — is the first place to look if it ever goes over.
+
+The budget was **not** tightened to match the other four, and that is deliberate: a budget is a
+threshold a person can feel, not a ratchet against the last measurement. Tightening hover to 2 ms
+because it measures 0.9 ms would fail on a slower machine without anything having got worse, and
+would say nothing about whether a hover felt slow. Regressions are the cost assertions' job.
 
 ### Descriptor loads, and the bounds that come off them
 
