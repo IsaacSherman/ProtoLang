@@ -1,3 +1,4 @@
+using ProtoLang.Binding;
 using ProtoLang.Syntax;
 using Xunit;
 
@@ -138,5 +139,63 @@ public class ImportResolutionTests
         var import = Assert.Single(result.Imports);
         Assert.Equal(ImportOutcome.Resolved, import.Outcome);
         Assert.Equal(Path.Combine(directory, "broken.proto"), import.ResolvedPath);
+    }
+
+    // ------------------------------------------------------- what it nearly said
+
+    /// <summary>
+    /// The half of <c>PL0002</c> a reader can act on. A list of directories helps somebody who
+    /// already knew what they were aiming at; the name of the schema beside the one they typed tells
+    /// them what they got wrong.
+    /// </summary>
+    [Fact]
+    public void AnUnresolvedImportNamesTheSchemaItAlmostNamed()
+    {
+        var result = CompileSource("import proto \"invoic.proto\";\n" + Body);
+
+        var reported = Assert.Single(result.Diagnostics, d => d.Code == "PL0002");
+
+        Assert.Contains("invoice.proto", reported.Help);
+        Assert.StartsWith("Did you mean", reported.Help, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// And where nothing is close enough to name, the help is the sentence it has always been --
+    /// which is why the diagnostics the command line already renders do not move.
+    /// </summary>
+    [Fact]
+    public void AnUnresolvedImportWithNothingLikeItSaysOnlyWhereItLooked()
+    {
+        var result = CompileSource("import proto \"nosuch.proto\";\n" + Body);
+
+        var reported = Assert.Single(result.Diagnostics, d => d.Code == "PL0002");
+
+        Assert.StartsWith("Searched: ", reported.Help, StringComparison.Ordinal);
+        Assert.DoesNotContain("Did you mean", reported.Help);
+    }
+
+    /// <summary>
+    /// The suggestion is drawn from the roots this import was searched against, so a schema that
+    /// resolves only because protoc contributes its own directory is one the suggestion can reach.
+    /// </summary>
+    [Fact]
+    /// <remarks>
+    /// The gate is asked of the environment before the compilation runs, not of the answer afterwards.
+    /// Skipping because no suggestion came back would skip on exactly the regression this exists to
+    /// catch: break the near match, or drop the loader's own roots, and the test would report green.
+    /// </remarks>
+    public void ANearMissOnAWellKnownSchemaIsNamedFromProtocsOwnDirectory()
+    {
+        var loader = DescriptorLoader.CreateDefault();
+        if (loader.ImplicitIncludePaths.Count == 0)
+        {
+            Assert.Skip($"'{loader.ProtocPath}' ships no well-known schemas as files.");
+        }
+
+        var result = CompileSource("import proto \"google/protobuf/timestam.proto\";\n" + Body);
+
+        var reported = Assert.Single(result.Diagnostics, d => d.Code == "PL0002");
+
+        Assert.Contains("google/protobuf/timestamp.proto", reported.Help);
     }
 }

@@ -181,6 +181,310 @@ public class LanguageServerTests
         Assert.Null(withheld.Capabilities.SemanticTokensProvider);
     }
 
+    /// <summary>
+    /// A difference is offered only to a client that said it would ask for one.
+    /// </summary>
+    /// <remarks>
+    /// Promising a delta to a client that cannot send the request would buy nothing and cost a
+    /// retained answer per open document, which is why the server reads the capability rather than
+    /// advertising what it happens to be able to do.
+    /// </remarks>
+    [Fact]
+    public async Task DeltasAreOfferedOnlyToAClientThatAskedForThem()
+    {
+        await using var asking = LanguageServerClient.Create();
+        var offered = await asking.InitializeAsync(WantingDeltas(), null);
+
+        await using var content = LanguageServerClient.Create();
+        var withheld = await content.InitializeAsync(LanguageServerClient.FullCapabilities, null);
+
+        Assert.True(offered.Capabilities.SemanticTokensProvider!.Full.Delta);
+        Assert.False(withheld.Capabilities.SemanticTokensProvider!.Full.Delta);
+    }
+
+    /// <summary>Both spellings LSP allows for the delta capability mean what they say.</summary>
+    /// <remarks>
+    /// The member is <c>boolean | { delta?: boolean }</c> on the wire and this server reads it from
+    /// real clients that pick either. Asserted against the JSON rather than against the record,
+    /// because the record is the half that cannot be got wrong.
+    /// </remarks>
+    [Theory]
+    [InlineData("true", false)]
+    [InlineData("false", false)]
+    [InlineData("{}", false)]
+    [InlineData("{\"delta\":false}", false)]
+    [InlineData("{\"delta\":true}", true)]
+    public void EitherSpellingOfTheDeltaCapabilityIsUnderstood(string written, bool wanted)
+    {
+        var capabilities = JsonSerializer.Deserialize<SemanticTokensClientCapabilities>(
+            "{\"requests\":{\"full\":" + written + "}}", LspJson.Options);
+
+        Assert.Equal(wanted, capabilities!.Requests!.Full!.Delta);
+    }
+
+    /// <summary>A client that asked for differences is sent one, and it rebuilds the whole answer.</summary>
+    /// <remarks>
+    /// The wire half of what <see cref="SemanticRefinementTests"/> asserts of the provider: that the
+    /// method is registered, that the two shapes survive serialization, and that what comes back
+    /// really is a difference rather than a whole answer wearing the wrong name.
+    /// </remarks>
+    [Fact]
+    public async Task ADeltaOverTheWireRebuildsTheWholeClassification()
+    {
+        await using var client = await LanguageServerClient.StartAsync(capabilities: WantingDeltas());
+
+        const string Start = "extend X {\n}\n";
+
+        var uri = UriOf(WriteDocument(Start));
+        client.Notify(Methods.DidOpen, Open(uri, Start));
+
+        var first = (await client.RequestAsync(
+            Methods.SemanticTokensFull,
+            new SemanticTokensParams { TextDocument = new TextDocumentIdentifier { Uri = uri } }))
+            .Deserialize<SemanticTokens>(LspJson.Options)!;
+
+        Assert.NotNull(first.ResultId);
+
+        client.Notify(Methods.DidChange, Change(uri, 2, Replace(1, 0, 1, 1, "fn total() -> int64 {\n}\n}")));
+
+        var delta = (await client.RequestAsync(
+            Methods.SemanticTokensFullDelta,
+            new SemanticTokensDeltaParams
+            {
+                TextDocument = new TextDocumentIdentifier { Uri = uri },
+                PreviousResultId = first.ResultId!,
+            }))
+            .Deserialize<SemanticTokensDelta>(LspJson.Options)!;
+
+        Assert.NotEmpty(delta.Edits);
+
+        var rebuilt = new List<int>(first.Data);
+
+        foreach (var edit in delta.Edits.OrderByDescending(edit => edit.Start))
+        {
+            rebuilt.RemoveRange(edit.Start, edit.DeleteCount);
+            rebuilt.InsertRange(edit.Start, edit.Data ?? []);
+        }
+
+        Assert.Equal(SemanticTokenEncoder.Encode("extend X {\nfn total() -> int64 {\n}\n}\n", uri).Data, rebuilt);
+    }
+
+    /// <summary>
+    /// Closing a document abandons the classification outstanding for it and gives back what was being
+    /// kept to answer a delta with.
+    /// </summary>
+    /// <remarks>
+    /// The retention is the one thing this request holds between calls, so it is the one thing a close
+    /// has to take back. Left behind, an editor that opens and closes files all day accumulates an
+    /// integer array per file it has ever shown.
+    /// </remarks>
+    [Fact]
+    public async Task ClosingADocumentForgetsTheClassificationKeptForIt()
+    {
+        await using var client = await LanguageServerClient.StartAsync(capabilities: WantingDeltas());
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        await client.RequestAsync(
+            Methods.SemanticTokensFull,
+            new SemanticTokensParams { TextDocument = new TextDocumentIdentifier { Uri = uri } });
+
+        Assert.Equal(1, client.Host.Classification.Retained);
+
+        client.Notify(Methods.DidClose, new DidCloseTextDocumentParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = uri },
+        });
+
+        // Asked after the close, so the notification has certainly been handled: the connection drains
+        // notifications in order and this request is behind it.
+        await client.RequestAsync(
+            Methods.DocumentSymbol, new DocumentSymbolParams { TextDocument = new() { Uri = uri } });
+
+        Assert.Equal(0, client.Host.Classification.Retained);
+        Assert.Equal(0, client.Host.Classification.Outstanding);
+    }
+
+    /// <summary>
+    /// The three requests #51 added are offered only to a client that asked about them.
+    /// </summary>
+    [Fact]
+    public async Task ReferencesHighlightingAndSignatureHelpAreOfferedOnlyToAClientThatAskedAboutThem()
+    {
+        await using var asking = LanguageServerClient.Create();
+        var offered = await asking.InitializeAsync(LanguageServerClient.FullCapabilities, null);
+
+        await using var silent = LanguageServerClient.Create();
+        var withheld = await silent.InitializeAsync(
+            new ClientCapabilities { TextDocument = new TextDocumentClientCapabilities() },
+            null);
+
+        Assert.True(offered.Capabilities.ReferencesProvider);
+        Assert.True(offered.Capabilities.DocumentHighlightProvider);
+        Assert.Equal(
+            SignatureHelpProvider.TriggerCharacters,
+            offered.Capabilities.SignatureHelpProvider!.TriggerCharacters);
+
+        Assert.Null(withheld.Capabilities.ReferencesProvider);
+        Assert.Null(withheld.Capabilities.DocumentHighlightProvider);
+        Assert.Null(withheld.Capabilities.SignatureHelpProvider);
+    }
+
+    /// <summary>
+    /// Each of the three is registered, reaches its provider, and comes back in the shape LSP asks for.
+    /// </summary>
+    /// <remarks>
+    /// The wire half of what <see cref="ReferenceTests"/> and <see cref="SignatureHelpTests"/> assert
+    /// of the providers: that the method names are spelled right, that the params deserialize, and
+    /// that the answers serialize. A method name is a string a client and a server have to agree on
+    /// exactly, and a typo in one is a feature that silently does not exist.
+    /// </remarks>
+    [Fact]
+    public async Task TheThreeNewRequestsAreAnsweredOverTheWire()
+    {
+        const string Bound =
+            """
+            import proto "fixtures.proto";
+
+            extend Outer {
+                fn scaled(factor: int64) -> int64 {
+                    return factor * count;
+                }
+
+                fn twice() -> int64 {
+                    return scaled(2);
+                }
+            }
+            """;
+
+        await using var client = await LanguageServerClient.StartAsync();
+
+        // Written beside the fixture schemas, because a buffer that resolves no import never reaches
+        // the binder and all three of these would then be answering nothing for the right reason.
+        var path = Path.Combine(EditorFixture.DirectoryWithSchemas(), "source.protolang");
+        File.WriteAllText(path, Bound);
+
+        var uri = UriOf(path);
+        client.Notify(Methods.DidOpen, Open(uri, Bound));
+
+        var caret = At(uri, Bound, "factor");
+
+        var found = (await client.RequestAsync(
+            Methods.References,
+            new ReferenceParams
+            {
+                TextDocument = caret.TextDocument,
+                Position = caret.Position,
+                Context = new ReferenceContext { IncludeDeclaration = true },
+            }))
+            .Deserialize<Location[]>(LspJson.Options);
+
+        // The parameter is declared once and read once.
+        Assert.NotNull(found);
+        Assert.Equal(2, found!.Length);
+        Assert.All(found, location => Assert.Equal(uri, location.Uri));
+
+        var highlights = (await client.RequestAsync(Methods.DocumentHighlight, caret))
+            .Deserialize<DocumentHighlight[]>(LspJson.Options);
+
+        Assert.NotNull(highlights);
+        Assert.Equal(found.Length, highlights!.Length);
+        Assert.Contains(highlights, highlight => highlight.Kind == DocumentHighlightKind.Text);
+
+        var help = (await client.RequestAsync(Methods.SignatureHelp, At(uri, Bound, "return scaled(", 14)))
+            .Deserialize<SignatureHelp>(LspJson.Options);
+
+        Assert.NotNull(help);
+        Assert.Equal(
+            "fn scaled(factor: int64) -> int64",
+            Assert.Single(help!.Signatures).Label);
+    }
+
+    /// <summary>A client that never opted into label offsets receives ordinary string labels.</summary>
+    [Fact]
+    [Trait("ReviewRegression", "SignatureLabelCapability")]
+    public async Task SignatureParameterLabelsRemainStringsUnlessOffsetsWereNegotiated()
+    {
+        const string Bound =
+            """
+            import proto "fixtures.proto";
+            extend Outer {
+                fn scaled(factor: int64) -> int64 { return factor; }
+                fn calls() -> int64 { return scaled(2); }
+            }
+            """;
+
+        // An empty signatureHelp capability asks for the feature, not for labelOffsetSupport.
+        var capabilities = new ClientCapabilities
+        {
+            TextDocument = new TextDocumentClientCapabilities
+            {
+                SignatureHelp = new SignatureHelpClientCapabilities(),
+            },
+        };
+        await using var client = await LanguageServerClient.StartAsync(capabilities: capabilities);
+        var uri = UriOf(Path.Combine(EditorFixture.DirectoryWithSchemas(), "source.protolang"));
+        client.Notify(Methods.DidOpen, Open(uri, Bound));
+
+        var answer = await client.RequestAsync(
+            Methods.SignatureHelp, At(uri, Bound, "return scaled(", "return scaled(".Length));
+        var signature = Assert.Single(answer.GetProperty("signatures").EnumerateArray());
+        Assert.Equal("fn scaled(factor: int64) -> int64", signature.GetProperty("label").GetString());
+        var parameter = Assert.Single(signature.GetProperty("parameters").EnumerateArray());
+
+        Assert.Equal(JsonValueKind.String, parameter.GetProperty("label").ValueKind);
+        Assert.Equal("factor: int64", parameter.GetProperty("label").GetString());
+    }
+
+    /// <summary>Closing a document abandons the three kinds of work #51 added for it.</summary>
+    /// <inheritdoc cref="ClosingADocumentAbandonsTheNavigationOutstandingForIt" path="/summary"/>
+    [Fact]
+    public async Task ClosingADocumentAbandonsTheReferenceWorkOutstandingForIt()
+    {
+        await using var client = await LanguageServerClient.StartAsync();
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        await client.RequestAsync(Methods.DocumentHighlight, At(uri, NoImports, "total"));
+        await client.RequestAsync(Methods.SignatureHelp, At(uri, NoImports, "total"));
+
+        client.Notify(Methods.DidClose, new DidCloseTextDocumentParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = uri },
+        });
+
+        // Asked after the close, so the notification has certainly been handled: the connection drains
+        // notifications in order and this request is behind it.
+        await client.RequestAsync(
+            Methods.DocumentSymbol, new DocumentSymbolParams { TextDocument = new() { Uri = uri } });
+
+        Assert.Equal(0, client.Host.References.Outstanding);
+        Assert.Equal(0, client.Host.Highlights.Outstanding);
+        Assert.Equal(0, client.Host.Signatures.Outstanding);
+    }
+
+    /// <summary>Everything this server looks for, plus the intention to ask for differences.</summary>
+    private static ClientCapabilities WantingDeltas()
+    {
+        var capabilities = LanguageServerClient.FullCapabilities;
+
+        return capabilities with
+        {
+            TextDocument = capabilities.TextDocument! with
+            {
+                SemanticTokens = new SemanticTokensClientCapabilities
+                {
+                    Requests = new SemanticTokensRequests
+                    {
+                        Full = new SemanticTokensFullRequest { Delta = true },
+                    },
+                },
+            },
+        };
+    }
+
     [Fact]
     public async Task TheServerNegotiatesTheEncodingItsColumnsAreActuallyMeasuredIn()
     {
@@ -210,6 +514,236 @@ public class LanguageServerTests
         // A virtual workspace has no file system behind it and resolves nothing, but the session still
         // has to start: the user may have a real file open in it.
         Assert.NotEqual(JsonValueKind.Null, result.ValueKind);
+    }
+
+    /// <summary>
+    /// Each of the three navigation surfaces, withheld from a client that never said it wanted it.
+    /// Advertising one to a client that cannot use it is how a server comes to work in one editor
+    /// and fail silently in the other.
+    /// </summary>
+    [Fact]
+    public async Task NavigationIsOfferedOnlyToAClientThatAskedAboutIt()
+    {
+        await using var asking = LanguageServerClient.Create();
+        var offered = await asking.InitializeAsync(LanguageServerClient.FullCapabilities, null);
+
+        await using var silent = LanguageServerClient.Create();
+        var withheld = await silent.InitializeAsync(
+            new ClientCapabilities { TextDocument = new TextDocumentClientCapabilities() },
+            null);
+
+        Assert.True(offered.Capabilities.HoverProvider);
+        Assert.True(offered.Capabilities.DefinitionProvider);
+        Assert.True(offered.Capabilities.DocumentSymbolProvider);
+
+        Assert.Null(withheld.Capabilities.HoverProvider);
+        Assert.Null(withheld.Capabilities.DefinitionProvider);
+        Assert.Null(withheld.Capabilities.DocumentSymbolProvider);
+    }
+
+    // ------------------------------------------------------- navigation, over the wire
+
+    /// <summary>
+    /// The three requests answered through the framing, the lifecycle gate and the dispatch queue,
+    /// which is the part a provider test skips. What each one says is <see cref="HoverTests"/>,
+    /// <see cref="DefinitionTests"/> and <see cref="DocumentSymbolTests"/>; what is asserted here is
+    /// that a client asking the way an editor asks is answered at all.
+    /// </summary>
+    [Fact]
+    public async Task AHoverIsAnsweredOverTheWire()
+    {
+        var protoc = RequireBundledProtoc();
+        var source = File.ReadAllText(TestPaths.SimpleScript);
+
+        await using var client = await LanguageServerClient.StartAsync(
+            settings: Settings(new Dictionary<string, object?>
+            {
+                ["protocPath"] = protoc,
+                ["includePaths"] = new[] { TestPaths.ExampleProtoDirectory },
+            }));
+
+        var uri = UriOf(TestPaths.SimpleScript);
+        client.Notify(Methods.DidOpen, Open(uri, source));
+
+        var answer = await client.RequestAsync(Methods.Hover, At(uri, source, "quantity"));
+        var card = answer.Deserialize<Hover>(LspJson.Options);
+
+        Assert.NotNull(card);
+        Assert.Contains("quantity: int64", card!.Contents.Value, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A buffer with no usable schema stops before the binder, so there are no names to describe --
+    /// and the honest answer is no card rather than one saying nothing. The request still has to be
+    /// answered, which is what this pins: a null result rather than a refusal or a hang.
+    /// </summary>
+    [Fact]
+    public async Task AHoverInABufferWithNoSchemaIsAnsweredWithNothing()
+    {
+        await using var client = await LanguageServerClient.StartAsync();
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        var answer = await client.RequestAsync(Methods.Hover, At(uri, NoImports, "total"));
+
+        Assert.Equal(JsonValueKind.Null, answer.ValueKind);
+    }
+
+    /// <summary>
+    /// A call in a buffer whose schema was never importable. The receiver does not resolve, so the
+    /// binder skipped the extend block and no method was ever declared on it -- and the honest
+    /// answer is nowhere rather than a guess. It is the boundary of what an unresolved schema costs,
+    /// and it is stated rather than assumed.
+    /// </summary>
+    [Fact]
+    public async Task ADefinitionIsAnsweredOverTheWire()
+    {
+        const string source =
+            """
+            extend InvoiceItem {
+                fn total() -> int64 {
+                    return 1;
+                }
+
+                fn twice() -> int64 {
+                    return total() + total();
+                }
+            }
+            """;
+
+        await using var client = await LanguageServerClient.StartAsync();
+
+        var uri = UriOf(WriteDocument(source));
+        client.Notify(Methods.DidOpen, Open(uri, source));
+
+        var answer = await client.RequestAsync(Methods.Definition, At(uri, source, "return total()", 8));
+
+        Assert.Equal(JsonValueKind.Null, answer.ValueKind);
+    }
+
+    [Fact]
+    public async Task AnOutlineIsAnsweredOverTheWireEvenWithNoSchema()
+    {
+        await using var client = await LanguageServerClient.StartAsync();
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        var answer = await client.RequestAsync(
+            Methods.DocumentSymbol, new DocumentSymbolParams { TextDocument = new() { Uri = uri } });
+
+        var outline = answer.Deserialize<DocumentSymbol[]>(LspJson.Options);
+
+        Assert.Equal("InvoiceItem", Assert.Single(outline!).Name);
+    }
+
+    /// <summary>
+    /// A client that declared no hierarchical support is sent the flat shape, which carries a
+    /// location where the nested shape carries children. The two are not interchangeable: a client
+    /// handed the wrong one finds no member it knows and shows an empty outline.
+    /// </summary>
+    [Fact]
+    public async Task AClientThatCannotShowATreeIsSentTheFlatShape()
+    {
+        await using var client = LanguageServerClient.Create();
+
+        await client.InitializeAsync(
+            new ClientCapabilities
+            {
+                TextDocument = new TextDocumentClientCapabilities
+                {
+                    DocumentSymbol = new DocumentSymbolClientCapabilities(),
+                },
+            },
+            null);
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        var answer = await client.RequestAsync(
+            Methods.DocumentSymbol, new DocumentSymbolParams { TextDocument = new() { Uri = uri } });
+
+        var flat = answer.Deserialize<SymbolInformation[]>(LspJson.Options)!;
+
+        Assert.Equal(uri, Assert.Single(flat, symbol => symbol.Name == "total").Location.Uri);
+        Assert.Equal("InvoiceItem", Assert.Single(flat, symbol => symbol.Name == "total").ContainerName);
+    }
+
+    /// <summary>
+    /// Spec 26.1: an answer describes the version it was computed against, and a request that can
+    /// only answer about a superseded one is refused rather than answered. The rule completion
+    /// already obeys, stated here for the two requests that arrived with it.
+    /// </summary>
+    [Theory]
+    [InlineData(Methods.Hover)]
+    [InlineData(Methods.Definition)]
+    public async Task AnAnswerAboutABufferThatHasMovedOnIsRefusedRatherThanSent(string method)
+    {
+        await using var client = await LanguageServerClient.StartAsync();
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        var asked = client.Ask(method, At(uri, NoImports, "total"));
+
+        client.Notify(
+            Methods.DidChange,
+            Change(uri, 2, new TextDocumentContentChangeEvent { Text = NoImports + Environment.NewLine }));
+
+        var answered = await client.AnswerToAsync(asked);
+
+        // Which of the two happens is a race and both are correct: the edit may be applied before
+        // the request is read, in which case the answer is about the buffer the client now holds, or
+        // after it, in which case there is nothing honest to say. What must never happen is a third
+        // outcome -- an answer describing a version that has gone -- so the refusal, where there is
+        // one, has to be the one spec 26.1 names.
+        if (answered.Error is { } refusal)
+        {
+            Assert.Equal(ErrorCodes.ContentModified, refusal.Code);
+        }
+    }
+
+    /// <summary>
+    /// Closing a document abandons what is outstanding for it, which spec 26.1 requires of every kind
+    /// of work and not only of compiles.
+    /// </summary>
+    [Fact]
+    public async Task ClosingADocumentAbandonsTheNavigationOutstandingForIt()
+    {
+        await using var client = await LanguageServerClient.StartAsync();
+
+        var uri = UriOf(WriteDocument(NoImports));
+        client.Notify(Methods.DidOpen, Open(uri, NoImports));
+
+        await client.RequestAsync(Methods.Hover, At(uri, NoImports, "total"));
+
+        client.Notify(Methods.DidClose, new DidCloseTextDocumentParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = uri },
+        });
+
+        // Asked after the close, so that the notification has certainly been handled: the connection
+        // drains notifications in order, and this request is behind it.
+        await client.RequestAsync(
+            Methods.DocumentSymbol, new DocumentSymbolParams { TextDocument = new() { Uri = uri } });
+
+        Assert.Equal(0, client.Host.Hover.Outstanding);
+        Assert.Equal(0, client.Host.Definition.Outstanding);
+    }
+
+    /// <summary>A caret inside <paramref name="marker"/>, as a client sends it.</summary>
+    private static TextDocumentPositionParams At(string uri, string text, string marker, int into = 1)
+    {
+        var offset = text.IndexOf(marker, StringComparison.Ordinal);
+
+        Assert.True(offset >= 0, $"the fixture must contain '{marker}'");
+
+        return new TextDocumentPositionParams
+        {
+            TextDocument = new TextDocumentIdentifier { Uri = uri },
+            Position = EditorPositions.PositionAt(new Diagnostics.LineMap(text), offset + into),
+        };
     }
 
     // ------------------------------------------------------- diagnostics

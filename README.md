@@ -92,7 +92,7 @@ The typed IR is important. It gives the project a place to define semantics once
 
 The current draft specification template is in:
 
-[Protolang_Spec.md](Protolang_Spec.md)
+[Protolang_Spec/](Protolang_Spec/README.md), one file per numbered section
 
 That document separates:
 
@@ -137,6 +137,38 @@ backend. Backends reject these rather than emitting something whose semantics di
 ```bash
 dotnet test ProtoLang.slnx
 ```
+
+That is the whole gate, and it takes about two minutes because it builds and runs real generated
+projects in both backends rather than asserting about strings. It needs `protoc`, the .NET SDK and a
+C++ toolchain on the machine; a test that cannot find what it needs says so and declines rather than
+failing, so a short run with a lot of skips means a missing dependency rather than a passing suite.
+
+The SDK feature band is pinned in [`global.json`](global.json), and CI installs whatever it names, so
+a build here and a build there are the same build. Warnings are errors in this repository, which is
+what makes the pin worth having: an SDK that ships one new analyzer rule would otherwise turn a green
+change red on a schedule nobody here controls.
+
+Two checks are switched off by default, because neither is what a person mid-iteration wants to wait
+for:
+
+```bash
+PROTOLANG_SWEEP=1 dotnet test ProtoLang.slnx   # every completion item, at every caret, over the whole corpus
+PROTOLANG_SOAK=1 dotnet test ProtoLang.slnx    # a long editing session, watched for leaked work
+```
+
+In PowerShell the variable is set separately -- `$env:PROTOLANG_SWEEP = 1` -- and stays set for the
+rest of the session, so unset it with `$env:PROTOLANG_SWEEP = $null` when you want the short run back.
+
+Continuous integration turns both on. [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the
+full suite, both switches thrown, for **every pull request to `main` and every commit landed on
+`main` directly** -- and for nothing else. Pushing to a feature branch triggers no build, and a pull
+request left in draft is not tested until it is marked ready for review. So the cost of ordinary work
+is nothing, and the cost of proposing a change is one run of the same suite you would run yourself.
+
+A run that skips a gated test fails, rather than passing quickly. A switch that quietly stayed shut
+produces a green build indistinguishable from a thorough one, which is the failure this arrangement
+exists to prevent; [`report.ps1`](.github/workflows/report.ps1) names the gated tests and refuses a
+run that did not perform them.
 
 ### Running the compiler
 

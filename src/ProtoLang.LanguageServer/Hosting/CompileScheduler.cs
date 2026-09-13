@@ -69,7 +69,7 @@ public sealed class CompileScheduler
 
     private readonly DocumentStore _documents;
     private readonly ConfigurationSync _configuration;
-    private readonly LoaderPool _loaders;
+    private readonly DocumentSemantics _semantics;
     private readonly DiagnosticRouter _router;
     private readonly Func<DiagnosticMapper> _mapper;
     private readonly ServerLog _log;
@@ -86,11 +86,20 @@ public sealed class CompileScheduler
         Func<DiagnosticMapper> mapper,
         ServerLog log,
         TimeSpan? debounce = null,
-        int concurrency = DefaultConcurrency)
+        int concurrency = DefaultConcurrency,
+        DocumentSemantics? semantics = null)
     {
+        ArgumentNullException.ThrowIfNull(loaders);
+
         _documents = documents ?? throw new ArgumentNullException(nameof(documents));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-        _loaders = loaders ?? throw new ArgumentNullException(nameof(loaders));
+
+        // Optional, and shared where it is given. A host hands over the one every other question about
+        // a buffer goes through, so a compile scheduled by a keystroke and a completion asked between
+        // two keystrokes are the same compile rather than two of them. A caller with no interest in
+        // that -- a test exercising the scheduler alone -- gets one of its own and behaves as before.
+        _semantics = semantics ?? new DocumentSemantics(loaders);
+
         _router = router ?? throw new ArgumentNullException(nameof(router));
         _mapper = mapper ?? throw new ArgumentNullException(nameof(mapper));
         _log = log ?? throw new ArgumentNullException(nameof(log));
@@ -294,10 +303,9 @@ public sealed class CompileScheduler
         Interlocked.Increment(ref _compilations);
 
         var configuration = _configuration.Current;
-        var settings = configuration.Resolve(uri);
         var mapper = _mapper();
 
-        var contribution = Diagnose(document, settings, mapper, cancellationToken);
+        var contribution = Diagnose(document, configuration, mapper, cancellationToken);
 
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -330,11 +338,18 @@ public sealed class CompileScheduler
     /// <summary>Everything wrong with one document, under one settled configuration.</summary>
     private DiagnosticContribution Diagnose(
         OpenDocument document,
-        DocumentConfiguration settings,
+        WorkspaceConfiguration configuration,
         DiagnosticMapper mapper,
         CancellationToken cancellationToken)
     {
         var uri = document.Uri;
+
+        // Compiled through the same object every other question about this buffer goes through, so
+        // there is one spelling of "compile this document under these settings". Two would agree
+        // until one of them passed a different directory to ToSource, at which point the editor would
+        // predict imports resolving somewhere the compile does not look.
+        var compiled = _semantics.For(document, configuration, cancellationToken);
+        var settings = compiled.Settings;
 
         // A protoc that was named and cannot be built into a loader stops this document. Falling back
         // to a located one would compile against a different executable than the settings state, while
@@ -344,7 +359,7 @@ public sealed class CompileScheduler
         // a warning and falls through to the next source. This one exists and still cannot be used, it
         // is an error, and it stops the document -- a second meaning behind one code would leave a
         // reader looking up a severity the code is documented never to have.
-        if (!_loaders.TryGet(settings.ProtocPath, out var loader, out var failure) && settings.ProtocPath is not null)
+        if (compiled.LoaderFailure is { } failure && settings.ProtocPath is not null)
         {
             var refused = new DiagnosticContribution();
             refused.Add(
@@ -363,23 +378,20 @@ public sealed class CompileScheduler
             return WithConfiguration(refused, uri, settings, mapper);
         }
 
-        if (!settings.TryCreateCompilationOptions(loader, out var options))
+        if (compiled.Result is not { } result)
         {
             // A configuration file was found and refused. PL2106 is already in the settings
             // diagnostics, and nothing compiles until it is fixed.
             return WithConfiguration(new DiagnosticContribution(), uri, settings, mapper);
         }
 
-        var compilation = new Compilation(document.ToSource(settings.Folder?.Path), options!);
-        var result = compilation.Compile(cancellationToken);
+        ReportExpiry(result, uri, compiled.Loader);
 
-        ReportExpiry(result, uri, compilation.Loader);
-
-        // The roots protoc's own error messages are resolved against: what the compilation searched,
-        // then what the loader adds of its own. Taken from the compilation that ran rather than rebuilt,
-        // so a well-known schema resolves to the file protoc actually read.
-        IReadOnlyList<string> resolvePaths =
-            [.. result.SearchPaths, .. compilation.Loader?.ImplicitIncludePaths ?? []];
+        // The roots protoc's own error messages are resolved against. Taken from the compilation that
+        // ran rather than rebuilt, so a well-known schema resolves to the file protoc actually read,
+        // and asked of the one function that knows what the order is rather than spelled out again
+        // here -- a second spelling is how this comes to name a root the compilation never searched.
+        var resolvePaths = SchemaCatalog.RootsFor(result.SearchPaths, compiled.Loader);
 
         return WithConfiguration(
             CompilationDiagnostics.Build(result, uri, resolvePaths, mapper),

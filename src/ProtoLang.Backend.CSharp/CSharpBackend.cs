@@ -619,7 +619,7 @@ public sealed class CSharpBackend : ITestProjectScaffold
         var op = OperatorText(binary.Operator);
 
         // Integer / and % arrive as IrIntegerDivision, so only + - * reach here.
-        if (binary.IsArithmetic && binary.ResultType is ScalarType { IsInteger: true })
+        if (binary.OverflowingType is not null)
         {
             // Wrapping is the one policy C# can state inline: unchecked() gives both the semantics
             // and the grouping parentheses. The other two need to inspect the result, so they go
@@ -670,7 +670,7 @@ public sealed class CSharpBackend : ITestProjectScaffold
 
         if (unary.Operator == IrUnaryOperator.Negate)
         {
-            if (unary.ResultType is not ScalarType { IsInteger: true })
+            if (unary.OverflowingType is null)
             {
                 return $"(-{operand})";
             }

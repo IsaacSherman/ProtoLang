@@ -99,6 +99,25 @@ public sealed class LanguageServerClient : IAsyncDisposable
         {
             PublishDiagnostics = new PublishDiagnosticsClientCapabilities { RelatedInformation = true },
             SemanticTokens = new SemanticTokensClientCapabilities(),
+            Completion = new CompletionClientCapabilities(),
+            Hover = new HoverClientCapabilities(),
+            Definition = new DefinitionClientCapabilities { LinkSupport = true },
+            DocumentSymbol = new DocumentSymbolClientCapabilities
+            {
+                HierarchicalDocumentSymbolSupport = true,
+            },
+            References = new ReferenceClientCapabilities(),
+            DocumentHighlight = new DocumentHighlightClientCapabilities(),
+            SignatureHelp = new SignatureHelpClientCapabilities
+            {
+                SignatureInformation = new SignatureInformationClientCapabilities
+                {
+                    ParameterInformation = new ParameterInformationClientCapabilities
+                    {
+                        LabelOffsetSupport = true,
+                    },
+                },
+            },
         },
         General = new GeneralClientCapabilities { PositionEncodings = ["utf-16"] },
     };
@@ -299,7 +318,13 @@ public sealed class LanguageServerClient : IAsyncDisposable
 
     // ------------------------------------------------------- the plumbing
 
-    private async Task<IncomingMessage> AskAsync(string method, object? parameters)
+    /// <summary>Sends a request without waiting, and hands back the id it was sent under.</summary>
+    /// <remarks>
+    /// For the tests that need a request to be outstanding while something else happens: one that
+    /// cancels it, and one that asks whether the server is still answering anything at all while it
+    /// runs. <see cref="RequestAsync"/> is this plus the wait, so the two cannot send differently.
+    /// </remarks>
+    public int Ask(string method, object? parameters)
     {
         var id = Interlocked.Increment(ref _nextId);
 
@@ -311,11 +336,15 @@ public sealed class LanguageServerClient : IAsyncDisposable
             ["params"] = parameters,
         });
 
-        return await WaitForAsync(
-                message => message.IsResponse && message.Id?.Number == id,
-                $"an answer to '{method}'")
-            .ConfigureAwait(false);
+        return id;
     }
+
+    /// <summary>The server's answer to one outstanding request.</summary>
+    public Task<IncomingMessage> AnswerToAsync(int id)
+        => WaitForAsync(message => message.IsResponse && message.Id?.Number == id, $"an answer to request {id}");
+
+    private async Task<IncomingMessage> AskAsync(string method, object? parameters)
+        => await AnswerToAsync(Ask(method, parameters)).ConfigureAwait(false);
 
     private void Send(Dictionary<string, object?> message)
         => Frame(JsonSerializer.SerializeToUtf8Bytes(message, LspJson.Options));

@@ -143,6 +143,28 @@ message PresenceInner {
   int64 weight = 2;
 }
 
+// grouping.protolang -- parentheses around expressions (spec 7.1).
+//
+// Two message fields deep, so a chain of receivers can keep going past the parenthesized link rather
+// than ending at it, and both presence kinds a guard can ask about so the vectors can pin that a
+// guard written with parentheses covers a read written without them.
+message GroupingCase {
+  GroupingInner inner = 1;
+
+  optional int64 tuning = 2;
+  int64 count = 3;
+  int64 scale = 4;
+}
+
+message GroupingInner {
+  GroupingLeaf leaf = 1;
+  int64 weight = 2;
+}
+
+message GroupingLeaf {
+  int64 depth = 1;
+}
+
 // checked/checked_arithmetic.protolang -- the checked overflow policy (spec 10.4).
 message CheckedOverflowCase {
   int32 i32_left = 1;

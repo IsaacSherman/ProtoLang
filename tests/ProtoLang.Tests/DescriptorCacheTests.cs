@@ -25,6 +25,19 @@ namespace ProtoLang.Tests;
 /// </remarks>
 public class DescriptorCacheTests
 {
+    /// <summary>How long a wait between two threads of one test may go unanswered before it is a hang.</summary>
+    /// <remarks>
+    /// A liveness backstop rather than a latency assertion, and the same thirty seconds
+    /// <see cref="LanguageServerClient.Patience"/> and <c>ProcessSupervisionTests.Generous</c>
+    /// already use rather than a new number picked to make a run go green. What is asserted is that
+    /// the second thread got there at all; the deadline only has to outlast the worst scheduling
+    /// delay this suite can impose, and under <c>PROTOLANG_SWEEP</c> and <c>PROTOLANG_SOAK</c>
+    /// together that is considerably more than the five seconds this test used to allow -- it failed
+    /// on a full gated run and passed every time it ran alone. A generous deadline costs nothing on a
+    /// run that passes and still turns a hang into a failure rather than a suite that never finishes.
+    /// </remarks>
+    private static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
+
     private const string LeafSchema =
         """
         syntax = "proto3";
@@ -431,15 +444,15 @@ public class DescriptorCacheTests
                     Interlocked.Increment(ref firstLoadCount);
                     firstLoadStarted.Set();
                     Assert.True(
-                        firstLoadMayFinish.Wait(
-                            TimeSpan.FromSeconds(5),
-                            TestContext.Current.CancellationToken));
+                        firstLoadMayFinish.Wait(Patience, TestContext.Current.CancellationToken),
+                        "the test thread must reach the second request while this load is in flight");
                     return EmptyBundle();
                 }),
             TestContext.Current.CancellationToken);
 
         Assert.True(
-            firstLoadStarted.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+            firstLoadStarted.Wait(Patience, TestContext.Current.CancellationToken),
+            "the first load must be in flight before the second request evicts its entry");
 
         cache.GetOrLoad(secondRequest, EmptyBundle);
 
@@ -557,13 +570,21 @@ public class DescriptorCacheTests
     [Fact]
     public void AProtocNamedByARelativePathIsResolvedToTheFileItIs()
     {
-        var protoc = CopyProtoc();
-        var relative = Path.GetRelativePath(Environment.CurrentDirectory, protoc);
+        var protoc = CopyProtocUnderTheWorkingDirectory();
 
-        var loader = new DescriptorLoader(relative);
+        try
+        {
+            var relative = Path.GetRelativePath(Environment.CurrentDirectory, protoc);
 
-        Assert.False(Path.IsPathRooted(relative), "the fixture must actually exercise a relative path");
-        Assert.Equal(protoc, loader.ProtocPath);
+            var loader = new DescriptorLoader(relative);
+
+            Assert.False(Path.IsPathRooted(relative), "the fixture must actually exercise a relative path");
+            Assert.Equal(protoc, loader.ProtocPath);
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(protoc)!, recursive: true);
+        }
     }
 
     /// <summary>
@@ -922,6 +943,32 @@ public class DescriptorCacheTests
     {
         var source = RequireProtoc();
         var destination = Path.Combine(TestPaths.CreateTempDirectory(), Path.GetFileName(source));
+
+        File.Copy(source, destination);
+
+        return destination;
+    }
+
+    /// <summary>The same copy, somewhere a relative path can reach from the working directory.</summary>
+    /// <remarks>
+    /// <see cref="TestPaths.CreateTempDirectory"/> builds under <c>Path.GetTempPath()</c>, which is
+    /// on whichever volume the machine puts temporary files on, and the working directory is on
+    /// whichever volume the repository was cloned to. On a developer's machine those are the same
+    /// drive and a relative path between them exists. On a GitHub Windows runner they are not --
+    /// the checkout is on <c>D:</c> and the profile on <c>C:</c> -- and
+    /// <c>Path.GetRelativePath</c> hands back the absolute path, because there is no relative one to
+    /// give. The test that needed a relative path then failed on its own premise rather than on the
+    /// property it exists to pin. Building beneath the working directory removes the volumes from
+    /// the question entirely.
+    /// </remarks>
+    private static string CopyProtocUnderTheWorkingDirectory()
+    {
+        var source = RequireProtoc();
+        var directory = Path.Combine(Environment.CurrentDirectory, "protoc-" + Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        var destination = Path.Combine(directory, Path.GetFileName(source));
 
         File.Copy(source, destination);
 

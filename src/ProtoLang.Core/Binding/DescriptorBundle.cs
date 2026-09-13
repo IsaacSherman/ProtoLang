@@ -68,6 +68,9 @@ public sealed class DescriptorBundle
     /// </remarks>
     private readonly ConcurrentDictionary<string, SchemaSourceIndex> _sources = new(StringComparer.Ordinal);
 
+    /// <inheritdoc cref="Declaring"/>
+    private readonly Lazy<Dictionary<SymbolId, string>> _declaring;
+
     public DescriptorBundle(
         IReadOnlyList<FileDescriptor> descriptors,
         FileDescriptorSet set,
@@ -100,6 +103,8 @@ public sealed class DescriptorBundle
         {
             _descriptors[descriptor.Name] = descriptor;
         }
+
+        _declaring = new Lazy<Dictionary<SymbolId, string>>(DeclaringSchemas);
     }
 
     /// <summary>A load that named no schemas, which is what a source with no imports produces.</summary>
@@ -218,8 +223,78 @@ public sealed class DescriptorBundle
         return DeclarationIn(value.File.Name, SymbolId.ForEnumValue(value));
     }
 
+    /// <summary>
+    /// Where the schema element <paramref name="symbol"/> identifies was declared, or null when no
+    /// schema here declares it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The overloads above are for a caller already holding the descriptor -- an
+    /// <see cref="Ir.IrFieldAccess"/> carries one, an <see cref="Ir.IrEnumValue"/> carries two. This
+    /// is for the caller holding only an identity, which is what a caret gives: a name in type
+    /// position resolves to a type and leaves no IR node behind, so the only thing standing where
+    /// <c>fn f(x: Money)</c> mentions <c>Money</c> is the
+    /// <see cref="Symbols.SymbolReference"/> the binder recorded. Answering both from one method
+    /// would mean every caller first deciding which of four descriptors it was looking for.
+    /// </para>
+    /// <para>
+    /// Null for anything ProtoLang declares, which has no schema declaration by construction;
+    /// <see cref="Semantics.SemanticModel.DeclarationOf"/> is the other half of the question and the
+    /// two are asked in that order. Null also for a schema element some other load produced, which
+    /// is the same answer <see cref="DeclarationOf(MessageDescriptor)"/> gives in that case and for
+    /// the same reason.
+    /// </para>
+    /// </remarks>
+    public SchemaDeclaration? DeclarationOf(SymbolId symbol)
+        => Declaring.TryGetValue(symbol, out var schemaName) ? DeclarationIn(schemaName, symbol) : null;
+
     private SchemaDeclaration? DeclarationIn(string schemaName, SymbolId symbol)
         => SourceOf(schemaName)?.DeclarationOf(symbol);
+
+    /// <summary>Which schema declares each element, over the whole closure.</summary>
+    /// <remarks>
+    /// <para>
+    /// Built on the first identity anybody asks about, and not before: a compilation that is only
+    /// being emitted from never asks, and paying for the walk at construction would charge every
+    /// command-line build for something only an editor wants.
+    /// </para>
+    /// <para>
+    /// <b>Names rather than declarations, which is the whole reason this is affordable.</b> The
+    /// declarations themselves are <see cref="SchemaSourceIndex"/>'s, built per file, kept per file
+    /// and re-checked against the file on every question -- so an index of them over the closure
+    /// would read and hash every <c>.proto</c> in it before answering anything, including the
+    /// well-known types nobody asked about. What this holds is the one fact that cannot change
+    /// while the bundle stands: which file a descriptor came out of. Everything that can change is
+    /// still asked of the file, one file at a time.
+    /// </para>
+    /// <para>
+    /// Not concurrent, unlike <see cref="_sources"/>, because it is written once and read
+    /// afterwards; two workers racing to build it produce equal dictionaries and the loser's is
+    /// dropped. <see cref="Lazy{T}"/> rather than a null check for exactly that -- it settles which
+    /// one every later reader sees.
+    /// </para>
+    /// </remarks>
+    private Dictionary<SymbolId, string> Declaring => _declaring.Value;
+
+    /// <remarks>
+    /// Last spelling wins, matching the two dictionaries the constructor builds: a descriptor set
+    /// names each file once, and two files declaring one fully qualified name is something protoc
+    /// refuses before a bundle is ever built.
+    /// </remarks>
+    private Dictionary<SymbolId, string> DeclaringSchemas()
+    {
+        var declaring = new Dictionary<SymbolId, string>();
+
+        foreach (var descriptor in Descriptors)
+        {
+            foreach (var (symbol, _) in SchemaSymbols.In(descriptor))
+            {
+                declaring[symbol] = descriptor.Name;
+            }
+        }
+
+        return declaring;
+    }
 
     /// <remarks>
     /// Every part comes from this bundle: the built tree supplies the identities and the index of

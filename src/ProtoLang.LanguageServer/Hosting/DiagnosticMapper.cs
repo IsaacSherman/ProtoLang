@@ -52,14 +52,8 @@ public sealed class DiagnosticMapper(bool relatedInformationSupported)
     public const string Source = "protolang";
 
     /// <summary>The range a diagnostic with no location is published at.</summary>
-    /// <remarks>
-    /// The very start of the document. An unusable include path, a setting being ignored, a
-    /// configuration file that was refused -- none of them is anywhere in the source, and all of them
-    /// have to be seen. The message already names where the value really came from
-    /// (<c>&lt;workspace settings&gt;</c>, <c>protolang.config.xml</c>), so the range being a
-    /// placeholder does not make the diagnostic ambiguous.
-    /// </remarks>
-    public static Range WholeDocumentStart { get; } = new(new Position(0, 0), new Position(0, 0));
+    /// <inheritdoc cref="EditorPositions.DocumentStart" path="/remarks"/>
+    public static Range WholeDocumentStart => EditorPositions.DocumentStart;
 
     /// <param name="at">
     /// Where to draw it, when the caller knows better than the span does. Used for a diagnostic whose
@@ -92,18 +86,10 @@ public sealed class DiagnosticMapper(bool relatedInformationSupported)
 
     /// <summary>The editor range a compiler span names.</summary>
     /// <remarks>
-    /// Both coordinate systems are 0-based in LSP and 1-based in the compiler, so the conversion is a
-    /// subtraction -- except for a span that is nowhere, which must never go through it. Line 0 minus
-    /// one is line -1, which is not a position any client can be given. Everything else is clamped at
-    /// zero as well, because a span this server did not produce is a span this server does not get to
-    /// assume about.
+    /// Kept as a member of this type although the conversion lives in
+    /// <see cref="EditorPositions"/>: three other features now ask the same question, and a
+    /// coordinate system is not a diagnostic concern. The name stays because the callers that
+    /// spell it this way are about diagnostics and should go on reading that way.
     /// </remarks>
-    public static Range RangeOf(SourceSpan span)
-        => span.IsNone
-            ? WholeDocumentStart
-            : new Range(PositionOf(span.Start), PositionOf(span.End));
-
-    /// <inheritdoc cref="RangeOf"/>
-    private static Position PositionOf(SourcePosition position)
-        => new(Math.Max(position.Line - 1, 0), Math.Max(position.Column - 1, 0));
+    public static Range RangeOf(SourceSpan span) => EditorPositions.RangeOf(span);
 }

@@ -1,7 +1,7 @@
 # ProtoLang architecture
 
 A map for a cold start: what exists, where it lives, and which invariants constrain a change. The
-language itself is specified in [Protolang_Spec.md](Protolang_Spec.md); how to write code here is in
+language itself is specified in [Protolang_Spec/](Protolang_Spec/README.md); how to write code here is in
 [CLAUDE.md](CLAUDE.md); the per-issue process for the editor-support epic is in
 [docs/epic-47-workflow.md](docs/epic-47-workflow.md).
 
@@ -53,9 +53,12 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
 5. **No gate.** Parse errors do not stop the pipeline. A buffer being typed into is broken most of
    the time an editor asks anything about it, and what it most often asks — what may follow this
    dot — only the binder can answer.
-6. **Descriptors.** Each import is resolved against the search paths into an
+6. **Descriptors.** Each import is resolved into an
    [`ImportResolution`](src/ProtoLang.Core/ImportResolution.cs) — resolved, not found, or never
-   written — and the whole list is published on the result. Then
+   written — against the roots
+   [`SchemaCatalog.RootsFor`](src/ProtoLang.Core/Binding/SchemaCatalog.cs) settles: the search paths,
+   then the loader's own. The whole list is published on the result, and one that was not found is
+   told which schema in the directory it named it came closest to. Then
    [`DescriptorLoader`](src/ProtoLang.Core/Binding/DescriptorLoader.cs) shells out to `protoc`
    (located by [`ProtocLocator`](src/ProtoLang.Core/Binding/ProtocLocator.cs)) and returns a
    [`DescriptorBundle`](src/ProtoLang.Core/Binding/DescriptorBundle.cs): the built `FileDescriptor`s,
@@ -78,8 +81,14 @@ Driven by [`Compilation`](src/ProtoLang.Core/Compilation.cs). Three doors into i
    [`SchemaDeclaration`](src/ProtoLang.Core/Symbols/SchemaDeclaration.cs) — the `.proto` it was
    written in, the range of the declaration and of its name, and the comments around it — through a
    per-file [`SchemaSourceIndex`](src/ProtoLang.Core/Binding/SchemaSourceIndex.cs) built on first ask
-   and kept on the bundle. That is what lets go-to-definition and hover cross the file boundary,
-   which is where most of what a ProtoLang file talks about lives.
+   and kept on the bundle. The same question is answerable from a `SymbolId` rather than a descriptor,
+   which is the handle a caret produces: a name in type position resolves to a type and leaves no IR
+   node behind, so an identity is all there is to ask with. Both doors are fed by one walk over what a
+   schema declares ([`SchemaSymbols`](src/ProtoLang.Core/Binding/SchemaSymbols.cs)) — the bundle uses
+   it to index which file declares each identity, the source index to address each declaration's
+   `SourceCodeInfo` path — because two descents disagree first about an enum nested in a message.
+   That is what lets go-to-definition and hover cross the file boundary, which is where most of what a
+   ProtoLang file talks about lives.
 7. **Bind.** [`Binder.Bind`](src/ProtoLang.Core/Binding/Binder.cs) resolves names against the
    descriptors and produces typed IR. It does **not** throw on bad input: an unresolved name becomes
    `ErrorType` (`PL0037`) and binding continues, a name the parser never saw resolves to `ErrorType`
@@ -122,6 +131,12 @@ constant or a type, whose declaration is in a `.proto` this compiler does not ow
 a keystroke produces a new compilation and a new model over it, and the index that merges the
 binder's references with the declarations is built on the first question that needs it.
 
+What the model deliberately cannot answer is where a schema element is declared, and it says so:
+that is a `.proto` this compiler does not own. The other side is `DescriptorBundle.DeclarationOf`,
+which takes a descriptor or a `SymbolId`, and `SchemaTypes.Find`, which turns an identity back into
+the message or enum it names. A host joins the two — see *Serving an editor* — and exactly one of them
+answers for any symbol that resolved.
+
 `ScopeAt` is the third question: what a bare identifier written at this offset could mean, as the
 names in scope there with their types and declarations, plus the receiver they are looked up against.
 It is narrower than "everything nameable" on purpose — a method resolves only in call position and a
@@ -142,9 +157,22 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | The server itself | `LanguageServerHost` | [Hosting/LanguageServerHost.cs](src/ProtoLang.LanguageServer/Hosting/LanguageServerHost.cs) |
 | Who is told what is wrong with which file | `DiagnosticRouter`, `DiagnosticContribution` | [Hosting/DiagnosticRouter.cs](src/ProtoLang.LanguageServer/Hosting/DiagnosticRouter.cs) |
 | What the compiler tells an editor to colour | `SemanticTokenLegend`, `SemanticTokenEncoder` | [Hosting/SemanticTokenLegend.cs](src/ProtoLang.LanguageServer/Hosting/SemanticTokenLegend.cs) |
+| Who serves that, and what this client can paint | `ClassificationProvider`, `ClientLegend`, `SemanticTokenDiff` | [Hosting/ClassificationProvider.cs](src/ProtoLang.LanguageServer/Hosting/ClassificationProvider.cs), [Hosting/ClientLegend.cs](src/ProtoLang.LanguageServer/Hosting/ClientLegend.cs) |
 | Where a comment was | `Comment` | [Syntax/Comment.cs](src/ProtoLang.Core/Syntax/Comment.cs) |
 | Written or not-yet-written names | `SyntaxName` | [Syntax/SyntaxName.cs](src/ProtoLang.Core/Syntax/SyntaxName.cs) |
 | What became of an import | `ImportResolution` | [ImportResolution.cs](src/ProtoLang.Core/ImportResolution.cs) |
+| Which file a schema path names | `SchemaLookup` | [Binding/SchemaLookup.cs](src/ProtoLang.Core/Binding/SchemaLookup.cs) |
+| Which roots are searched, and what they hold | `SchemaCatalog`, `SchemaCandidate` | [Binding/SchemaCatalog.cs](src/ProtoLang.Core/Binding/SchemaCatalog.cs) |
+| What could be typed at a position | `CompletionProvider`, `ImportPathContext` | [Hosting/CompletionProvider.cs](src/ProtoLang.LanguageServer/Hosting/CompletionProvider.cs) |
+| What a request is about, and what it owes for leaving the process | `DocumentRequest`, `DeferredAnswers` | [Hosting/DocumentRequest.cs](src/ProtoLang.LanguageServer/Hosting/DocumentRequest.cs), [Hosting/DeferredAnswers.cs](src/ProtoLang.LanguageServer/Hosting/DeferredAnswers.cs) |
+| What the caret names, and where that was declared | `DeclaredSymbol` | [Hosting/DeclaredSymbol.cs](src/ProtoLang.LanguageServer/Hosting/DeclaredSymbol.cs) |
+| Everywhere that symbol is written | `SymbolOccurrences`, `ReferenceProvider`, `HighlightProvider` | [Hosting/SymbolOccurrences.cs](src/ProtoLang.LanguageServer/Hosting/SymbolOccurrences.cs), [Hosting/ReferenceProvider.cs](src/ProtoLang.LanguageServer/Hosting/ReferenceProvider.cs) |
+| Which document a span is in, as the client spells it | `SymbolLocations` | [Hosting/SymbolLocations.cs](src/ProtoLang.LanguageServer/Hosting/SymbolLocations.cs) |
+| The call being typed, and what it expects next | `CallSubject`, `SignatureHelpProvider` | [Hosting/CallSubject.cs](src/ProtoLang.LanguageServer/Hosting/CallSubject.cs), [Hosting/SignatureHelpProvider.cs](src/ProtoLang.LanguageServer/Hosting/SignatureHelpProvider.cs) |
+| What the pointer resting somewhere says | `HoverProvider`, `HoverCard` | [Hosting/HoverProvider.cs](src/ProtoLang.LanguageServer/Hosting/HoverProvider.cs), [Hosting/HoverCard.cs](src/ProtoLang.LanguageServer/Hosting/HoverCard.cs) |
+| Where a name leads | `DefinitionProvider` | [Hosting/DefinitionProvider.cs](src/ProtoLang.LanguageServer/Hosting/DefinitionProvider.cs) |
+| The shape of a file | `DocumentOutline` | [Hosting/DocumentOutline.cs](src/ProtoLang.LanguageServer/Hosting/DocumentOutline.cs) |
+| Compiler coordinates ↔ editor coordinates | `EditorPositions` | [Protocol/Lsp/EditorPositions.cs](src/ProtoLang.LanguageServer/Protocol/Lsp/EditorPositions.cs) |
 | What a descriptor load produced | `DescriptorBundle`, `SchemaFile` | [Binding/DescriptorBundle.cs](src/ProtoLang.Core/Binding/DescriptorBundle.cs) |
 | What decides a load, and keys it | `DescriptorRequest` | [Binding/DescriptorRequest.cs](src/ProtoLang.Core/Binding/DescriptorRequest.cs) |
 | Whether a load can be reused | `DescriptorCache`, `SchemaClosure` | [Binding/DescriptorCache.cs](src/ProtoLang.Core/Binding/DescriptorCache.cs) |
@@ -160,6 +188,7 @@ that binds is missing*, is what makes it safe for completion to accept an entry 
 | Down through a tree | `SyntaxWalk`, `IrWalk` | [Semantics/SyntaxWalk.cs](src/ProtoLang.Core/Semantics/SyntaxWalk.cs) |
 | Where a declaration is | `DeclarationSite` | [Symbols/DeclarationSite.cs](src/ProtoLang.Core/Symbols/DeclarationSite.cs) |
 | Where a `.proto` declared it, and what it said | `SchemaDeclaration`, `SchemaSite`, `SchemaComments` | [Symbols/SchemaDeclaration.cs](src/ProtoLang.Core/Symbols/SchemaDeclaration.cs) |
+| Everything a schema declares, once | `SchemaSymbols` | [Binding/SchemaSymbols.cs](src/ProtoLang.Core/Binding/SchemaSymbols.cs) |
 | Which symbol a reference means | `SymbolId` | [Symbols/SymbolId.cs](src/ProtoLang.Core/Symbols/SymbolId.cs) |
 | Where a symbol is used | `SymbolReference`, `ReferenceKind` | [Symbols/SymbolReference.cs](src/ProtoLang.Core/Symbols/SymbolReference.cs) |
 | What a name is in scope over | `ScopeEntry` | [Symbols/ScopeEntry.cs](src/ProtoLang.Core/Symbols/ScopeEntry.cs) |
@@ -216,6 +245,81 @@ a queue one worker drains in order. That separation is what lets a handler ask t
 the connection ends, outstanding work is cancelled **before** the dispatcher is awaited; the other
 order waits forever for a handler whose answer is never coming.
 
+Draining in order is the default and is right for a handler that is arithmetic over a buffer the
+server already holds. A handler that **leaves the process** — one that opens a directory, or waits on
+a tool — opts out with `OnRequest(..., concurrent: true)`, because answered in order it holds the
+reading worker for as long as the outside world takes, and behind it sit every `didChange`, every
+`didClose`, and the `$/cancelRequest` that would have shortened it. Completion was the first such
+handler and is where the rules were worked out; hover, go-to-definition, classification,
+find-references, occurrence highlighting and signature help have since joined it. What one owes in
+return is four things, all of them easy to get wrong:
+
+- **Settle which buffer the request is about before yielding.** `CompletionProvider.Read` runs on the
+  ordered worker; only the walk is deferred. Deferring the lookup lets the `didChange` behind the
+  request be applied first, and the position is then measured against text the client had not sent —
+  after which every staleness check agrees, because they are all asking about the wrong document.
+- **Identify the buffer and the configuration as objects, not as a version and a generation.** Both
+  are immutable, so holding them holds the question. A version number is unique only within one open
+  session: close a document and reopen it and the client starts again at one.
+- **Bound its own outstanding work.** A newer completion supersedes the outstanding one for its
+  document, exactly as a keystroke supersedes a scheduled compile, and a semaphore bounds how many
+  run across documents. A per-walk budget bounds one walk and says nothing about how many there are.
+- **Give up the ones nobody is waiting for, before they take a slot.** `didClose` calls
+  `CompletionProvider.Forget` beside `CompileScheduler.ForgetAsync`, and a request that reaches the
+  front of the queue re-checks freshness before it walks rather than only after — an edit is the one
+  reason for abandonment that carries no cancellation to notice. Waiting for a slot is part of the
+  request: it sits inside the same cleanup as the walk, so a request that ends while waiting is still
+  retired, and gives back only a slot it actually took.
+
+Every request an editor sends arrives on the same terms and splits two ways. The outline lexes and
+parses and stops, so it alone still answers on the ordered worker, never waits on protoc, and
+survives a file that does not parse — which is the point of it, since an outline that vanishes while
+you type is worse than a stale one. Everything else can only be answered by the binder, so each
+compiles through `DocumentSemantics` and each is concurrent, and everything the architecture above
+demands of a concurrent handler is stated once in
+[`DeferredAnswers`](src/ProtoLang.LanguageServer/Hosting/DeferredAnswers.cs) rather than once per
+handler: supersession per document, a bounded gate, abandoning work nobody waits for, and the
+staleness refusal. One instance per request kind, because a passing mouse must not cancel a
+deliberate click — and a caret sliding through a file must not cancel the reference list somebody
+asked for.
+
+Classification is the one that moved. #42 answered it from the lexer in the instant it was read and
+#50 gave every identifier the category of the symbol the binder resolved it to, which means the
+binder and therefore the same treatment as hover. It transcribes rather than asks: the range and the
+identity of every name were already recorded as the binder resolved them, so the colour is that
+record read back and cannot disagree with completion, with navigation, or with the code that gets
+generated. What it may never cost is colour — a name that resolved to nothing, a file that did not
+parse and a schema that would not load all keep the lexical answer — and a client that asks for
+differences rather than whole answers is sent the integers that changed, one retained answer per open
+document, paired with the name it was published under so an answer that was never delivered cannot be
+diffed against.
+
+Find-references and occurrence highlighting are one question rendered twice, and they share the
+lookup rather than each doing it: `SymbolOccurrences` turns a caret into a symbol and every place that
+symbol is written, one sends locations and the other sends ranges to tint. Being semantic rather than
+textual falls out of that rather than being implemented — identity is a `SymbolId` and never a
+spelling, so two locals of one name in sibling blocks answer separately and a name inside a string
+answers not at all. The reference index is consulted directly and nothing is cached on top of it;
+#57 is what decides whether that needs to change.
+
+Signature help is the one that cannot ask the tree. A call being typed has no closing parenthesis, and
+the tree records no comma positions, no span for the argument list and no flag saying the parenthesis
+was closed — so `CallSubject` finds which call and which argument in the token stream, the way import
+path completion does. Which method it names still comes from the binder: the reference to the method
+name is recorded before the arity check that a half-written call nearly always fails, so the identity
+survives even though the node carrying the signature does not.
+
+What they answer is joined in one place. `DeclaredSymbol` turns a caret into a symbol and then asks
+whichever compiler owns the declaration — `SemanticModel.DeclarationOf` for a local, a parameter, a
+loop binding or a method, `DescriptorBundle.DeclarationOf` for a field, an enum constant, a message or
+an enum — so no surface has to know which side a symbol falls on, and
+`SymbolLocations` is the one place a span becomes a document the client recognizes. Hover adds the type,
+the `.proto` comment, and the one thing the source text cannot show: the arithmetic policy in force,
+read off the behavior the binder stamped on the node rather than off the configuration, and stated
+only where a node carries one (spec 10.4). Capabilities are honoured throughout: links carry a
+declaration's two ranges only to a client that declared `linkSupport`, and an outline nests only for
+one that declared it can show a tree.
+
 The buffer the client sent is the source of truth and the file on disk is never read for an open
 document. Edits are applied incrementally, in order, each against the text the one before it
 produced. A compile is debounced and coalesced, carries the document version and the configuration
@@ -240,9 +344,36 @@ severities mapped rather than invented, help text kept as its own thing, a locat
 published at the start of its document, and a `protoc` failure landing both in the schema it names
 and on the import that reached it.
 
-Classification (spec 6.5) lexes and nothing more, so it answers for a file that does not parse. The
-legend is the whole standard token set, declared now because it is negotiated once and indexed by
-position; identifiers are uniformly `variable` until a semantic model can do better.
+Classification (spec 6.5) is two layers over one fixed legend. The first lexes and nothing more, so it
+answers for a file that does not parse; the second gives each identifier the category of the symbol
+the binder resolved it to, and wherever it resolved nothing — a half-typed name, a file that did not
+parse, a schema that would not load — the first layer's answer stands. The legend is the whole
+standard token set, declared once because it is negotiated once and indexed by position, which is
+what let the second layer ship by emitting different numbers rather than by changing what the numbers
+mean. What the second layer costs, and why it never costs colour, is in *Serving an editor*.
+
+Completion is the same bargain and one step further out. `CompletionProvider` decides which context
+the caret is in before it asks what belongs there, and today recognizes one — inside an `import
+proto` string, found by `ImportPathContext` in the token stream, because the tree does not carry the
+path's own span and the state this is invoked in is one the parser has already recovered from. What
+is offered comes from
+[`SchemaCatalog`](src/ProtoLang.Core/Binding/SchemaCatalog.cs), which is also where "the roots an
+import is resolved against" now lives for everyone who asks: the include paths, then the source's own
+directory, then whatever the loader adds. One directory listing per root, on demand, no index and no
+cache — so progressive completion falls out of the shape rather than being built, and a schema that
+appeared on disk a second ago is offered. Only the include roots are resolved for it, never the
+language policy: settling that means searching upward for a `protolang.config.xml` and parsing it,
+which decides nothing about where a path resolves and would be paid per keystroke. The listing is
+lazy, reads each entry's kind from the same directory scan that found it, and carries a **budget in
+entries examined**, because one level bounds depth and not breadth, and a root pointed at a vendored
+tree or a network mount is one somebody will point at one. A walk that stops on its budget says so:
+completion offers what it saw, since the list is already declared incomplete, and the near match
+offers nothing, since the nearest of a partial reading is not the nearest. `#57` pins the figure for
+both. The same catalog names that near match on `PL0002`, so the terminal and the editor say the
+same thing about a path that resolved to nothing. Nothing here compiles, and this is the first
+request that can go stale between reading the buffer and answering, so it re-checks the version and
+refuses with `ContentModified` rather than inserting text at an offset that has stopped meaning what
+it meant.
 
 ### Backends
 
@@ -259,6 +390,9 @@ One project, [tests/ProtoLang.Tests](tests/ProtoLang.Tests), roughly organized b
 `SymbolIdentityTests`, `PositionQueryTests`, `ReferenceIndexTests`, `ScopeQueryTests`,
 `DescriptorCacheTests`, `SchemaDeclarationTests`, `ProcessSupervisionTests`, `CompileSupervisionTests`,
 `WorkspaceConfigurationTests`, `LanguageServerTests`, `SemanticTokenTests`,
+`SemanticRefinementTests`, `SchemaCatalogTests`,
+`ImportCompletionTests`, `SchemaCompletionTests`, `HoverTests`, `DefinitionTests`,
+`DocumentSymbolTests`, `ReferenceTests`, `SignatureHelpTests`,
 `TreeWalkTests`, `ImportResolutionTests`, `ProjectConfigTests`, `BackendTests`, `NameMappingTests`,
 and the scaffolding and smoke suites.
 
@@ -313,5 +447,17 @@ only to have the lexer keep the comment spans it was already walking past. #41 c
 wave by making the retained source info answerable, so a schema element's declaration and its doc
 comment are reachable from a descriptor. #54 made abandoned work stop costing anything: a
 cancellable wait on `protoc`, an expiry that says it is one, a stated queue bound, and counters that
-turn "no leak over a working day" into a soak test. Everything from here should be additive: new
+turn "no leak over a working day" into a soak test. #56 opened the completion surface on the first
+line anybody writes, and reached Core to give the include roots one home rather than the two
+expressions that had been agreeing by coincidence. #43 answered what a dot can reach and what a bare
+name may mean, from a compilation kept between keystrokes. #44 built the first navigation milestone —
+hover, the document outline, go-to-definition — and reached Core twice, both times to open a door that
+was missing rather than to reshape one: a schema declaration is now reachable by identity and not only
+by descriptor, which is what a caret on a type name produces, and the walk that finds it is the walk
+the source index already performed. #50 finished the semantic token work #42 left half done, and
+reached Core once, additively: the reference index already held every name a file resolved, in order,
+and had no way to hand over the whole sequence at once. #51 answered the other direction — who uses
+this, what else is this name, what does this call expect next — and reached Core only for renderings
+and lookups over what was already there: the method behind an identity, and where each parameter sits
+inside the signature line a hover already shows. Everything from here should be additive: new
 types, new projects. Rewriting the binder is the signal to stop and re-scope.

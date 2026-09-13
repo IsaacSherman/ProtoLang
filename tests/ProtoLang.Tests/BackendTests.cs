@@ -214,6 +214,36 @@ public class BackendTests
         Assert.Contains("return kProtoLangDidNotTerminate;", cppSource, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The verdict is read out of what the child printed, so the driver has to wait for the readers
+    /// and not only for the process.
+    /// </summary>
+    /// <remarks>
+    /// Ordering rather than presence, because presence is what this looked like it had: the timed
+    /// wait bounds the child, and <c>WaitForExit(int)</c> says nothing about the asynchronous
+    /// handlers collecting its output. A driver that read the buffer between the two reports a test
+    /// that ran perfectly as never having reached its method, on a machine loaded enough for a
+    /// thread to be late -- which is CI and is not here. Asserting the three positions in order
+    /// fails if the second wait is removed and also if it is moved past the read, which presence
+    /// alone would miss.
+    /// </remarks>
+    [Fact]
+    public void TheExpectFailDriverWaitsForTheChildsOutputBeforeReadingIt()
+    {
+        var source = CSharpTestRuntime.Source;
+
+        var bounded = source.IndexOf("WaitForExit(GraceMilliseconds)", StringComparison.Ordinal);
+        var drained = source.IndexOf("process.WaitForExit();", StringComparison.Ordinal);
+        var read = source.IndexOf("Snapshot(buffer)", StringComparison.Ordinal);
+
+        Assert.True(bounded >= 0, "the driver must bound how long it waits for a child that hangs");
+        Assert.True(drained >= 0, "the driver must wait for the output readers, not only for the process");
+        Assert.True(read >= 0, "the driver must read what the child printed");
+
+        Assert.True(bounded < drained, "the deadline belongs to the process, so the reader wait follows it");
+        Assert.True(drained < read, "the buffer must not be read until the readers have finished with it");
+    }
+
     [Fact]
     public void CppRoutesArithmeticThroughTheRuntime()
     {

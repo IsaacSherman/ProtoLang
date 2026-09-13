@@ -50,9 +50,26 @@ public sealed class LanguageServerHost : IDisposable
     private readonly ConfigurationSync _configuration;
     private readonly LoaderPool _loaders;
     private readonly DiagnosticRouter _router;
+    private readonly DocumentSemantics _semantics;
     private readonly CompileScheduler _scheduler;
+    private readonly CompletionProvider _completion;
+    private readonly HoverProvider _hover;
+    private readonly DefinitionProvider _definition;
+    private readonly ClassificationProvider _classification;
+    private readonly ReferenceProvider _references;
+    private readonly HighlightProvider _highlights;
+    private readonly SignatureHelpProvider _signatures;
 
     private DiagnosticMapper _mapper = new(relatedInformationSupported: false);
+
+    /// <summary>Whether this client can show an outline that nests.</summary>
+    /// <remarks>
+    /// Volatile for the reason <see cref="DefinitionProvider.LinkSupport"/> is: negotiated once, on
+    /// the worker that reads the wire, and read wherever an answer is produced.
+    /// </remarks>
+    /// <inheritdoc cref="SymbolInformation" path="/remarks"/>
+    private volatile bool _outlineNests;
+
     private volatile ServerState _state = ServerState.NotInitialized;
 
     public LanguageServerHost(Stream input, Stream output, ServerLog? log = null, TimeSpan? debounce = null)
@@ -67,6 +84,12 @@ public sealed class LanguageServerHost : IDisposable
             parameters => _connection.NotifyAsync(Methods.PublishDiagnostics, parameters),
             uri => _documents.Find(uri)?.Version);
 
+        // One per server rather than one per component, because it is the point of it: a compile the
+        // scheduler ran and a question a request asks about the same untouched buffer are the same
+        // compile, and two of these would be two answers about one document with nothing keeping them
+        // in agreement.
+        _semantics = new DocumentSemantics(_loaders);
+
         _scheduler = new CompileScheduler(
             _documents,
             _configuration,
@@ -74,7 +97,20 @@ public sealed class LanguageServerHost : IDisposable
             _router,
             () => _mapper,
             _log,
-            debounce);
+            debounce,
+            semantics: _semantics);
+
+        _completion = new CompletionProvider(
+            _documents, _configuration, _loaders, semantics: _semantics);
+
+        _hover = new HoverProvider(_documents, _configuration, _loaders, semantics: _semantics);
+        _definition = new DefinitionProvider(_documents, _configuration, _loaders, semantics: _semantics);
+        _classification = new ClassificationProvider(
+            _documents, _configuration, _loaders, semantics: _semantics);
+        _references = new ReferenceProvider(_documents, _configuration, _loaders, semantics: _semantics);
+        _highlights = new HighlightProvider(_documents, _configuration, _loaders, semantics: _semantics);
+        _signatures = new SignatureHelpProvider(
+            _documents, _configuration, _loaders, semantics: _semantics);
 
         Register();
     }
@@ -95,6 +131,47 @@ public sealed class LanguageServerHost : IDisposable
     /// <summary>Compilations that have actually run, as opposed to been scheduled.</summary>
     public int Compilations => _scheduler.Compilations;
 
+    /// <summary>What answers a completion request, for a test and for #58.</summary>
+    /// <remarks>
+    /// Published for the same reason <see cref="Compilations"/> is: the property most worth holding in
+    /// place -- that this handler gives the reading worker back before it touches the file system --
+    /// cannot be observed from outside without making one walk slow on purpose, and there is nowhere
+    /// else to stand to do that.
+    /// </remarks>
+    public CompletionProvider Completion => _completion;
+
+    /// <summary>What answers a hover request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public HoverProvider Hover => _hover;
+
+    /// <summary>What answers a go-to-definition request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public DefinitionProvider Definition => _definition;
+
+    /// <summary>What answers a semantic token request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public ClassificationProvider Classification => _classification;
+
+    /// <summary>What answers a find-references request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public ReferenceProvider References => _references;
+
+    /// <summary>What answers an occurrence-highlight request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public HighlightProvider Highlights => _highlights;
+
+    /// <summary>What answers a signature help request, for a test and for #58.</summary>
+    /// <inheritdoc cref="Completion" path="/remarks"/>
+    public SignatureHelpProvider Signatures => _signatures;
+
+    /// <summary>What compiles a buffer for the questions asked between keystrokes, for a test and #58.</summary>
+    /// <remarks>
+    /// Published so that "this buffer is compiled once however many questions are asked of it" is a
+    /// measurement rather than an argument, which is the same reason <see cref="Compilations"/> is
+    /// published and the only way to tell a cache that is working from one that silently is not.
+    /// </remarks>
+    public DocumentSemantics Semantics => _semantics;
+
     /// <summary>Serves until the client goes away or <c>exit</c> arrives.</summary>
     public Task RunAsync(CancellationToken cancellationToken = default)
         => _connection.RunAsync(cancellationToken);
@@ -107,7 +184,29 @@ public sealed class LanguageServerHost : IDisposable
     {
         _connection.OnRequest(Methods.Initialize, (parameters, _) => Initialize(parameters));
         _connection.OnRequest(Methods.Shutdown, (_, _) => Shutdown());
-        _connection.OnRequest(Methods.SemanticTokensFull, (parameters, _) => Answer<SemanticTokensParams>(parameters, Classify));
+        _connection.OnRequest(Methods.SemanticTokensFull, Classify, concurrent: true);
+        _connection.OnRequest(Methods.SemanticTokensFullDelta, ClassifyDelta, concurrent: true);
+        _connection.OnRequest(Methods.Completion, Complete, concurrent: true);
+        _connection.OnRequest(
+            Methods.Hover,
+            (parameters, token) => AtPosition(parameters, _hover.Read, _hover.AnswerAsync, token),
+            concurrent: true);
+
+        _connection.OnRequest(
+            Methods.Definition,
+            (parameters, token) => AtPosition(parameters, _definition.Read, _definition.AnswerAsync, token),
+            concurrent: true);
+        _connection.OnRequest(
+            Methods.DocumentSymbol, (parameters, _) => Answer<DocumentSymbolParams>(parameters, Outline));
+        _connection.OnRequest(Methods.References, FindReferences, concurrent: true);
+        _connection.OnRequest(
+            Methods.DocumentHighlight,
+            (parameters, token) => AtPosition(parameters, _highlights.Read, _highlights.AnswerAsync, token),
+            concurrent: true);
+        _connection.OnRequest(
+            Methods.SignatureHelp,
+            (parameters, token) => AtPosition(parameters, _signatures.Read, _signatures.AnswerAsync, token),
+            concurrent: true);
 
         _connection.OnNotification(Methods.Initialized, (_, token) => Initialized(token));
         _connection.OnNotification(Methods.Exit, (_, _) => Exit());
@@ -137,6 +236,73 @@ public sealed class LanguageServerHost : IDisposable
         RequireRunning();
 
         return Task.FromResult(handler(LspJson.Read<T>(parameters) ?? throw Missing<T>()));
+    }
+
+    /// <summary>
+    /// Answers a completion: read here, in order with everything else, and walked anywhere.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The connection drains one queue with one worker, in order, and <see cref="Answer{T}"/> runs its
+    /// handler on that worker -- which is right for a handler that is arithmetic over a buffer it
+    /// already has, and wrong for one that opens a directory. A completion answered inline holds the
+    /// worker for the length of the walk, and behind it sit every <c>didChange</c>, every
+    /// <c>didClose</c>, and the <c>$/cancelRequest</c> that would have shortened it. On an include
+    /// path that is a network mount, that is the buffer ceasing to sync while the user types.
+    /// <c>CompileScheduler.Schedule</c> was changed for the same reason and says so.
+    /// </para>
+    /// <para>
+    /// <b>What may not move off this worker is deciding which buffer the request is about.</b>
+    /// <c>CompletionProvider.Read</c> is called here, before this method returns and therefore before
+    /// the next message is dequeued, precisely so that a <c>didChange</c> queued behind the request
+    /// cannot be applied first. Deferring it would leave the position measured against text the client
+    /// had not sent when it asked -- and every staleness check afterwards would agree, because they
+    /// would all be asking about the same wrong document.
+    /// </para>
+    /// <para>
+    /// The lifecycle check and the deserialization stay here for the same reason they always did: both
+    /// are cheap, and a request that arrived too early or carried nothing is refused rather than
+    /// scheduled. What leaves is the walk, and it takes the request's own token with it.
+    /// </para>
+    /// </remarks>
+    private async Task<object?> Complete(JsonElement? parameters, CancellationToken cancellationToken)
+    {
+        RequireRunning();
+
+        var message = LspJson.Read<CompletionParams>(parameters) ?? throw Missing<CompletionParams>();
+
+        if (_completion.Read(message) is not { } asked)
+        {
+            return CompletionProvider.Nothing;
+        }
+
+        return await _completion.AnswerAsync(asked, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Answers a request about one caret: read here, in order with everything else, and produced
+    /// anywhere.
+    /// </summary>
+    /// <remarks>
+    /// One method for hover and go-to-definition, and for whatever #51 adds beside them, because
+    /// what differs between them is which provider answers and what does not differ is the part
+    /// that must not move: <paramref name="read"/> runs before this returns and therefore before the
+    /// next message is dequeued. See <see cref="Complete"/> for why, at length.
+    /// </remarks>
+    private async Task<object?> AtPosition<T>(
+        JsonElement? parameters,
+        Func<TextDocumentPositionParams, PositionRequest?> read,
+        Func<PositionRequest, CancellationToken, Task<T>> answer,
+        CancellationToken cancellationToken)
+    {
+        RequireRunning();
+
+        var message = LspJson.Read<TextDocumentPositionParams>(parameters)
+            ?? throw Missing<TextDocumentPositionParams>();
+
+        return read(message) is not { } asked
+            ? null
+            : await answer(asked, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Runs a notification handler, dropping the message when it arrives out of turn.</summary>
@@ -203,6 +369,18 @@ public sealed class LanguageServerHost : IDisposable
             _log.Level = TraceLevel.Parse(trace);
         }
 
+        // Asked once and used twice below -- what is retained and what is advertised are two halves of
+        // one promise, and a server that retains an answer it did not offer to send, or offers one it
+        // is not keeping, has broken the half nobody is looking at.
+        var deltas = WantsDeltas(capabilities);
+
+        _definition.LinkSupport = capabilities?.TextDocument?.Definition?.LinkSupport is true;
+        _signatures.LabelOffsets = capabilities?.TextDocument?.SignatureHelp?.SignatureInformation?
+            .ParameterInformation?.LabelOffsetSupport is true;
+        _classification.Client = ClientLegend.Of(capabilities?.TextDocument?.SemanticTokens);
+        _classification.Deltas = deltas;
+        _outlineNests = capabilities?.TextDocument?.DocumentSymbol?.HierarchicalDocumentSymbolSupport is true;
+
         _configuration.Negotiate(capabilities);
         _configuration.SetFolders(FoldersOf(message));
 
@@ -217,7 +395,27 @@ public sealed class LanguageServerHost : IDisposable
                 TextDocumentSync = new TextDocumentSyncOptions { Save = new SaveOptions() },
                 SemanticTokensProvider = capabilities?.TextDocument?.SemanticTokens is null
                     ? null
-                    : new SemanticTokensOptions { Legend = SemanticTokenLegend.Wire },
+                    : new SemanticTokensOptions
+                    {
+                        Legend = SemanticTokenLegend.Wire,
+                        Full = new SemanticTokensFullOptions { Delta = deltas },
+                    },
+                CompletionProvider = capabilities?.TextDocument?.Completion is null
+                    ? null
+                    : new CompletionOptions { TriggerCharacters = CompletionProvider.TriggerCharacters },
+                HoverProvider = capabilities?.TextDocument?.Hover is null ? null : true,
+                DefinitionProvider = capabilities?.TextDocument?.Definition is null ? null : true,
+                DocumentSymbolProvider = capabilities?.TextDocument?.DocumentSymbol is null ? null : true,
+                ReferencesProvider = capabilities?.TextDocument?.References is null ? null : true,
+                DocumentHighlightProvider =
+                    capabilities?.TextDocument?.DocumentHighlight is null ? null : true,
+                SignatureHelpProvider = capabilities?.TextDocument?.SignatureHelp is null
+                    ? null
+                    : new SignatureHelpOptions
+                    {
+                        TriggerCharacters = SignatureHelpProvider.TriggerCharacters,
+                        RetriggerCharacters = SignatureHelpProvider.RetriggerCharacters,
+                    },
                 Workspace = new WorkspaceServerCapabilities
                 {
                     WorkspaceFolders = new WorkspaceFoldersServerCapabilities(),
@@ -226,6 +424,39 @@ public sealed class LanguageServerHost : IDisposable
             ServerInfo = new ServerInfo("protolang-server", Version),
         });
     }
+
+    /// <summary>
+    /// Everywhere a name is used: read here, in order, and produced anywhere.
+    /// </summary>
+    /// <remarks>
+    /// Its own handler rather than <see cref="AtPosition"/>, because the params carry a caret
+    /// <em>and</em> whether the declaration belongs in the answer. What may not move off this worker
+    /// is unchanged and is the reason the shape exists at all: which buffer the request is about is
+    /// settled before this returns. See <see cref="Complete"/> for why, at length.
+    /// </remarks>
+    private async Task<object?> FindReferences(
+        JsonElement? parameters, CancellationToken cancellationToken)
+    {
+        RequireRunning();
+
+        var message = LspJson.Read<ReferenceParams>(parameters) ?? throw Missing<ReferenceParams>();
+
+        return _references.Read(message) is not { } asked
+            ? null
+            : await _references
+                .AnswerAsync(asked, message.Context.IncludeDeclaration, cancellationToken)
+                .ConfigureAwait(false);
+    }
+
+    /// <summary>Whether this client asked to be sent differences rather than whole answers.</summary>
+    /// <remarks>
+    /// Offered only where it was asked for. LSP spells the request two ways -- a bare <c>true</c>
+    /// means whole answers only -- and <see cref="SemanticTokensFullRequest"/> is where the two
+    /// spellings become one. Advertising a delta to a client that will never ask for one promises
+    /// something nobody collects, and pays for the promise with a retained answer per open document.
+    /// </remarks>
+    private static bool WantsDeltas(ClientCapabilities? capabilities)
+        => capabilities?.TextDocument?.SemanticTokens?.Requests?.Full?.Delta is true;
 
     /// <summary>
     /// The folders the client opened, taking <c>rootUri</c> as one when it named no folders at all.
@@ -362,37 +593,101 @@ public sealed class LanguageServerHost : IDisposable
 
         _documents.Close(uri);
 
+        // Every kind of outstanding work for this document, not just the compile. Each of these can
+        // be queued behind a slow one for as long as that one takes, and nothing else would ever
+        // tell it the buffer it describes has gone.
+        _completion.Forget(uri);
+        _hover.Forget(uri);
+        _definition.Forget(uri);
+        _classification.Forget(uri);
+        _references.Forget(uri);
+        _highlights.Forget(uri);
+        _signatures.Forget(uri);
+
+        // And what was remembered about it. Every question comes through the store, so once the
+        // document is closed nothing can ask -- and an entry nothing can ask for is a syntax tree and
+        // an IR module held until the process exits.
+        _semantics.Forget(uri);
+
         return _scheduler.ForgetAsync(uri);
     }
 
+    /// <summary>The whole document's classification: read here, in order, and produced anywhere.</summary>
     /// <remarks>
     /// <para>
-    /// Lexes rather than compiles, so it answers for a file that does not parse and never waits on
-    /// protoc -- which is what makes it safe to run on every request. An unopened document produces an
-    /// empty result rather than an error: the client may have closed it between asking and being
+    /// <b>This handler used to be free and is not any more.</b> #42 answered it from the lexer on this
+    /// worker, in the same instant it was read, and the remark that used to sit here said what such a
+    /// handler owes: nothing, because the read and the answer were one moment. Refining an identifier
+    /// needs the binder, so classification now leaves the process exactly as hover, completion and
+    /// go-to-definition do, and owes what they owe -- which is <see cref="DeferredAnswers"/>'s to
+    /// state and <see cref="ClassificationProvider"/>'s to obey.
+    /// </para>
+    /// <para>
+    /// What may not move off this worker is deciding which buffer is being classified.
+    /// <see cref="ClassificationProvider.Read(SemanticTokensParams)"/> is called before this returns,
+    /// for the reason <see cref="Complete"/> gives at length.
+    /// </para>
+    /// </remarks>
+    private async Task<object?> Classify(JsonElement? parameters, CancellationToken cancellationToken)
+    {
+        RequireRunning();
+
+        var message = LspJson.Read<SemanticTokensParams>(parameters)
+            ?? throw Missing<SemanticTokensParams>();
+
+        return await Classified(_classification.Read(message), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The difference from the classification the client says it is holding.</summary>
+    /// <inheritdoc cref="Classify" path="/remarks"/>
+    private async Task<object?> ClassifyDelta(JsonElement? parameters, CancellationToken cancellationToken)
+    {
+        RequireRunning();
+
+        var message = LspJson.Read<SemanticTokensDeltaParams>(parameters)
+            ?? throw Missing<SemanticTokensDeltaParams>();
+
+        return await Classified(_classification.Read(message), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <remarks>
+    /// An unopened document produces an empty classification rather than an error, and rather than
+    /// null: the client may have closed it between asking and being answered, it has done nothing
+    /// wrong, and a document with no tokens is the truth about one this server does not hold. That is
+    /// what #42 answered here and it has not changed.
+    /// </remarks>
+    private async Task<object?> Classified(
+        ClassificationRequest? asked, CancellationToken cancellationToken)
+        => asked is null
+            ? new SemanticTokens()
+            : await _classification.AnswerAsync(asked, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>The file's declarations, as far as it parses.</summary>
+    /// <remarks>
+    /// <para>
+    /// Parsed rather than compiled, so it answers for a file that does not parse and never waits on
+    /// protoc -- which is what makes it safe to run on the ordered worker beside
+    /// <see cref="Classify"/>, and what keeps the outline from vanishing at exactly the moment
+    /// somebody is navigating a file they are halfway through editing. An unopened document produces
+    /// an empty outline rather than an error: the client may have closed it between asking and being
     /// answered.
     /// </para>
     /// <para>
-    /// <b>It answers about the version it read, which is the rule every request type obeys.</b> The
-    /// store hands out an immutable <see cref="OpenDocument"/>, so the text this classifies cannot
-    /// change underneath it however many edits arrive while it runs, and the tokens it returns
-    /// describe one version of the buffer rather than a blend of two. Nothing is refused here because
-    /// nothing can be: the read and the answer are the same instant. A handler that has to leave the
-    /// document between them -- one that waits on a compile, which is what hover, completion and
-    /// go-to-definition will do -- must check the version it read against the store before answering,
-    /// and refuse with LSP's <c>ContentModified</c> rather than answer about text the user has
-    /// already replaced. The scheduler states the same rule for diagnostics, where it is
-    /// <c>IsStale</c>.
+    /// Nothing is refused here because nothing can be: the read and the answer are the same instant,
+    /// which is the property <see cref="Classify"/> states at length and this one shares.
     /// </para>
     /// </remarks>
-    private object? Classify(SemanticTokensParams message)
+    private object? Outline(DocumentSymbolParams message)
     {
-        if (!DocumentUri.TryParse(message.TextDocument.Uri, out var uri) || _documents.Find(uri) is not { } document)
+        if (!DocumentUri.TryParse(message.TextDocument.Uri, out var uri)
+            || _documents.Find(uri) is not { } document)
         {
-            return new SemanticTokens();
+            return Array.Empty<DocumentSymbol>();
         }
 
-        return SemanticTokenEncoder.Encode(document.Text, uri.Text);
+        var outline = DocumentOutline.Of(document.Text);
+
+        return _outlineNests ? outline : DocumentOutline.Flattened(outline, uri!.ToString());
     }
 
     // ------------------------------------------------------- configuration

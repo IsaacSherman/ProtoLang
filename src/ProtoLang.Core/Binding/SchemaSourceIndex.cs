@@ -117,30 +117,6 @@ internal sealed class SchemaSourceIndex
 
     private static string KeyFor(IEnumerable<int> path) => string.Join(',', path);
 
-    /// <summary>Field numbers in <c>descriptor.proto</c>, which is what a source-info path is made of.</summary>
-    /// <remarks>
-    /// Named rather than written into the walk, because <c>[4, i, 3, j, 2, k]</c> is unreadable and
-    /// unverifiable at the point of use. Each is checked against the <c>descriptor.proto</c> that
-    /// ships beside the bundled protoc.
-    /// </remarks>
-    private static class ProtoField
-    {
-        /// <summary>
-        /// <c>name</c>, which is field 1 of a message, an enum, a field and an enum value alike --
-        /// one constant because it is one rule, not four that happen to agree.
-        /// </summary>
-        public const int Name = 1;
-
-        public const int FileMessageType = 4;
-        public const int FileEnumType = 5;
-        public const int FileExtension = 7;
-        public const int MessageField = 2;
-        public const int MessageNestedType = 3;
-        public const int MessageEnumType = 4;
-        public const int MessageExtension = 6;
-        public const int EnumValue = 2;
-    }
-
     /// <summary>The walk, and the state it needs while it is walking.</summary>
     /// <remarks>
     /// A type of its own so that the index itself holds nothing but its answers: the location table
@@ -154,71 +130,17 @@ internal sealed class SchemaSourceIndex
     {
         public Dictionary<SymbolId, SchemaDeclaration> Declarations { get; } = [];
 
+        /// <summary>Resolves every element the file declares, in the order the walk yields them.</summary>
+        /// <remarks>
+        /// The walk itself is <see cref="SchemaSymbols.In"/>, because finding where each element is
+        /// written and finding which file declares it are two readings of one descent, and a second
+        /// copy of it is what silently stops answering for a nested enum.
+        /// </remarks>
         public void AddFile(FileDescriptor file)
         {
-            for (var index = 0; index < file.MessageTypes.Count; index++)
+            foreach (var (symbol, path) in SchemaSymbols.In(file))
             {
-                AddMessage(file.MessageTypes[index], [ProtoField.FileMessageType, index]);
-            }
-
-            for (var index = 0; index < file.EnumTypes.Count; index++)
-            {
-                AddEnum(file.EnumTypes[index], [ProtoField.FileEnumType, index]);
-            }
-
-            AddExtensions(file.Extensions, [], ProtoField.FileExtension);
-        }
-
-        private void AddMessage(MessageDescriptor message, int[] path)
-        {
-            Add(SymbolId.ForType(message), path);
-
-            var fields = message.Fields.InDeclarationOrder();
-            for (var index = 0; index < fields.Count; index++)
-            {
-                Add(SymbolId.ForField(fields[index]), [.. path, ProtoField.MessageField, index]);
-            }
-
-            for (var index = 0; index < message.NestedTypes.Count; index++)
-            {
-                AddMessage(message.NestedTypes[index], [.. path, ProtoField.MessageNestedType, index]);
-            }
-
-            for (var index = 0; index < message.EnumTypes.Count; index++)
-            {
-                AddEnum(message.EnumTypes[index], [.. path, ProtoField.MessageEnumType, index]);
-            }
-
-            AddExtensions(message.Extensions, path, ProtoField.MessageExtension);
-        }
-
-        /// <summary>The fields an <c>extend</c> block declares, which are declared here and belong elsewhere.</summary>
-        /// <remarks>
-        /// An extension is a <c>FieldDescriptor</c> like any other and is asked about the same way, so
-        /// leaving them out of the walk made every question about one answer null -- not "no location
-        /// recorded" but "no such thing", which is the answer reserved for a file this bundle has
-        /// never heard of. They are listed apart from the fields because the proto tree lists them
-        /// apart: an extension of a message written at file scope is a child of the <em>file</em>,
-        /// numbered in its own sequence, and its position in that sequence is the path element. The
-        /// collection is in declaration order despite its name, which its own documentation says.
-        /// </remarks>
-        private void AddExtensions(ExtensionCollection extensions, int[] path, int fieldNumber)
-        {
-            var declared = extensions.UnorderedExtensions;
-
-            for (var index = 0; index < declared.Count; index++)
-            {
-                Add(SymbolId.ForField(declared[index]), [.. path, fieldNumber, index]);
-            }
-        }
-
-        private void AddEnum(EnumDescriptor enumType, int[] path)
-        {
-            Add(SymbolId.ForType(enumType), path);
-
-            for (var index = 0; index < enumType.Values.Count; index++)
-            {
-                Add(SymbolId.ForEnumValue(enumType.Values[index]), [.. path, ProtoField.EnumValue, index]);
+                Add(symbol, path);
             }
         }
 
@@ -245,7 +167,7 @@ internal sealed class SchemaSourceIndex
             // The name of a declaration protoc accepted is always recorded, so the fallback is for a
             // descriptor set assembled by something other than protoc: selecting the whole
             // declaration is the honest answer when the narrower range is unknown.
-            var name = LocationOf([.. path, ProtoField.Name]) is { } named ? SpanOf(source, named) : null;
+            var name = LocationOf([.. path, SchemaSymbols.ProtoField.Name]) is { } named ? SpanOf(source, named) : null;
 
             return new SchemaSite(source.Path, extent, name ?? extent);
         }

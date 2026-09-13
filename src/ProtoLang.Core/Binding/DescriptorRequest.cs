@@ -102,7 +102,7 @@ public sealed class DescriptorRequest : IEquatable<DescriptorRequest>
         IncludePaths = includePaths;
         ImplicitIncludePaths = implicitIncludePaths;
         ProtoFiles = protoFiles;
-        SearchRoots = [.. includePaths, .. implicitIncludePaths];
+        SearchRoots = RootsFor(includePaths, implicitIncludePaths);
 
         _canonical = Render();
     }
@@ -135,6 +135,25 @@ public sealed class DescriptorRequest : IEquatable<DescriptorRequest>
     /// starts validating against a search order the compiler no longer uses.
     /// </remarks>
     public IReadOnlyList<string> SearchRoots { get; }
+
+    /// <inheritdoc cref="SearchRoots"/>
+    /// <remarks>
+    /// Published because the sentence above turned out to be a prediction rather than a warning. A
+    /// caller re-checking a closure has a compilation's include paths and a loader's implicit ones and
+    /// no request to ask, so it wrote the concatenation again -- and one that dropped the implicit
+    /// half re-described <c>google/protobuf/timestamp.proto</c> against roots that cannot resolve it,
+    /// found no file where a file had been recorded, and called every entry stale. The order is the
+    /// whole of the rule and it is stated once, here.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">Either list is null.</exception>
+    public static IReadOnlyList<string> RootsFor(
+        IReadOnlyList<string> includePaths, IReadOnlyList<string> implicitIncludePaths)
+    {
+        ArgumentNullException.ThrowIfNull(includePaths);
+        ArgumentNullException.ThrowIfNull(implicitIncludePaths);
+
+        return [.. includePaths, .. implicitIncludePaths];
+    }
 
     /// <summary>
     /// Whether the executable this request names could actually be measured, and so whether the

@@ -732,6 +732,63 @@ public class SchemaDeclarationTests
         Assert.Contains("Timestamp represents a point in time", declaration.Documentation.Leading ?? string.Empty);
     }
 
+    // ------------------------------------------------------------------ asking by identity
+
+    /// <summary>
+    /// The door a caret comes through. A name in type position resolves to a type and leaves no IR
+    /// node behind, so the only handle an editor holds is the identity the binder recorded -- and
+    /// the answer it gets has to be the same one a caller holding the descriptor gets.
+    /// </summary>
+    /// <remarks>
+    /// Swept over every element rather than sampled, because the two paths part company exactly
+    /// where the walk that maps an identity to its declaring file forgets a shape: an enum nested in
+    /// a message, or a field of a message nested in one.
+    /// </remarks>
+    [Fact]
+    public void AskingByIdentityAnswersWhatAskingByDescriptorAnswers()
+    {
+        var schema = Load(DocumentedSchema);
+
+        foreach (var (name, declaration) in EverythingIn(schema))
+        {
+            Assert.True(declaration is not null, $"'{name}' is declared in the schema but not in the bundle");
+
+            Assert.Equal(declaration, schema.Bundle.DeclarationOf(declaration!.Id));
+        }
+    }
+
+    /// <summary>
+    /// A local is declared in a ProtoLang buffer, and the schema side of the question has to say so
+    /// rather than answering with whatever it happens to hold under that key.
+    /// </summary>
+    [Fact]
+    public void AnIdentityNoSchemaDeclaresAnswersNothing()
+    {
+        var schema = Load(DocumentedSchema);
+
+        var local = SymbolId.ForDeclaration(
+            SymbolKind.Local,
+            SourceIdentity.FromPath("buffer.protolang"),
+            SourceSpan.SingleLine("buffer.protolang", 0, 1, 1, 5));
+
+        Assert.Null(schema.Bundle.DeclarationOf(local));
+    }
+
+    /// <summary>
+    /// The walk is performed once, on the first identity anybody asks about, and then answers from
+    /// what it built. Asserted through the answers rather than through a counter, because a rebuilt
+    /// index would still be correct and the thing worth pinning is that repeated asking is answered
+    /// consistently.
+    /// </summary>
+    [Fact]
+    public void TheSameIdentityAnsweredTwiceGivesTheSameDeclaration()
+    {
+        var schema = Load(DocumentedSchema);
+        var email = SymbolId.ForField(Field(Message(schema, "Customer"), "email"));
+
+        Assert.Equal(schema.Bundle.DeclarationOf(email), schema.Bundle.DeclarationOf(email));
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private const string SchemaName = "declarations.proto";

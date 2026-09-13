@@ -204,7 +204,7 @@ public static class CompilationDiagnostics
     /// </remarks>
     private static Range RangeIn(string schema, ProtocDiagnostic entry, Dictionary<string, string?> texts)
     {
-        var start = new Position(Math.Max(entry.Line - 1, 0), Math.Max(entry.Column - 1, 0));
+        var start = EditorPositions.PositionOf(entry.Line, entry.Column);
 
         if (!texts.TryGetValue(schema, out var text))
         {
@@ -221,7 +221,7 @@ public static class CompilationDiagnostics
         var offset = lines.OffsetOf(entry.Line, entry.Column);
         var end = lines.PositionOf(EndOfLine(text, offset));
 
-        return new Range(start, new Position(Math.Max(end.Line - 1, 0), Math.Max(end.Column - 1, 0)));
+        return new Range(start, EditorPositions.PositionOf(end));
     }
 
     private static int EndOfLine(string text, int offset)

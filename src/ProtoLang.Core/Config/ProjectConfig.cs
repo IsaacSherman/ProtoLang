@@ -85,6 +85,27 @@ public sealed record ProjectConfig(
     /// <summary>The file this came from, or null for <see cref="Default"/>.</summary>
     public string? Path { get; init; }
 
+    /// <summary>Whether two configurations state the same policy, read from the same file.</summary>
+    /// <remarks>
+    /// Written out rather than left to the record, for one member, exactly as
+    /// <c>SchemaFile.Equals</c> is. <see cref="ExplicitKeys"/> is a set, and the generated equality
+    /// compares it by reference -- so two reads of one unchanged file were never equal, which makes
+    /// a value type's whole promise false for every configuration that came off disk. The one caller
+    /// that noticed was a language server asking "would this document compile the same way as it did
+    /// a keystroke ago", and being told no every time by a project that had not changed at all.
+    /// </remarks>
+    public bool Equals(ProjectConfig? other)
+        => other is not null
+            && Overflow == other.Overflow
+            && Conversion == other.Conversion
+            && DivideByZero == other.DivideByZero
+            && UnsetMessageRead == other.UnsetMessageRead
+            && string.Equals(Path, other.Path, StringComparison.Ordinal)
+            && ExplicitKeys.SetEquals(other.ExplicitKeys);
+
+    public override int GetHashCode()
+        => HashCode.Combine(Overflow, Conversion, DivideByZero, UnsetMessageRead, Path, ExplicitKeys.Count);
+
     /// <summary>
     /// The policy lines a generated file's header carries, so a reader can tell which policy
     /// produced the code below it.

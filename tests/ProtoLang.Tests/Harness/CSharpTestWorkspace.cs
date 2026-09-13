@@ -5,9 +5,25 @@ using ProtoLang.Backend;
 namespace ProtoLang.Tests.Harness;
 
 /// <summary>One test the generated C# project actually executed, as reported by the test run.</summary>
-internal sealed record ExecutedTest(string Name, string Outcome)
+/// <param name="Message">
+/// What the test said when it failed, empty when it passed or said nothing.
+/// </param>
+/// <remarks>
+/// <b>The message is the whole reason a failure here is actionable.</b> Without it a conformance
+/// failure reads "Failed: protolang.conformance.DivisionCase.strict_quotient" followed by the word
+/// "Failed" again, which says that a vector did not pass and nothing whatever about why -- and these
+/// run in a generated project in a temporary directory that is gone by the time anybody looks. An
+/// <c>expect fail</c> vector in particular reports one of five quite different things through this
+/// channel: the child never started, never reached the method, returned instead of terminating,
+/// exited with the wrong code, or never exited at all. Those have different causes and different
+/// fixes, and the run that needed to tell them apart was on a machine nobody can log into.
+/// </remarks>
+internal sealed record ExecutedTest(string Name, string Outcome, string Message)
 {
     public bool Passed => string.Equals(Outcome, "Passed", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>What to show a reader: the message where there is one, the outcome otherwise.</summary>
+    public string Detail => string.IsNullOrWhiteSpace(Message) ? Outcome : Message.Trim();
 }
 
 /// <param name="Executed">
@@ -214,7 +230,9 @@ internal sealed class CSharpTestWorkspace
         return document.Descendants(ns + "UnitTestResult")
             .Select(element => new ExecutedTest(
                 (string?)element.Attribute("testName") ?? string.Empty,
-                (string?)element.Attribute("outcome") ?? string.Empty))
+                (string?)element.Attribute("outcome") ?? string.Empty,
+                (string?)element.Element(ns + "Output")?.Element(ns + "ErrorInfo")?.Element(ns + "Message")
+                    ?? string.Empty))
             .ToList();
     }
 

@@ -117,7 +117,7 @@ public sealed class ConformanceFixture
                 ? new ConformanceResult(
                     test.Identity,
                     executed.Passed ? ConformanceOutcome.Passed : ConformanceOutcome.Failed,
-                    executed.Outcome)
+                    executed.Detail)
                 : new ConformanceResult(test.Identity, ConformanceOutcome.Missing, "not present in the test log"))
             .ToList();
 

@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package protolang.tests.shared;
+
+// A message and an enum that share one simple name, which is the only shape where "ambiguous as a
+// type" and "ambiguous as a receiver" give different answers -- and so the only shape that can hold
+// them apart. A type position takes messages and enums as one name space, so 'Shape' unqualified is
+// PL0074 there; an extend receiver must be a message, so 'Shape' unqualified resolves perfectly well
+// and must still be offered. Kept out of the other fixtures deliberately: they exist to be
+// unambiguous, and this one exists to be ambiguous in exactly one direction.
+//
+// Protobuf will not accept two declarations of one name in a package, so the enum is nested. That is
+// what makes the simple names collide while the full names do not.
+message Shape {
+  int64 sides = 1;
+}
+
+message Holder {
+  enum Shape {
+    SHAPE_NONE = 0;
+    SHAPE_ROUND = 1;
+  }
+
+  Shape shape = 1;
+}

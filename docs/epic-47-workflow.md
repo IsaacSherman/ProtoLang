@@ -61,12 +61,15 @@ later.
 
 ### 2. Branch
 
-Off `epics/language-server-2`, never off `main`. The first epic branch was merged and closed once
-its wave landed; each wave gets a fresh one, so `main` sees one pull request rather than one per
-issue.
+Off `epics/language-server-3`, never off `main`. An epic branch is merged and closed once the batch
+of issues on it lands, and the next one is cut fresh off `main`, so `main` sees one pull request per
+batch rather than one per issue. `epics/language-server` carried the foundations;
+`epics/language-server-2` carried queryability and the first of the surface work — #48, #53, #41,
+#42, #54 — and closed with it. This is the third, and the line above is the only record of which one
+is current, so moving to a fourth means editing it here.
 
 ```bash
-git checkout epics/language-server-2 && git pull && git checkout -b issue-36-bind-through-parse-errors
+git checkout epics/language-server-3 && git pull && git checkout -b issue-36-bind-through-parse-errors
 ```
 
 Naming: `issue-<number>-<short-slug>`.
@@ -78,7 +81,7 @@ checklist — the issues state requirements sentence by sentence and each one is
 
 ### 4. Update the spec, if the change reached the language
 
-[Protolang_Spec.md](../Protolang_Spec.md) is the language rather than a description of it, so a change
+[Protolang_Spec/](../Protolang_Spec/README.md) is the language rather than a description of it, so a change
 to what an author can write, what it means, what the compiler reports, or what the IR promises to
 preserve is a change to the spec as much as to the code. Settle it here, before the commit, because
 [CLAUDE.md](../CLAUDE.md) asks for it in the **same commit as the code**: an edit deferred to the end
@@ -145,10 +148,10 @@ Separate commit or commits. No squashing before the PR; the review history is wo
 ### 11. Open the PR
 
 ```bash
-gh pr create --base epics/language-server-2 --title "..." --body-file pr-body.md
+gh pr create --base epics/language-server-3 --title "..." --body-file pr-body.md
 ```
 
-Base is always the current epic branch, `epics/language-server-2`. The body carries `## Why`,
+Base is always the current epic branch, `epics/language-server-3`. The body carries `## Why`,
 `## What`, `## Compatibility`, and `## Tests`, and states plainly what did not move and how that was
 verified. `## What` says which spec sections moved — or, if the change reached the language and the 
 spec deliberately stayed put, says that and why, so the omission reads as a decision.

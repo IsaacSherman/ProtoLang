@@ -2,7 +2,7 @@
 
 ProtoLang compiles methods written against protobuf messages into equivalent C# and C++.
 
-Read [ARCHITECTURE.md](ARCHITECTURE.md) for the lay of the land, [Protolang_Spec.md](Protolang_Spec.md)
+Read [ARCHITECTURE.md](ARCHITECTURE.md) for the lay of the land, [Protolang_Spec/](Protolang_Spec/README.md)
 for the language, and [docs/epic-47-workflow.md](docs/epic-47-workflow.md) for the per-issue process
 of the editor-support epic.
 
@@ -16,9 +16,15 @@ dotnet build ProtoLang.slnx
 dotnet test ProtoLang.slnx
 ```
 
-The full suite takes about 90 seconds because it builds and runs real generated projects. Filter
-while iterating (`--filter "FullyQualifiedName~LexerTests"`), but the unfiltered run is the gate —
-there is no CI. `protoc`, the .NET SDK, and a C++ toolchain must be on the machine.
+The full suite takes about two minutes because it builds and runs real generated projects. Filter
+while iterating (`--filter "FullyQualifiedName~LexerTests"`), but the unfiltered run is the gate.
+`protoc`, the .NET SDK, and a C++ toolchain must be on the machine.
+
+Two checks are switched off by default, because neither is what a person mid-iteration wants to wait
+for: `PROTOLANG_SWEEP=1` runs the whole-corpus completion sweep, and `PROTOLANG_SOAK=1` runs the long
+editing soak. `.github/workflows/ci.yml` turns both on for every pull request to `main`, so what a
+local run skips is still checked before anything merges — and `report.ps1` fails the job when a gated
+test is skipped there, since a gate that quietly stays shut looks exactly like a green build.
 
 ## How to write code here
 
@@ -97,7 +103,7 @@ A test that cannot fail is worse than no test: it costs a run and buys confidenc
 
 ## Keep the spec current
 
-[Protolang_Spec.md](Protolang_Spec.md) is the language, not a description of it. Anything that
+[Protolang_Spec/](Protolang_Spec/README.md) is the language, not a description of it. Anything that
 changes what an author can write, what it means, or what the compiler tells them about it changes
 the spec too, and that edit belongs in the **same commit as the code**. A spec that lags is still
 consulted, and being trusted is exactly what makes a stale one expensive.
@@ -146,6 +152,18 @@ alternative rejected, and what did **not** move. Bullets only for a genuine list
 
 PR bodies follow the same voice with `## Why`, `## What`, `## Compatibility`, `## Tests` headings.
 Compatibility is not optional: say what stayed byte-for-byte identical and how that was checked.
+
+**Open every pull request as a draft, and mark it ready only once it merges cleanly into `main`.**
+Not a formality — it is what the CI triggers are built around. A draft is not tested, so a branch
+that still has conflicts costs nothing while it is being rebased; marking it ready is the event that
+asks for the full suite, both gated switches thrown. Reversing that order spends a run on a branch
+that cannot merge, and then spends another on the version that can.
+
+So the sequence is: open as draft, rebase onto `main` until `git merge-base --is-ancestor main HEAD`
+succeeds — the branch contains everything on `main`, so there is nothing left to conflict — run the
+suite locally, then mark ready. If a conflict appears after that, because someone else merged first,
+put it back into draft, resolve, and mark it ready again. The green check has to describe the code
+that is going to land, and a conflict resolved after the check means it no longer does.
 
 ## Tooling notes
 

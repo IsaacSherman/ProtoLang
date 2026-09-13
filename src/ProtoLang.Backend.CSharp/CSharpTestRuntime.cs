@@ -51,6 +51,11 @@ public static class CSharpTestRuntime
     public const int DidNotTerminateExitCode = 91;
 
     /// <summary>How long to wait for the child to exit before giving up on it.</summary>
+    /// <remarks>
+    /// A liveness backstop, not a latency budget: a child that has not exited in fifteen seconds is
+    /// hung rather than slow. It bounds only the process, which is why the emitted code waits a
+    /// second time, without a deadline, for the output readers -- see <c>DescribeExpectFail</c>.
+    /// </remarks>
     private const int GraceMilliseconds = 15000;
 
     private static readonly Lazy<string> LazySource = new(Build);
@@ -191,6 +196,13 @@ public static class CSharpTestRuntime
                 writer.WriteLine("return \"the child process never exited\";");
             }
 
+            writer.WriteLine();
+            writer.WriteLine("// The child has exited; its output has not necessarily arrived. WaitForExit(int)");
+            writer.WriteLine("// waits for the process and not for the asynchronous readers started above, so the");
+            writer.WriteLine("// markers below can still be in flight when the timed wait returns true. The");
+            writer.WriteLine("// parameterless overload is what waits for the readers, and without it a loaded");
+            writer.WriteLine("// machine reports a test that ran perfectly as never having reached its method.");
+            writer.WriteLine("process.WaitForExit();");
             writer.WriteLine();
             writer.WriteLine("var output = Snapshot(buffer);");
             writer.WriteLine();
