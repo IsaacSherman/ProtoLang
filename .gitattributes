@@ -1,0 +1,20 @@
+# Every text file checks out with LF, on every machine.
+#
+# This is not a style preference. A C# raw string literal contains the newlines of the file it is
+# written in, verbatim, so a test fixture written as """...""" is LF or CRLF according to how git
+# handed the .cs file to the compiler -- and a test that computes an offset from a "\n" marker then
+# finds a different string than the one it is searching. Without this file that difference is
+# decided by each machine's core.autocrlf: this repository's author has it set to `input`, and
+# GitHub's Windows runners default it to `true`, so fifteen editor tests passed locally and failed
+# on the first run of CI, for a reason that is nowhere in the diff.
+#
+# `text=auto` still lets git detect binary content and leave it alone; `eol=lf` is what removes the
+# machine from the decision. The repository already stores LF, so nothing in it changes -- what
+# changes is that a checkout can no longer disagree with it.
+#
+# The compiler itself is not line-ending sensitive and does not need this. A line ends at \n, a lone
+# \r is an ordinary character, and in \r\n the \r belongs to the line it ends -- LineMap says so and
+# SourceSpanTests.ACarriageReturnBelongsToTheLineItEnds pins it against a fixture that is CRLF on
+# purpose. That test keeps working here, because an escaped \r\n inside a literal is content rather
+# than a line ending.
+* text=auto eol=lf
