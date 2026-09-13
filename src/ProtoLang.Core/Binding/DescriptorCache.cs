@@ -56,15 +56,28 @@ public readonly record struct DescriptorCacheStatistics(int Hits, int Misses, in
 /// that keeps the property: a caller that ran the load itself could not abandon it, and the caller
 /// most likely to abandon is precisely the one that started it. The way out is an asynchronous
 /// pipeline rather than a cleverer wait, which is a great deal larger than this and is not what
-/// #54 is. #57 measures it before the concurrency limit is raised.
+/// #54 is.
+/// </para>
+/// <para>
+/// <b>#57 measured it, and the limit stays at four.</b> The cost is real and is what was predicted:
+/// roughly two pool threads per concurrent load, seven to fifteen at four loads and fifteen to
+/// twenty-one at eight. Wall clock still scaled sub-linearly, but that was on sixteen processors,
+/// and the default minimum worker count is one per processor -- so the measurement is the best case
+/// rather than the typical one, and raising the limit doubles the thread demand with it. The numbers
+/// and the caveat are in <c>docs/performance.md</c>.
 /// </para>
 /// </remarks>
 public sealed class DescriptorCache
 {
+    /// <summary>How many descriptor loads are kept before the least recently used is dropped.</summary>
     /// <remarks>
-    /// Enough for the schemas of a handful of files open at once. #57 pins the real number against
-    /// measured latency and memory; a descriptor set carrying source info is not small, and the point
-    /// of a bound is that a session lasting all day does not grow without limit.
+    /// Enough for the schemas of a handful of files open at once, and #57 measured what that costs
+    /// rather than leaving it as a feeling: about 28 KiB per retained bundle for the examples'
+    /// closure, so about 0.4 MiB for a full cache of it. Small enough that capacity is not what
+    /// bounds memory here -- but that closure is two messages and a real workspace's is not, so the
+    /// figure to carry forward is the per-bundle one. The point of a bound is that a session lasting
+    /// all day does not grow an entry per file it ever touched; the point of measuring it was to know
+    /// whether sixteen was reckless, and it is not.
     /// </remarks>
     public const int DefaultCapacity = 16;
 

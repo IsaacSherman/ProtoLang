@@ -20,11 +20,20 @@ The full suite takes about two minutes because it builds and runs real generated
 while iterating (`--filter "FullyQualifiedName~LexerTests"`), but the unfiltered run is the gate.
 `protoc`, the .NET SDK, and a C++ toolchain must be on the machine.
 
-Two checks are switched off by default, because neither is what a person mid-iteration wants to wait
-for: `PROTOLANG_SWEEP=1` runs the whole-corpus completion sweep, and `PROTOLANG_SOAK=1` runs the long
-editing soak. `.github/workflows/ci.yml` turns both on for every pull request to `main`, so what a
-local run skips is still checked before anything merges — and `report.ps1` fails the job when a gated
-test is skipped there, since a gate that quietly stays shut looks exactly like a green build.
+Three checks are switched off by default, because none is what a person mid-iteration wants to wait
+for: `PROTOLANG_SWEEP=1` runs the whole-corpus completion sweep, `PROTOLANG_SOAK=1` runs the long
+editing soak, and `PROTOLANG_BENCH=1` measures the latency budgets.
+`.github/workflows/ci.yml` turns the first two on for every pull request to `main`, so what a local
+run skips is still checked before anything merges — and `report.ps1` fails the job when one of those
+is skipped there, since a gate that quietly stays shut looks exactly like a green build.
+
+`PROTOLANG_BENCH` is deliberately not one of them. A wall-clock deadline on a shared runner flakes
+until somebody loosens it past the point of describing anything, so CI checks counted work instead —
+compilations per caret move, protoc invocations, answers in flight — which is deterministic and runs
+unconditionally. The budgets, the corpus and the measured results are in
+[docs/performance.md](docs/performance.md); **read it before optimising anything**, because four of
+the five budgeted operations have one to two orders of magnitude of headroom and the measurement is
+what says so.
 
 ## How to write code here
 

@@ -3,7 +3,8 @@
 A map for a cold start: what exists, where it lives, and which invariants constrain a change. The
 language itself is specified in [Protolang_Spec/](Protolang_Spec/README.md); how to write code here is in
 [CLAUDE.md](CLAUDE.md); the per-issue process for the editor-support epic is in
-[docs/epic-47-workflow.md](docs/epic-47-workflow.md).
+[docs/epic-47-workflow.md](docs/epic-47-workflow.md); what the server is held to for latency, and
+what that was measured to be, is in [docs/performance.md](docs/performance.md).
 
 ProtoLang compiles small methods written against protobuf messages into equivalent C# and C++.
 Behavior is defined once and generated per target, and it has to mean the same thing in each.
@@ -299,8 +300,9 @@ lookup rather than each doing it: `SymbolOccurrences` turns a caret into a symbo
 symbol is written, one sends locations and the other sends ranges to tint. Being semantic rather than
 textual falls out of that rather than being implemented — identity is a `SymbolId` and never a
 spelling, so two locals of one name in sibling blocks answer separately and a name inside a string
-answers not at all. The reference index is consulted directly and nothing is cached on top of it;
-#57 is what decides whether that needs to change.
+answers not at all. The reference index is consulted directly and nothing is cached on top of it, which
+#57 measured and confirmed: 1.2 ms at p95 on a file ten times normal size, against a 20 ms budget.
+A cache here would buy latency nobody can perceive.
 
 Signature help is the one that cannot ask the tree. A call being typed has no closing parenthesis, and
 the tree records no comma positions, no span for the argument list and no flag saying the parenthesis
@@ -333,7 +335,10 @@ compile stops waiting on `protoc` and gives its worker back at once; everything 
 milliseconds and simply finishes into the discard. The queue holds one entry per document and a new
 request supersedes the last, so it cannot outgrow the number of open documents, and `Pending`,
 `InFlight` and `PeakInFlight` publish the backlog, what is running and the high-water mark. The
-interval and the concurrency limit are still #57's to pin.
+interval and the concurrency limit were #57's to pin and both stand: a whole-buffer compile is 33 ms
+at p95, so the quarter-second debounce is almost all of the delay a reader feels, and four concurrent
+cold loads cost roughly two pool threads each — measured on sixteen processors, which is the best
+case rather than the typical one.
 
 Diagnostics are published *per file* and produced *per compilation*, and the two stop lining up as
 soon as a `.proto` can be blamed, so
@@ -368,8 +373,9 @@ lazy, reads each entry's kind from the same directory scan that found it, and ca
 entries examined**, because one level bounds depth and not breadth, and a root pointed at a vendored
 tree or a network mount is one somebody will point at one. A walk that stops on its budget says so:
 completion offers what it saw, since the list is already declared incomplete, and the near match
-offers nothing, since the nearest of a partial reading is not the nearest. `#57` pins the figure for
-both. The same catalog names that near match on `PL0002`, so the terminal and the editor say the
+offers nothing, since the nearest of a partial reading is not the nearest. That figure is one of the
+few #57 did **not** measure, and `docs/performance.md` says so: a walk bounded against a vendored
+tree or a network mount is not something this repository's own directories can say anything about. The same catalog names that near match on `PL0002`, so the terminal and the editor say the
 same thing about a path that resolved to nothing. Nothing here compiles, and this is the first
 request that can go stale between reading the buffer and answering, so it re-checks the version and
 refuses with `ContentModified` rather than inserting text at an offset that has stopped meaning what

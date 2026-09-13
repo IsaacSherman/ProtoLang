@@ -25,7 +25,9 @@ namespace ProtoLang.LanguageServer.Hosting;
 /// <b>What it costs is one scan and one lookup.</b> Finding the symbol is a walk of the names in the
 /// file; the occurrences of that symbol are a dictionary hit. Both read an index that was built when
 /// the buffer was last compiled and is shared by every question asked about it since, so a caret
-/// moving through an unedited file rebuilds nothing. #57 is where that becomes a number.
+/// moving through an unedited file rebuilds nothing. #57 made that a number: zero further
+/// compilations, asserted on every build by <c>PerformanceCostTests</c>, and 1.2 ms at p95 for the
+/// scan and the lookup on a symbol with 516 references.
 /// </para>
 /// </remarks>
 internal sealed record SymbolOccurrences(

@@ -12,7 +12,9 @@ namespace ProtoLang.Semantics;
 /// Shaped like <see cref="PositionSearch"/> and for the same reason -- no state, nothing built, one
 /// function of a module and an offset. Every question here is positional and the answer is a filter
 /// over one flat list, so an index would be a structure to invalidate in exchange for a scan that is
-/// already linear in the method body. #57 is the issue that would measure a need for more.
+/// already linear in the method body. #57 measured whether more was needed and it is not -- though
+/// completion, which is the heaviest consumer of this, is the one operation near its budget on the
+/// stress corpus, so this is the scan to look at first if that row ever goes over.
 /// </para>
 /// <para>
 /// <b>It applies a rule; it does not re-derive one.</b> Which names entered scope, and between which

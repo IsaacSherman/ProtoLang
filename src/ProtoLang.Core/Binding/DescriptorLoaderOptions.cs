@@ -17,9 +17,11 @@ public sealed record DescriptorLoaderOptions
     /// <para>
     /// Generous, because it bounds a cold run over a large closure on a machine that has not read
     /// those files before, and a budget that fires on slow-but-working input turns a delay into an
-    /// error. It is a backstop, not a latency target: #57 pins the numbers a language server is held
-    /// to, and #54 owns supervision properly -- cancellation, cleanup of abandoned runs, and bounded
-    /// concurrency.
+    /// error. It is a backstop, not a latency target, and #57 confirmed that it is one: a cold load
+    /// of the examples' closure is twenty-odd milliseconds, three orders of magnitude under this, so
+    /// nothing normal approaches it and it exists for a hung process rather than a slow one. The
+    /// numbers a language server is actually held to are in <c>docs/performance.md</c>, and #54 owns
+    /// supervision properly -- cancellation, cleanup of abandoned runs, and bounded concurrency.
     /// </para>
     /// <para>
     /// There is deliberately no way to say "wait forever". A compiler an editor calls on every

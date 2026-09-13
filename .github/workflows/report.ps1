@@ -26,6 +26,11 @@ param(
 
     # Tests that exist to be run here, by substring of their fully qualified name. A run that skips
     # one of these is a run whose gate did not open.
+    #
+    # PROTOLANG_BENCH is deliberately absent. It measures wall-clock latency, and a deadline on a
+    # shared runner flakes until somebody loosens it past the point of describing anything. What CI
+    # checks of the performance work is PerformanceCostTests, which counts work rather than time and
+    # runs unconditionally. See docs/performance.md.
     [string[]] $Required = @(
         'EveryItemOfferedAnywhereInTheCorpusBindsWhenItIsAccepted',
         'ALongSessionOfEditingLeavesNoBacklogProcessesOrTemporaryFiles')
